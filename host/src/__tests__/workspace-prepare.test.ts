@@ -55,7 +55,11 @@ describe("workspace.prepareFolders", () => {
   it("canonicalizes, probes, and deduplicates folders for v1.0 and v1.1 callers", async () => {
     const fixture = createWorkspaceFixture(tempRoots);
     const state = new HostState("host-local", undefined, undefined);
-    const { handleMethod } = createHandlers(state, scriptedTurnRunner([]));
+    const { handleMethod } = createHandlers(
+      state,
+      scriptedTurnRunner([]),
+      undefined,
+    );
     const folderPaths = [
       "   ",
       `  ${fixture.repoChild}  `,
@@ -129,7 +133,11 @@ describe("workspace.prepareFolders", () => {
   it("keeps a non-Git folder and rejects a file path", async () => {
     const fixture = createWorkspaceFixture(tempRoots);
     const state = new HostState("host-local", undefined, undefined);
-    const { handleMethod } = createHandlers(state, scriptedTurnRunner([]));
+    const { handleMethod } = createHandlers(
+      state,
+      scriptedTurnRunner([]),
+      undefined,
+    );
 
     const plain = await dispatchRequest({
       method: "workspace.prepareFolders",
@@ -190,7 +198,11 @@ describe("workspace.prepareFolders", () => {
       "https://gitlab.com/traycer-test/workspace-repo.git",
     ]);
     const state = new HostState("host-local", undefined, undefined);
-    const { handleMethod } = createHandlers(state, scriptedTurnRunner([]));
+    const { handleMethod } = createHandlers(
+      state,
+      scriptedTurnRunner([]),
+      undefined,
+    );
 
     const prepared = await dispatchRequest({
       method: "workspace.prepareFolders",

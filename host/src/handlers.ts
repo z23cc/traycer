@@ -1,20 +1,33 @@
 import { ALL_PERMISSION_MODES } from "@traycer/protocol/persistence/epic/foundation";
+import type { ZodType } from "zod";
 import {
+  createCommentThreadRequestSchema,
   createArtifactRequestSchema,
   createChatRequestSchemaV11,
   createEpicRequestSchema,
   deleteArtifactRequestSchema,
+  deleteCommentRequestSchema,
+  deleteCommentThreadRequestSchema,
   deleteChatRequestSchema,
+  editCommentRequestSchema,
+  listCommentThreadsRequestSchema,
   renameArtifactRequestSchema,
   renameChatRequestSchema,
   reparentArtifactRequestSchema,
   reparentChatRequestSchema,
+  replyToCommentThreadRequestSchema,
+  resolveArtifactByPathRequestSchema,
   setChatArchivedRequestSchema,
+  setCommentThreadResolvedRequestSchema,
   updateArtifactStatusRequestSchema,
   updateChatProfileRequestSchema,
   updateChatRunSettingsRequestSchemaV11,
   updateEpicRequestSchema,
 } from "@traycer/protocol/host/epic/unary-schemas";
+import {
+  commentsListThreadsRequestSchema,
+  commentsSetThreadStatusRequestSchema,
+} from "@traycer/protocol/host/comments";
 import { getChatRunSettingsRequestSchema } from "@traycer/protocol/host/epic/chat-records";
 import {
   listGuiAgentCommandsRequestSchema,
@@ -22,12 +35,30 @@ import {
 } from "@traycer/protocol/host/agent/gui/unary-schemas";
 import {
   A2A_MESSAGE_MAX_UTF8_BYTES,
+  agentSelectionGuideGlobalGetRequestSchema,
+  agentSelectionGuideGlobalOnboardingDraftGetRequestSchema,
+  agentSelectionGuideGlobalResetRequestSchema,
+  agentSelectionGuideGlobalSetRequestSchema,
+  agentSelectionGuideRequestSchema,
   createAgentRequestSchemaV30,
+  getAgentTranscriptRequestSchema,
+  forkAgentRequestSchema,
   listAgentsRequestSchema,
+  listHarnessModelsRequestSchema,
   sendAgentMessageRequestSchema,
+  stopAgentRequestSchema,
   utf8ByteLength,
 } from "@traycer/protocol/host/agent/shared";
-import { gitListChangedFilesRequestSchema } from "@traycer/protocol/host/git-schemas";
+import {
+  agentConfigureRequestSchemaV20,
+  agentGetProviderProfileRateLimitsRequestSchema,
+  agentListProviderProfilesRequestSchema,
+} from "@traycer/protocol/host/agent/profiles";
+import {
+  gitGetFileDiffRequestSchema,
+  gitGetFileDiffsRequestSchema,
+  gitListChangedFilesRequestSchema,
+} from "@traycer/protocol/host/git-schemas";
 import { hostNotificationsListRequestSchema } from "@traycer/protocol/host/notifications/host-notifications";
 import {
   workspaceListDirectoryRequestSchema,
@@ -48,8 +79,14 @@ import {
 import { listWorkspaceDirectory, readWorkspaceFile } from "./workspace-fs";
 import { resolveHarnessExecutable } from "./cli-resolve";
 import { probeGitCapabilities } from "./git-probe";
+import { listGitChangedFiles } from "./git-status";
+import { getGitFileDiff, getGitFileDiffs } from "./git-diff";
 import { listWorktreeBranches } from "./git-branches";
-import { isLocalGuiHarnessId, localGuiModelsFor } from "./gui-model-catalog";
+import {
+  isLocalGuiHarnessId,
+  localGuiModelsFor,
+  localHarnessModelSummariesFor,
+} from "./gui-model-catalog";
 import {
   readWorktreeScriptsAtRefs,
   summarizeWorktreeWorkspacePaths,
@@ -60,6 +97,11 @@ import { HostState, StoreError } from "./store";
 import { launchChatTurn } from "./turn";
 import { materializeWorktreeIntentOrThrow } from "./worktree-intent";
 import { prepareWorkspaceFolders } from "./workspace-prepare";
+import type { AgentSelectionGuideStore } from "./agent-selection-guide";
+import {
+  localProviderProfilesFor,
+  localProviderRateLimitsFor,
+} from "./local-provider-profiles";
 
 export type HandlerResult =
   | { readonly ok: true; readonly result: unknown }
@@ -189,6 +231,24 @@ function listGuiCommands(params: unknown): HandlerResult {
   };
 }
 
+function listHarnessModels(params: unknown): HandlerResult {
+  const parsed = listHarnessModelsRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      code: "E_INVALID_ARGUMENT",
+      message: parsed.error.message,
+    };
+  }
+  return {
+    ok: true,
+    result: {
+      harnessId: parsed.data.harnessId,
+      models: localHarnessModelSummariesFor(parsed.data.harnessId),
+    },
+  };
+}
+
 function modelsFor(harnessId: string): unknown[] {
   return isLocalGuiHarnessId(harnessId)
     ? [...localGuiModelsFor(harnessId)]
@@ -203,9 +263,24 @@ function unimplemented(method: string): HandlerResult {
   };
 }
 
+function parsedStoreRequest<T>(
+  schema: ZodType<T>,
+  params: unknown,
+  action: (request: T) => unknown,
+): HandlerResult {
+  const parsed = schema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  try {
+    return { ok: true, result: action(parsed.data) };
+  } catch (error) {
+    return storeFailure(error);
+  }
+}
+
 export function createHandlers(
   state: HostState,
   runner: TurnRunner,
+  selectionGuide: AgentSelectionGuideStore | undefined,
 ): {
   readonly handleMethod: MethodDispatcher;
 } {
@@ -217,9 +292,31 @@ export function createHandlers(
     "agent.gui.listModels": listGuiModels,
     "agent.gui.listCommands": listGuiCommands,
     "agent.create": (params) => createAgent(state, params),
+    "agent.configure": (params) => configureAgent(state, params),
+    "agent.fork": (params) => forkAgent(state, params),
     "agent.list": (params) => listAgents(state, params),
+    "agent.listHarnessModels": (params) => listHarnessModels(params),
+    "agent.listProviderProfiles": (params) =>
+      listProviderProfiles(state, params),
+    "agent.getProviderProfileRateLimits": (params) =>
+      getProviderProfileRateLimits(state, params),
+    "agent.getTranscript": (params) => getAgentTranscript(state, params),
     "agent.sendMessage": (params) => sendAgentMessage(state, runner, params),
+    "agent.stop": (params) => stopAgent(state, params),
+    "agent.selectionGuide": (params) =>
+      resolveAgentSelectionGuide(state, selectionGuide, params),
+    "agent.selectionGuide.getGlobal": (params) =>
+      getGlobalAgentSelectionGuide(selectionGuide, params),
+    "agent.selectionGuide.getGlobalOnboardingDraft": (params) =>
+      getAgentSelectionGuideOnboardingDraft(selectionGuide, params),
+    "agent.selectionGuide.setGlobal": (params) =>
+      setGlobalAgentSelectionGuide(selectionGuide, params),
+    "agent.selectionGuide.resetGlobalToDefault": (params) =>
+      resetGlobalAgentSelectionGuide(selectionGuide, params),
     "git.getCapabilities": (params) => gitCapabilities(params),
+    "git.listChangedFiles": (params) => gitChangedFiles(params),
+    "git.getFileDiff": (params) => gitFileDiff(params),
+    "git.getFileDiffs": (params) => gitFileDiffs(params),
     "worktree.listAllForHost": () => ({
       ok: true,
       result: { worktrees: [], nextCursor: null },
@@ -242,6 +339,52 @@ export function createHandlers(
     "workspace.readFile": (params) => readFile(params),
     "epic.create": (params) => createEpic(state, runner, params),
     "epic.createArtifact": (params) => createArtifact(state, params),
+    "epic.createCommentThread": (params) =>
+      parsedStoreRequest(createCommentThreadRequestSchema, params, (request) =>
+        state.createCommentThread(request),
+      ),
+    "epic.replyToCommentThread": (params) =>
+      parsedStoreRequest(replyToCommentThreadRequestSchema, params, (request) =>
+        state.replyToCommentThread(request),
+      ),
+    "epic.editComment": (params) =>
+      parsedStoreRequest(editCommentRequestSchema, params, (request) =>
+        state.editComment(request),
+      ),
+    "epic.deleteComment": (params) =>
+      parsedStoreRequest(deleteCommentRequestSchema, params, (request) =>
+        state.deleteComment(request),
+      ),
+    "epic.setCommentThreadResolved": (params) =>
+      parsedStoreRequest(
+        setCommentThreadResolvedRequestSchema,
+        params,
+        (request) => state.setCommentThreadResolved(request),
+      ),
+    "epic.deleteCommentThread": (params) =>
+      parsedStoreRequest(deleteCommentThreadRequestSchema, params, (request) =>
+        state.deleteCommentThread(request),
+      ),
+    "epic.listCommentThreads": (params) =>
+      parsedStoreRequest(listCommentThreadsRequestSchema, params, (request) =>
+        state.listCommentThreads(request),
+      ),
+    "comments.listThreads": (params) =>
+      parsedStoreRequest(commentsListThreadsRequestSchema, params, (request) =>
+        state.listCommentThreadsByPath(request),
+      ),
+    "comments.setThreadStatus": (params) =>
+      parsedStoreRequest(
+        commentsSetThreadStatusRequestSchema,
+        params,
+        (request) => state.setCommentThreadStatusByPath(request),
+      ),
+    "epic.resolveArtifactByPath": (params) =>
+      parsedStoreRequest(
+        resolveArtifactByPathRequestSchema,
+        params,
+        (request) => state.resolveArtifactByPath(request),
+      ),
     "epic.deleteArtifact": (params) => deleteArtifact(state, params),
     "epic.renameArtifact": (params) => renameArtifact(state, params),
     "epic.reparentArtifact": (params) => reparentArtifact(state, params),
@@ -271,6 +414,183 @@ export function createHandlers(
       return handler(params);
     },
   };
+}
+
+function listProviderProfiles(
+  state: HostState,
+  params: unknown,
+): HandlerResult {
+  const parsed = agentListProviderProfilesRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return invalidArgument(parsed.error.message);
+  }
+  try {
+    state.listAgents({
+      epicId: parsed.data.epicId,
+      senderAgentId: parsed.data.senderAgentId,
+      scope: "user",
+    });
+    return {
+      ok: true,
+      result: localProviderProfilesFor(parsed.data.harnessId),
+    };
+  } catch (error) {
+    return storeFailure(error);
+  }
+}
+
+function configureAgent(state: HostState, params: unknown): HandlerResult {
+  const parsed = agentConfigureRequestSchemaV20.safeParse(params);
+  if (!parsed.success) {
+    return invalidArgument(parsed.error.message);
+  }
+  try {
+    return { ok: true, result: state.configureAgent(parsed.data) };
+  } catch (error) {
+    return storeFailure(error);
+  }
+}
+
+async function forkAgent(
+  state: HostState,
+  params: unknown,
+): Promise<HandlerResult> {
+  const parsed = forkAgentRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return invalidArgument(parsed.error.message);
+  }
+  try {
+    return { ok: true, result: await state.forkAgent(parsed.data) };
+  } catch (error) {
+    return storeFailure(error);
+  }
+}
+
+function getProviderProfileRateLimits(
+  state: HostState,
+  params: unknown,
+): HandlerResult {
+  const parsed =
+    agentGetProviderProfileRateLimitsRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return invalidArgument(parsed.error.message);
+  }
+  try {
+    state.listAgents({
+      epicId: parsed.data.epicId,
+      senderAgentId: parsed.data.senderAgentId,
+      scope: "user",
+    });
+    return {
+      ok: true,
+      result: localProviderRateLimitsFor(
+        parsed.data.harnessId,
+        parsed.data.profileSelection,
+      ),
+    };
+  } catch (error) {
+    return storeFailure(error);
+  }
+}
+
+async function resolveAgentSelectionGuide(
+  state: HostState,
+  selectionGuide: AgentSelectionGuideStore | undefined,
+  params: unknown,
+): Promise<HandlerResult> {
+  const parsed = agentSelectionGuideRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return invalidArgument(parsed.error.message);
+  }
+  if (selectionGuide === undefined) {
+    return unimplemented("agent.selectionGuide");
+  }
+  try {
+    state.listAgents({ ...parsed.data, scope: "user" });
+    return { ok: true, result: await selectionGuide.getForAgent() };
+  } catch (error) {
+    return storeFailure(error);
+  }
+}
+
+async function getGlobalAgentSelectionGuide(
+  selectionGuide: AgentSelectionGuideStore | undefined,
+  params: unknown,
+): Promise<HandlerResult> {
+  const parsed = agentSelectionGuideGlobalGetRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return invalidArgument(parsed.error.message);
+  }
+  return await selectionGuideResult(
+    selectionGuide,
+    "agent.selectionGuide.getGlobal",
+    (store) => store.getGlobal(),
+  );
+}
+
+async function getAgentSelectionGuideOnboardingDraft(
+  selectionGuide: AgentSelectionGuideStore | undefined,
+  params: unknown,
+): Promise<HandlerResult> {
+  const parsed =
+    agentSelectionGuideGlobalOnboardingDraftGetRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return invalidArgument(parsed.error.message);
+  }
+  return await selectionGuideResult(
+    selectionGuide,
+    "agent.selectionGuide.getGlobalOnboardingDraft",
+    (store) => store.getOnboardingDraft(),
+  );
+}
+
+async function setGlobalAgentSelectionGuide(
+  selectionGuide: AgentSelectionGuideStore | undefined,
+  params: unknown,
+): Promise<HandlerResult> {
+  const parsed = agentSelectionGuideGlobalSetRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return invalidArgument(parsed.error.message);
+  }
+  return await selectionGuideResult(
+    selectionGuide,
+    "agent.selectionGuide.setGlobal",
+    (store) => store.setGlobal(parsed.data.content),
+  );
+}
+
+async function resetGlobalAgentSelectionGuide(
+  selectionGuide: AgentSelectionGuideStore | undefined,
+  params: unknown,
+): Promise<HandlerResult> {
+  const parsed = agentSelectionGuideGlobalResetRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return invalidArgument(parsed.error.message);
+  }
+  return await selectionGuideResult(
+    selectionGuide,
+    "agent.selectionGuide.resetGlobalToDefault",
+    (store) => store.resetGlobal(),
+  );
+}
+
+async function selectionGuideResult(
+  selectionGuide: AgentSelectionGuideStore | undefined,
+  method: string,
+  operation: (store: AgentSelectionGuideStore) => Promise<unknown>,
+): Promise<HandlerResult> {
+  if (selectionGuide === undefined) {
+    return unimplemented(method);
+  }
+  try {
+    return { ok: true, result: await operation(selectionGuide) };
+  } catch (error) {
+    return storeFailure(error);
+  }
+}
+
+function invalidArgument(message: string): HandlerResult {
+  return { ok: false, code: "E_INVALID_ARGUMENT", message };
 }
 
 async function createAgent(
@@ -303,6 +623,25 @@ function listAgents(state: HostState, params: unknown): HandlerResult {
   }
   try {
     return { ok: true, result: state.listAgents(parsed.data) };
+  } catch (error) {
+    return storeFailure(error);
+  }
+}
+
+async function getAgentTranscript(
+  state: HostState,
+  params: unknown,
+): Promise<HandlerResult> {
+  const parsed = getAgentTranscriptRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      code: "E_INVALID_ARGUMENT",
+      message: parsed.error.message,
+    };
+  }
+  try {
+    return { ok: true, result: await state.getAgentTranscript(parsed.data) };
   } catch (error) {
     return storeFailure(error);
   }
@@ -341,6 +680,25 @@ async function sendAgentMessage(
         return { ok: true, result: delivery.response };
       },
     );
+  } catch (error) {
+    return storeFailure(error);
+  }
+}
+
+async function stopAgent(
+  state: HostState,
+  params: unknown,
+): Promise<HandlerResult> {
+  const parsed = stopAgentRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      code: "E_INVALID_ARGUMENT",
+      message: parsed.error.message,
+    };
+  }
+  try {
+    return { ok: true, result: await state.stopAgent(parsed.data) };
   } catch (error) {
     return storeFailure(error);
   }
@@ -481,6 +839,36 @@ function gitCapabilities(params: unknown): HandlerResult {
     };
   }
   return { ok: true, result: probeGitCapabilities(parsed.data.runningDir) };
+}
+
+function gitChangedFiles(params: unknown): HandlerResult {
+  const parsed = gitListChangedFilesRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  try {
+    return { ok: true, result: listGitChangedFiles(parsed.data) };
+  } catch (error) {
+    return storeFailure(error);
+  }
+}
+
+function gitFileDiff(params: unknown): HandlerResult {
+  const parsed = gitGetFileDiffRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  try {
+    return { ok: true, result: getGitFileDiff(parsed.data) };
+  } catch (error) {
+    return storeFailure(error);
+  }
+}
+
+function gitFileDiffs(params: unknown): HandlerResult {
+  const parsed = gitGetFileDiffsRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  try {
+    return { ok: true, result: getGitFileDiffs(parsed.data) };
+  } catch (error) {
+    return storeFailure(error);
+  }
 }
 
 function getBinding(state: HostState, params: unknown): HandlerResult {

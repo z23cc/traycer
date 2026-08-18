@@ -1,4 +1,8 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import {
+  spawn,
+  spawnSync,
+  type ChildProcessWithoutNullStreams,
+} from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createInterface, type Interface } from "node:readline";
 import type { TurnChunk, TurnRequest, TurnResult } from "./cli-runner";
@@ -22,6 +26,8 @@ const APPROVAL_POLICY = {
 } as const;
 
 const INITIALIZE_TIMEOUT_MS = 30_000;
+const CODEX_VERSION_TIMEOUT_MS = 3_000;
+const codexDirectA2ASupport = new Map<string, boolean>();
 
 export function runCodexAppServer(
   command: string,
@@ -31,7 +37,7 @@ export function runCodexAppServer(
 ): Promise<TurnResult> {
   return runCodexAppServerWithArgs(
     command,
-    codexAppServerArgs(null),
+    codexAppServerArgs(command, null, env),
     request,
     emit,
     env,
@@ -47,7 +53,7 @@ export function runCodexAppServerWithAgentA2A(
 ): Promise<TurnResult> {
   return runCodexAppServerWithArgs(
     command,
-    codexAppServerArgs(mcpUrl),
+    codexAppServerArgs(command, mcpUrl, env),
     request,
     emit,
     env,
@@ -471,18 +477,78 @@ class CodexTransport {
   }
 }
 
-function codexAppServerArgs(mcpUrl: string | null): string[] {
-  const command = ["app-server", "--listen", "stdio://"];
+function codexAppServerArgs(
+  executable: string,
+  mcpUrl: string | null,
+  env: NodeJS.ProcessEnv,
+): string[] {
+  const baseCommand = ["app-server", "--listen", "stdio://"];
   if (mcpUrl === null) {
-    return command;
+    return baseCommand;
   }
-  return [
+  const a2aArgs = [
     "-c",
     `mcp_servers.traycer_a2a.url=${JSON.stringify(mcpUrl)}`,
     "-c",
     'mcp_servers.traycer_a2a.bearer_token_env_var="TRAYCER_A2A_MCP_TOKEN"',
-    ...command,
+    "-c",
+    "mcp_servers.traycer_a2a.tool_timeout_sec=31536000",
   ];
+  if (codexSupportsDirectA2ATools(executable, env)) {
+    a2aArgs.push(
+      "-c",
+      'features.code_mode.direct_only_tool_namespaces=["mcp__traycer_a2a","traycer_a2a"]',
+    );
+  }
+  return [
+    ...a2aArgs,
+    "-c",
+    "tools.experimental_request_user_input.enabled=false",
+    ...baseCommand,
+  ];
+}
+
+function codexSupportsDirectA2ATools(
+  command: string,
+  env: NodeJS.ProcessEnv,
+): boolean {
+  const cached = codexDirectA2ASupport.get(command);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const result = spawnSync(command, ["--version"], {
+    encoding: "utf8",
+    env,
+    timeout: CODEX_VERSION_TIMEOUT_MS,
+  });
+  const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  const match = output.match(/\bcodex(?:-cli)?\s+(\d+)\.(\d+)\.(\d+)\b/i);
+  if (result.status !== 0 || match === null) {
+    return false;
+  }
+  const supported = versionAtLeast(
+    [Number(match[1]), Number(match[2]), Number(match[3])],
+    [0, 142, 0],
+  );
+  codexDirectA2ASupport.set(command, supported);
+  return supported;
+}
+
+function versionAtLeast(
+  actual: readonly [number, number, number],
+  minimum: readonly [number, number, number],
+): boolean {
+  for (let index = 0; index < actual.length; index += 1) {
+    const actualPart = actual[index];
+    const minimumPart = minimum[index];
+    if (actualPart === undefined || minimumPart === undefined) {
+      return false;
+    }
+    if (actualPart !== minimumPart) {
+      return actualPart > minimumPart;
+    }
+  }
+  return true;
 }
 
 function workspaceRoots(cwd: string | null): string[] {

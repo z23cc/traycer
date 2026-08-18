@@ -1,4 +1,8 @@
 import type { GuiAgentModelOption } from "@traycer/protocol/host/agent/gui/unary-schemas";
+import type {
+  AgentFacingHarnessId,
+  HarnessModelSummary,
+} from "@traycer/protocol/host/agent/shared";
 
 export type LocalGuiHarnessId = "claude" | "codex";
 
@@ -26,6 +30,23 @@ export function localGuiModelsFor(
   harnessId: LocalGuiHarnessId,
 ): readonly LocalGuiModel[] {
   return harnessId === "claude" ? CLAUDE_MODELS : CODEX_MODELS;
+}
+
+export function localHarnessModelSummariesFor(
+  harnessId: AgentFacingHarnessId,
+): HarnessModelSummary[] {
+  if (!isLocalGuiHarnessId(harnessId)) {
+    return [];
+  }
+  return localGuiModelsFor(harnessId).map((model) => ({
+    id: model.slug,
+    reasoningEfforts: model.supportedReasoningEfforts.map(
+      (effort) => effort.id,
+    ),
+    fastModeAvailable: model.supportedServiceTiers.some(
+      (tier) => tier.id === "fast" || tier.id === "priority",
+    ),
+  }));
 }
 
 function model(

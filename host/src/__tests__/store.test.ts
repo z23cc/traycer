@@ -30,6 +30,90 @@ describe("HostState chat sinks", () => {
 });
 
 describe("HostState agent directory", () => {
+  it("updates future settings during an active turn but refuses its workspace rebind", async () => {
+    const workspace = await mkdtemp(
+      join(tmpdir(), "traycer-configure-active-"),
+    );
+    const state = stateWithEpic();
+    const settings = {
+      harnessId: "codex" as const,
+      model: "gpt-5.4",
+      permissionMode: "full_access" as const,
+      reasoningEffort: null,
+      serviceTier: null,
+      agentMode: "regular" as const,
+      profileId: null,
+    };
+    for (const chatId of ["configure-sender", "configure-target"]) {
+      state.createChat({
+        epicId: "epic-1",
+        chatId,
+        parentId: null,
+        hostId: "host-local",
+        title: chatId,
+        settings,
+        initialMessage: null,
+      });
+    }
+    state.reserveTurn("epic-1", "configure-target");
+
+    try {
+      await expect(
+        state.configureAgentFromAgent({
+          epicId: "epic-1",
+          senderAgentId: "configure-sender",
+          agentId: "configure-target",
+          harnessId: "claude",
+          model: "claude-sonnet-4",
+          profileSelection: { kind: "ambient" },
+          reasoningEffort: null,
+          fastMode: false,
+          permissionMode: "auto_accept_edits",
+          workspace: {
+            entries: [{ path: workspace, workspacePath: null }],
+          },
+        }),
+      ).rejects.toMatchObject({
+        code: "WORKTREE_REBIND_BLOCKED",
+        message: "Stop the active chat run before rebinding its worktree.",
+      });
+      expect(state.getChat("epic-1", "configure-target")?.settings).toEqual(
+        settings,
+      );
+
+      await expect(
+        state.configureAgentFromAgent({
+          epicId: "epic-1",
+          senderAgentId: "configure-sender",
+          agentId: "configure-target",
+          harnessId: "claude",
+          model: "claude-sonnet-4",
+          profileSelection: { kind: "ambient" },
+          reasoningEffort: null,
+          fastMode: false,
+          permissionMode: "auto_accept_edits",
+          workspace: null,
+        }),
+      ).resolves.toMatchObject({
+        settings: {
+          harnessId: "claude",
+          model: "claude-sonnet-4",
+          permissionMode: "auto_accept_edits",
+        },
+      });
+      expect(state.getChat("epic-1", "configure-target")?.settings).toEqual({
+        ...settings,
+        harnessId: "claude",
+        model: "claude-sonnet-4",
+        permissionMode: "auto_accept_edits",
+      });
+    } finally {
+      state.releaseTurn("epic-1", "configure-target");
+      state.dispose();
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   it("enumerates replicated GUI and TUI records with signed scope and capability gates", () => {
     const state = stateWithEpic();
     state.createChat({
@@ -926,6 +1010,383 @@ describe("HostState agent messages", () => {
       `agent.sendMessage: RESPONSE_ID_MISMATCH - '${responseId}' belongs to a different (sender, receiver) pair.`,
     );
     expect(state.hasInflightTurns()).toBe(false);
+    state.dispose();
+  });
+
+  it("guards and purges response threads across an agent.stop operation", async () => {
+    const state = stateWithEpic();
+    const settings = {
+      harnessId: "codex" as const,
+      model: "gpt-5.4",
+      permissionMode: "full_access" as const,
+      reasoningEffort: null,
+      serviceTier: null,
+      agentMode: "regular" as const,
+      profileId: null,
+    };
+    for (const [chatId, parentId] of [
+      ["stop-agent-a", null],
+      ["stop-agent-b", "stop-agent-a"],
+    ] as const) {
+      state.createChat({
+        epicId: "epic-1",
+        chatId,
+        parentId,
+        hostId: "host-local",
+        title: chatId,
+        settings,
+        initialMessage: null,
+      });
+      await state.setWorktreeEntryMode({
+        epicId: "epic-1",
+        ownerId: chatId,
+        ownerKind: "chat",
+        workspacePath: process.cwd(),
+      });
+    }
+    const opened = state.acceptAgentMessage({
+      epicId: "epic-1",
+      senderAgentId: "stop-agent-a",
+      receiverAgentId: "stop-agent-b",
+      prompt: "Open a thread before stopping",
+      responseId: null,
+      expectReply: true,
+    });
+    state.releaseTurn("epic-1", "stop-agent-b");
+    const responseId = opened.response.responseId;
+    if (responseId === null) {
+      throw new Error("Missing response id");
+    }
+    state.activateTurn({
+      epicId: "epic-1",
+      chatId: "stop-agent-a",
+      turn: {
+        turnId: "turn-stop-agent-a",
+        status: "running",
+        harnessId: "codex",
+        model: "gpt-5.4",
+        reasoningEffort: null,
+        serviceTier: null,
+        agentMode: "regular",
+        profileId: null,
+        userMessageId: "message-stop-agent-a",
+        startedAt: 1,
+        updatedAt: 1,
+        sameTurnSteeringSupported: false,
+      },
+    });
+
+    const stopping = state.stopAgent({
+      epicId: "epic-1",
+      agentId: "stop-agent-a",
+      cascade: false,
+    });
+    expect(() =>
+      state.acceptAgentMessage({
+        epicId: "epic-1",
+        senderAgentId: "stop-agent-b",
+        receiverAgentId: "stop-agent-a",
+        prompt: "Do not revive the stopping agent",
+        responseId,
+        expectReply: false,
+      }),
+    ).toThrowError(
+      `agent.sendMessage: RECEIVER_CANCELLING - 'stop-agent-a' is being stopped; the message was not delivered.`,
+    );
+    state.finishTurn("epic-1", "stop-agent-a");
+    await expect(stopping).resolves.toEqual({
+      stoppedAgentIds: ["stop-agent-a"],
+    });
+
+    expect(
+      state.acceptAgentMessage({
+        epicId: "epic-1",
+        senderAgentId: "stop-agent-a",
+        receiverAgentId: "stop-agent-b",
+        prompt: "The purged id is now only a literal correlation id",
+        responseId,
+        expectReply: false,
+      }),
+    ).toMatchObject({
+      response: { responseId: null },
+      pendingTurn: { chatId: "stop-agent-b" },
+    });
+    state.releaseTurn("epic-1", "stop-agent-b");
+    expect(state.hasInflightTurns()).toBe(false);
+    state.dispose();
+  });
+
+  it("lets an agent stop only same-user local descendants", async () => {
+    const state = stateWithEpic();
+    const settings = {
+      harnessId: "codex" as const,
+      model: "gpt-5.4",
+      permissionMode: "full_access" as const,
+      reasoningEffort: null,
+      serviceTier: null,
+      agentMode: "regular" as const,
+      profileId: null,
+    };
+    for (const [chatId, parentId] of [
+      ["caller-agent", null],
+      ["target-root-agent", null],
+      ["target-local-child", "target-root-agent"],
+      ["target-other-user", "target-root-agent"],
+      ["target-remote-child", "target-root-agent"],
+    ] as const) {
+      state.createChat({
+        epicId: "epic-1",
+        chatId,
+        parentId,
+        hostId: "host-local",
+        title: chatId,
+        settings,
+        initialMessage: null,
+      });
+    }
+    chatEntry(state, "target-other-user").set("userId", "other-user");
+    chatEntry(state, "target-remote-child").set("hostId", "remote-host");
+    for (const agentId of ["target-root-agent", "target-local-child"]) {
+      const signal = state.activateTurn({
+        epicId: "epic-1",
+        chatId: agentId,
+        turn: {
+          turnId: `turn-${agentId}`,
+          status: "running",
+          harnessId: "codex",
+          model: "gpt-5.4",
+          reasoningEffort: null,
+          serviceTier: null,
+          agentMode: "regular",
+          profileId: null,
+          userMessageId: `message-${agentId}`,
+          startedAt: 1,
+          updatedAt: 1,
+          sameTurnSteeringSupported: false,
+        },
+      });
+      signal.addEventListener(
+        "abort",
+        () => state.finishTurn("epic-1", agentId),
+        { once: true },
+      );
+    }
+
+    await expect(
+      state.stopAgentFromAgent({
+        epicId: "epic-1",
+        senderAgentId: "caller-agent",
+        agentId: "target-roo",
+        cascade: true,
+        archive: false,
+      }),
+    ).resolves.toEqual({
+      stoppedAgentIds: ["target-root-agent", "target-local-child"],
+      archivedAgentIds: [],
+      notArchivedAgentIds: [],
+      skippedAgentIds: ["target-other-user", "target-remote-child"],
+      failedAgentIds: [],
+    });
+    expect(state.getChat("epic-1", "target-root-agent")?.runStatus).toBe(
+      "idle",
+    );
+    expect(state.getChat("epic-1", "target-local-child")?.runStatus).toBe(
+      "idle",
+    );
+    expect(state.hasInflightTurns()).toBe(false);
+    state.dispose();
+  });
+
+  it("refuses to stop the calling agent without disturbing its turn", async () => {
+    const state = stateWithEpic();
+    state.createChat({
+      epicId: "epic-1",
+      chatId: "self-caller-agent",
+      parentId: null,
+      hostId: "host-local",
+      title: "Self caller",
+      settings: {
+        harnessId: "codex",
+        model: "gpt-5.4",
+        permissionMode: "full_access",
+        reasoningEffort: null,
+        serviceTier: null,
+        agentMode: "regular",
+        profileId: null,
+      },
+      initialMessage: null,
+    });
+    const signal = state.activateTurn({
+      epicId: "epic-1",
+      chatId: "self-caller-agent",
+      turn: {
+        turnId: "turn-self-caller",
+        status: "running",
+        harnessId: "codex",
+        model: "gpt-5.4",
+        reasoningEffort: null,
+        serviceTier: null,
+        agentMode: "regular",
+        profileId: null,
+        userMessageId: "message-self-caller",
+        startedAt: 1,
+        updatedAt: 1,
+        sameTurnSteeringSupported: false,
+      },
+    });
+
+    await expect(
+      state.stopAgentFromAgent({
+        epicId: "epic-1",
+        senderAgentId: "self-caller-agent",
+        agentId: "self-caller-agent",
+        cascade: true,
+        archive: true,
+      }),
+    ).rejects.toThrowError(
+      "traycer_stop_agent: TARGET_IS_SELF - 'self-caller-agent' is the calling agent, and stopping it would abort the very turn awaiting this call. Nothing was stopped. To retire yourself once your work is done, call traycer_archive_agent with your own agent id; to stop a child, address that child directly.",
+    );
+    expect(signal.aborted).toBe(false);
+    expect(state.getChat("epic-1", "self-caller-agent")?.runStatus).toBe(
+      "running",
+    );
+
+    state.finishTurn("epic-1", "self-caller-agent");
+    expect(state.hasInflightTurns()).toBe(false);
+    state.dispose();
+  });
+
+  it("refuses to archive another busy agent without stopping its turn", () => {
+    const state = stateWithEpic();
+    const settings = {
+      harnessId: "codex" as const,
+      model: "gpt-5.4",
+      permissionMode: "full_access" as const,
+      reasoningEffort: null,
+      serviceTier: null,
+      agentMode: "regular" as const,
+      profileId: null,
+    };
+    for (const chatId of ["archive-requester", "archive-busy-target"]) {
+      state.createChat({
+        epicId: "epic-1",
+        chatId,
+        parentId: null,
+        hostId: "host-local",
+        title: chatId,
+        settings,
+        initialMessage: null,
+      });
+    }
+    const signal = state.activateTurn({
+      epicId: "epic-1",
+      chatId: "archive-busy-target",
+      turn: {
+        turnId: "turn-archive-busy-target",
+        status: "running",
+        harnessId: "codex",
+        model: "gpt-5.4",
+        reasoningEffort: null,
+        serviceTier: null,
+        agentMode: "regular",
+        profileId: null,
+        userMessageId: "message-archive-busy-target",
+        startedAt: 1,
+        updatedAt: 1,
+        sameTurnSteeringSupported: false,
+      },
+    });
+
+    expect(() =>
+      state.archiveAgentFromAgent({
+        epicId: "epic-1",
+        senderAgentId: "archive-requester",
+        agentId: "archive-busy-target",
+      }),
+    ).toThrowError(
+      "AGENT_BUSY: traycer_archive_agent refused to archive agent 'archive-busy-target' - nothing was changed. Archiving would force the agent inactive in every list while its run kept going. A turn is in progress, or one is about to start. Stopping the agent clears a turn - but NOT a detached subagent, workflow or scheduled wake, which all survive a stop. Wait for it to go idle - or stop the agent - and retry.",
+    );
+    expect(signal.aborted).toBe(false);
+    expect(
+      state.getChat("epic-1", "archive-busy-target")?.archivedAt,
+    ).toBeNull();
+
+    state.finishTurn("epic-1", "archive-busy-target");
+    expect(state.hasInflightTurns()).toBe(false);
+    state.dispose();
+  });
+
+  it("archives the allowed subtree after an agent stop request settles", async () => {
+    const state = stateWithEpic();
+    const settings = {
+      harnessId: "codex" as const,
+      model: "gpt-5.4",
+      permissionMode: "full_access" as const,
+      reasoningEffort: null,
+      serviceTier: null,
+      agentMode: "regular" as const,
+      profileId: null,
+    };
+    for (const [chatId, parentId] of [
+      ["archive-caller", null],
+      ["archive-target", null],
+      ["archive-idle-child", "archive-target"],
+    ] as const) {
+      state.createChat({
+        epicId: "epic-1",
+        chatId,
+        parentId,
+        hostId: "host-local",
+        title: chatId,
+        settings,
+        initialMessage: null,
+      });
+    }
+    const signal = state.activateTurn({
+      epicId: "epic-1",
+      chatId: "archive-target",
+      turn: {
+        turnId: "turn-archive-target",
+        status: "running",
+        harnessId: "codex",
+        model: "gpt-5.4",
+        reasoningEffort: null,
+        serviceTier: null,
+        agentMode: "regular",
+        profileId: null,
+        userMessageId: "message-archive-target",
+        startedAt: 1,
+        updatedAt: 1,
+        sameTurnSteeringSupported: false,
+      },
+    });
+    signal.addEventListener(
+      "abort",
+      () => state.finishTurn("epic-1", "archive-target"),
+      { once: true },
+    );
+
+    await expect(
+      state.stopAgentFromAgent({
+        epicId: "epic-1",
+        senderAgentId: "archive-caller",
+        agentId: "archive-target",
+        cascade: true,
+        archive: true,
+      }),
+    ).resolves.toEqual({
+      stoppedAgentIds: ["archive-target"],
+      archivedAgentIds: ["archive-target", "archive-idle-child"],
+      notArchivedAgentIds: [],
+      skippedAgentIds: [],
+      failedAgentIds: [],
+    });
+    expect(state.getChat("epic-1", "archive-target")?.archivedAt).toEqual(
+      expect.any(Number),
+    );
+    expect(state.getChat("epic-1", "archive-idle-child")?.archivedAt).toEqual(
+      expect.any(Number),
+    );
     state.dispose();
   });
 });

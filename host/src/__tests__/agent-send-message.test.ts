@@ -23,6 +23,8 @@ import {
   listAgentsResponseSchemaV60,
   sendAgentMessageRequestSchema,
   sendAgentMessageResponseSchema,
+  stopAgentRequestSchema,
+  stopAgentResponseSchema,
 } from "@traycer/protocol/host/agent/shared";
 import {
   chatSubscribeClientFrameSchema,
@@ -1993,7 +1995,344 @@ describe("agent.sendMessage", () => {
       error: null,
     });
   });
+
+  it("stops an active GUI agent through the public agent.stop RPC", async () => {
+    const controlled = abortAwareRunner();
+    const server = await startHostServer(0, HOST_ID, {
+      runner: controlled.runner,
+    });
+    servers.push(server);
+    const connection = await openRpc(server.websocketUrl, sockets);
+    expect(connection.openAck).toMatchObject({
+      kind: "openAck",
+      manifest: { "agent.stop": { major: 1, minor: 0 } },
+    });
+    await createParentEpic(connection);
+    expect(
+      await rpc(
+        connection,
+        "stop-parent-settings",
+        "epic.updateChatRunSettings",
+        { major: 1, minor: 1 },
+        {
+          epicId: EPIC_ID,
+          chatId: SENDER_ID,
+          settings: {
+            harnessId: "codex",
+            model: "gpt-5.4",
+            permissionMode: "full_access",
+            reasoningEffort: null,
+            serviceTier: null,
+            agentMode: "regular",
+            profileId: null,
+          },
+        },
+      ),
+    ).toMatchObject({ kind: "response", error: null });
+
+    const stream = await openChatStream(
+      server.websocketUrl,
+      sockets,
+      SENDER_ID,
+    );
+    expect(
+      chatSubscribeServerFrameSchema.parse(
+        JSON.parse(await stream.pump.next()),
+      ),
+    ).toMatchObject({
+      kind: "snapshot",
+      snapshot: { runStatus: "idle", chat: { messages: [] } },
+    });
+    stream.ws.send(
+      JSON.stringify(
+        chatSubscribeClientFrameSchema.parse({
+          kind: "send",
+          hasBinaryPayload: false,
+          epicId: EPIC_ID,
+          chatId: SENDER_ID,
+          clientActionId: "stop-running-action",
+          messageId: "stop-running-message",
+          content: {
+            type: "doc",
+            content: [
+              {
+                type: "paragraph",
+                content: [
+                  { type: "text", text: "Keep working until stopped." },
+                ],
+              },
+            ],
+          },
+          sender: { type: "user", userId: "local-user" },
+          settings: {
+            harnessId: "codex",
+            model: "gpt-5.4",
+            permissionMode: "full_access",
+            reasoningEffort: null,
+            serviceTier: null,
+            agentMode: "regular",
+            profileId: null,
+          },
+          accountContext: { type: "PERSONAL" },
+        }),
+      ),
+    );
+    await controlled.started;
+
+    const stopFrame = await rpc(
+      connection,
+      "stop-running-agent",
+      "agent.stop",
+      { major: 1, minor: 0 },
+      stopAgentRequestSchema.parse({
+        epicId: EPIC_ID,
+        agentId: SENDER_ID,
+        cascade: false,
+      }),
+    );
+    expect(stopFrame).toMatchObject({ kind: "response", error: null });
+    expect(stopAgentResponseSchema.parse(responseResult(stopFrame))).toEqual({
+      stoppedAgentIds: [SENDER_ID],
+    });
+    expect(controlled.aborted()).toBe(true);
+
+    const completed = await waitForCompletedSnapshot(stream.pump, 2);
+    expect(completed.snapshot.runStatus).toBe("idle");
+    const listFrame = await rpc(
+      connection,
+      "list-after-stop",
+      "agent.list",
+      { major: 6, minor: 0 },
+      listAgentsRequestSchema.parse({
+        epicId: EPIC_ID,
+        senderAgentId: SENDER_ID,
+        scope: "user",
+      }),
+    );
+    expect(listFrame).toMatchObject({ kind: "response", error: null });
+    const listed = listAgentsResponseSchemaV60.parse(responseResult(listFrame));
+    expect(listed.agents.find((agent) => agent.id === SENDER_ID)).toMatchObject(
+      {
+        active: false,
+      },
+    );
+    const alreadyIdle = await rpc(
+      connection,
+      "stop-already-idle-agent",
+      "agent.stop",
+      { major: 1, minor: 0 },
+      stopAgentRequestSchema.parse({
+        epicId: EPIC_ID,
+        agentId: SENDER_ID,
+        cascade: false,
+      }),
+    );
+    expect(alreadyIdle).toMatchObject({ kind: "response", error: null });
+    expect(stopAgentResponseSchema.parse(responseResult(alreadyIdle))).toEqual({
+      stoppedAgentIds: [],
+    });
+  });
+
+  it("cascades agent.stop through active GUI descendants", async () => {
+    const controlled = multiAbortAwareRunner(2);
+    const server = await startHostServer(0, HOST_ID, {
+      runner: controlled.runner,
+    });
+    servers.push(server);
+    const connection = await openRpc(server.websocketUrl, sockets);
+    await createParentEpic(connection);
+    expect(
+      await rpc(
+        connection,
+        "cascade-parent-settings",
+        "epic.updateChatRunSettings",
+        { major: 1, minor: 1 },
+        {
+          epicId: EPIC_ID,
+          chatId: SENDER_ID,
+          settings: {
+            harnessId: "codex",
+            model: "gpt-5.4",
+            permissionMode: "full_access",
+            reasoningEffort: null,
+            serviceTier: null,
+            agentMode: "regular",
+            profileId: null,
+          },
+        },
+      ),
+    ).toMatchObject({ kind: "response", error: null });
+    const createFrame = await rpc(
+      connection,
+      "cascade-create-child",
+      "agent.create",
+      { major: 3, minor: 0 },
+      createAgentRequestSchemaV30.parse({
+        senderAgentId: SENDER_ID,
+        epicId: EPIC_ID,
+        name: "Cascade child",
+        surface: "gui",
+        harnessId: "codex",
+        model: "gpt-5.4",
+        agentMode: "regular",
+        reasoningEffort: null,
+        fastMode: null,
+        permissionMode: "full_access",
+        profileSelection: { kind: "ambient" },
+        workspace: null,
+      }),
+    );
+    expect(createFrame).toMatchObject({ kind: "response", error: null });
+    const childId = createAgentResponseSchema.parse(
+      responseResult(createFrame),
+    ).agentId;
+    const streams = await Promise.all(
+      [SENDER_ID, childId].map(async (chatId) => {
+        const stream = await openChatStream(
+          server.websocketUrl,
+          sockets,
+          chatId,
+        );
+        expect(
+          chatSubscribeServerFrameSchema.parse(
+            JSON.parse(await stream.pump.next()),
+          ),
+        ).toMatchObject({
+          kind: "snapshot",
+          snapshot: { runStatus: "idle", chat: { messages: [] } },
+        });
+        return { chatId, ...stream };
+      }),
+    );
+    for (const stream of streams) {
+      stream.ws.send(
+        JSON.stringify(
+          chatSubscribeClientFrameSchema.parse({
+            kind: "send",
+            hasBinaryPayload: false,
+            epicId: EPIC_ID,
+            chatId: stream.chatId,
+            clientActionId: `cascade-action-${stream.chatId}`,
+            messageId: `cascade-message-${stream.chatId}`,
+            content: {
+              type: "doc",
+              content: [
+                {
+                  type: "paragraph",
+                  content: [
+                    {
+                      type: "text",
+                      text: `Run ${stream.chatId} until stopped.`,
+                    },
+                  ],
+                },
+              ],
+            },
+            sender: { type: "user", userId: "local-user" },
+            settings: {
+              harnessId: "codex",
+              model: "gpt-5.4",
+              permissionMode: "full_access",
+              reasoningEffort: null,
+              serviceTier: null,
+              agentMode: "regular",
+              profileId: null,
+            },
+            accountContext: { type: "PERSONAL" },
+          }),
+        ),
+      );
+    }
+    await controlled.allStarted;
+
+    const stopped = await rpc(
+      connection,
+      "cascade-stop",
+      "agent.stop",
+      { major: 1, minor: 0 },
+      stopAgentRequestSchema.parse({
+        epicId: EPIC_ID,
+        agentId: SENDER_ID,
+        cascade: true,
+      }),
+    );
+    expect(stopped).toMatchObject({ kind: "response", error: null });
+    expect(stopAgentResponseSchema.parse(responseResult(stopped))).toEqual({
+      stoppedAgentIds: [SENDER_ID, childId],
+    });
+    expect(new Set(controlled.abortedAgentIds())).toEqual(
+      new Set([SENDER_ID, childId]),
+    );
+    for (const stream of streams) {
+      const completed = await waitForCompletedSnapshot(stream.pump, 2);
+      expect(completed.snapshot.runStatus).toBe("idle");
+    }
+  });
 });
+
+function abortAwareRunner(): {
+  readonly runner: TurnRunner;
+  readonly started: Promise<void>;
+  readonly aborted: () => boolean;
+} {
+  const started = deferredSignal();
+  let aborted = false;
+  return {
+    started: started.promise,
+    aborted: () => aborted,
+    runner: {
+      async run(request) {
+        started.resolve();
+        if (!request.signal.aborted) {
+          await new Promise<void>((resolve) => {
+            request.signal.addEventListener("abort", () => resolve(), {
+              once: true,
+            });
+          });
+        }
+        aborted = request.signal.aborted;
+        return { text: "", sessionId: null };
+      },
+    },
+  };
+}
+
+function multiAbortAwareRunner(expectedStarts: number): {
+  readonly runner: TurnRunner;
+  readonly allStarted: Promise<void>;
+  readonly abortedAgentIds: () => string[];
+} {
+  const allStarted = deferredSignal();
+  const startedAgentIds = new Set<string>();
+  const abortedAgentIds: string[] = [];
+  return {
+    allStarted: allStarted.promise,
+    abortedAgentIds: () => [...abortedAgentIds],
+    runner: {
+      async run(request) {
+        const agentId = request.traycerAgentEnv?.agentId;
+        if (agentId === undefined) {
+          throw new Error("Expected a per-turn agent identity");
+        }
+        startedAgentIds.add(agentId);
+        if (startedAgentIds.size === expectedStarts) {
+          allStarted.resolve();
+        }
+        if (!request.signal.aborted) {
+          await new Promise<void>((resolve) => {
+            request.signal.addEventListener("abort", () => resolve(), {
+              once: true,
+            });
+          });
+        }
+        if (request.signal.aborted) {
+          abortedAgentIds.push(agentId);
+        }
+        return { text: "", sessionId: null };
+      },
+    },
+  };
+}
 
 function controlledTwoTurnRunner(): {
   readonly runner: TurnRunner;

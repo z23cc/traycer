@@ -83,6 +83,10 @@ describe("local host handshake", () => {
 
   it("advertises only optional unary methods with local resolvers", () => {
     expect(hostConnectionManifest().optionalManifest).toEqual({
+      "agent.configure": { major: 4, minor: 0 },
+      "agent.fork": { major: 1, minor: 0 },
+      "agent.getProviderProfileRateLimits": { major: 4, minor: 0 },
+      "agent.listProviderProfiles": { major: 4, minor: 0 },
       "epic.getChatRunSettings": { major: 1, minor: 0 },
       "epic.setChatArchived": { major: 1, minor: 0 },
       "epic.updateChatProfile": { major: 1, minor: 0 },

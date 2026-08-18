@@ -2,6 +2,7 @@ import { createServer, type Server } from "node:http";
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import type { HostFrame } from "@traycer/protocol/framework/ws-protocol";
 import { deleteChatRequestSchema } from "@traycer/protocol/host/epic/unary-schemas";
+import { worktreeWorkspaceSummarySchemaV13 } from "@traycer/protocol/host/worktree-schemas";
 import {
   startAgentA2AMcpBridge,
   type AgentA2AMcpBridge,
@@ -17,6 +18,8 @@ import {
   STREAM_PONG_TIMEOUT_MS,
 } from "./stream-session";
 import { HostState } from "./store";
+import { AgentSelectionGuideStore } from "./agent-selection-guide";
+import { summarizeWorktreeWorkspacePaths } from "./worktree-summary";
 
 export type HostServerOptions = {
   readonly runner: TurnRunner | undefined;
@@ -45,21 +48,62 @@ export async function startHostServer(
     repoWorkspacePersistence,
     options?.worktreeRoot,
   );
+  const selectionGuide = new AgentSelectionGuideStore(options?.hostHome);
   let methodDispatcher: MethodDispatcher | null = null;
-  const a2aMcpBridge = await startAgentA2AMcpBridge((request) => {
-    const dispatcher = methodDispatcher;
-    if (dispatcher === null) {
-      return {
-        ok: false,
-        code: "RPC_ERROR",
-        message: "Traycer A2A MCP bridge is not ready",
-      };
-    }
-    return dispatcher("agent.sendMessage", request);
-  });
+  const a2aMcpBridge = await startAgentA2AMcpBridge(
+    (request) => {
+      const dispatcher = methodDispatcher;
+      if (dispatcher === null) {
+        return {
+          ok: false,
+          code: "RPC_ERROR",
+          message: "Traycer A2A MCP bridge is not ready",
+        };
+      }
+      return dispatcher("agent.sendMessage", request);
+    },
+    async (request) => ({
+      ok: true,
+      result: await state.stopAgentFromAgent(request),
+    }),
+    async (request) => ({
+      ok: true,
+      result: await state.archiveAgentFromAgent(request),
+    }),
+    (request) => state.listAgents(request),
+    (request) => state.getAgentTranscriptFromAgent(request),
+    (request) => state.createAgent(request),
+    async (identity) => {
+      state.listAgents({
+        epicId: identity.epicId,
+        senderAgentId: identity.agentId,
+        scope: "user",
+      });
+      return await selectionGuide.getForAgent();
+    },
+    {
+      list: async (identity) => ({
+        workspaces: (
+          await summarizeWorktreeWorkspacePaths(
+            state.workspacePathsForAgentEpic(identity.epicId, identity.agentId),
+            { forceRefresh: true, environment: "include" },
+          )
+        ).map((summary) => worktreeWorkspaceSummarySchemaV13.parse(summary)),
+      }),
+      create: (request) => state.createWorktreePaths(request),
+    },
+    {
+      configure: (request) => state.configureAgentFromAgent(request),
+      fork: (request) => state.forkAgent(request),
+      comments: {
+        list: (request) => state.listCommentThreadsByPath(request),
+        setStatus: (request) => state.setCommentThreadStatusByPath(request),
+      },
+    },
+  );
   const baseRunner = options?.runner ?? createProcessTurnRunner(process.env);
   const runner = wrapTurnRunnerWithAgentA2A(baseRunner, a2aMcpBridge);
-  const handlers = createHandlers(state, runner);
+  const handlers = createHandlers(state, runner, selectionGuide);
   const handleMethod = withAgentA2ASessionRelease(
     handlers.handleMethod,
     a2aMcpBridge,

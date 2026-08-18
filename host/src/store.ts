@@ -7,17 +7,31 @@ import { Awareness } from "y-protocols/awareness";
 import type { JsonContent } from "@traycer/protocol/common/registry";
 import { createTypedMap } from "@traycer/protocol/utils/yjs-utils/factory";
 import type {
+  AgentConfigureRequestV20,
+  AgentConfigureResponse,
+} from "@traycer/protocol/host/agent/profiles";
+import type {
   CreateChatInitialMessage,
   CreateArtifactRequest,
   CreateArtifactResponse,
   CreateEpicRequest,
   CreateEpicResponse,
+  CreateCommentThreadRequest,
+  CreateCommentThreadResponse,
+  DeleteCommentRequest,
+  DeleteCommentResponse,
+  DeleteCommentThreadRequest,
+  DeleteCommentThreadResponse,
+  EditCommentRequest,
+  EditCommentResponse,
   DeleteArtifactRequest,
   DeleteArtifactResponse,
   DeleteChatRequest,
   DeleteChatResponse,
   EpicLight,
   ListTasksResponse,
+  ListCommentThreadsRequest,
+  ListCommentThreadsResponse,
   RenameArtifactRequest,
   RenameArtifactResponse,
   RenameChatRequest,
@@ -26,9 +40,15 @@ import type {
   ReparentArtifactResponse,
   ReparentChatRequest,
   ReparentChatResponse,
+  ReplyToCommentThreadRequest,
+  ReplyToCommentThreadResponse,
+  ResolveArtifactByPathRequest,
+  ResolveArtifactByPathResponse,
   PreparedWorkspaceFolder,
   SetChatArchivedRequest,
   SetChatArchivedResponse,
+  SetCommentThreadResolvedRequest,
+  SetCommentThreadResolvedResponse,
   TaskRepoAssociation,
   TaskRepoIdentifier,
   UpdateEpicRequest,
@@ -42,6 +62,12 @@ import type {
   UserTaskWorkspace,
 } from "@traycer/protocol/host/epic/unary-schemas";
 import type {
+  CommentsListThreadsRequest,
+  CommentsListThreadsResponse,
+  CommentsSetThreadStatusRequest,
+  CommentsSetThreadStatusResponse,
+} from "@traycer/protocol/host/comments";
+import type {
   ChatActiveTurn,
   ChatQueuedPromptItem,
   ChatQueueState,
@@ -53,11 +79,17 @@ import {
   type CreateAgentRequestV30,
   type CreateAgentResponse,
   type CreateAgentWorkspace,
+  type GetAgentTranscriptRequest,
+  type GetAgentTranscriptResponse,
+  type ForkAgentRequest,
+  type ForkAgentResponse,
   type ListAgentsRequest,
   type ListAgentsResponse,
   type ProfileSelection,
   type SendAgentMessageRequest,
   type SendAgentMessageResponse,
+  type StopAgentRequest,
+  type StopAgentResponse,
 } from "@traycer/protocol/host/agent/shared";
 import type {
   GetChatRunSettingsRequest,
@@ -89,6 +121,19 @@ import {
   type ChatRunSettings,
 } from "@traycer/protocol/persistence/epic/schemas";
 import { ArtifactRoomManager } from "./artifact-rooms";
+import {
+  createCommentThread as createStoredCommentThread,
+  deleteComment as deleteStoredComment,
+  deleteCommentThread as deleteStoredCommentThread,
+  editComment as editStoredComment,
+  listCommentThreads as listStoredCommentThreads,
+  listCommentThreadsByPath,
+  replyToCommentThread as replyToStoredCommentThread,
+  resolveArtifactByPath as resolveStoredArtifactByPath,
+  setCommentThreadResolved as setStoredCommentThreadResolved,
+  setCommentThreadStatusByPath,
+} from "./comment-threads";
+import { writeAgentTranscript } from "./agent-transcript";
 import { directoryExists, isGitRepo } from "./git-probe";
 import {
   isLocalGuiHarnessId,
@@ -238,6 +283,34 @@ export type CreateChatRecordOutcome = {
   readonly created: boolean;
 };
 
+export type AgentStopToolRequest = {
+  readonly senderAgentId: string;
+  readonly epicId: string;
+  readonly agentId: string;
+  readonly cascade: boolean;
+  readonly archive: boolean;
+};
+
+export type AgentStopToolResponse = {
+  readonly stoppedAgentIds: string[];
+  readonly archivedAgentIds: string[];
+  readonly notArchivedAgentIds: string[];
+  readonly skippedAgentIds: string[];
+  readonly failedAgentIds: string[];
+};
+
+export type AgentArchiveToolRequest = {
+  readonly senderAgentId: string;
+  readonly epicId: string;
+  readonly agentId: string;
+};
+
+export type AgentArchiveToolResponse = {
+  readonly agentId: string;
+  readonly archived: true;
+  readonly updated: boolean;
+};
+
 export class HostState {
   readonly hostId: string;
   readonly epics = new Map<string, StoredEpic>();
@@ -262,6 +335,8 @@ export class HostState {
   private readonly abortByChat = new Map<string, AbortController>();
   private readonly inflight = new Set<string>();
   private readonly idleWaiters = new Map<string, Array<() => void>>();
+  private readonly cancellingAgentIds = new Map<string, number>();
+  private readonly cancellingChatKeys = new Map<string, number>();
 
   constructor(
     hostId: string,
@@ -408,6 +483,80 @@ export class HostState {
       artifacts.set(artifactId, entry);
     });
     return { artifactId };
+  }
+
+  createCommentThread(
+    request: CreateCommentThreadRequest,
+  ): CreateCommentThreadResponse {
+    return createStoredCommentThread(this.requireEpic(request.epicId), request);
+  }
+
+  replyToCommentThread(
+    request: ReplyToCommentThreadRequest,
+  ): ReplyToCommentThreadResponse {
+    return replyToStoredCommentThread(
+      this.requireEpic(request.epicId),
+      request,
+    );
+  }
+
+  editComment(request: EditCommentRequest): EditCommentResponse {
+    return editStoredComment(this.requireEpic(request.epicId), request);
+  }
+
+  deleteComment(request: DeleteCommentRequest): DeleteCommentResponse {
+    return deleteStoredComment(this.requireEpic(request.epicId), request);
+  }
+
+  setCommentThreadResolved(
+    request: SetCommentThreadResolvedRequest,
+  ): SetCommentThreadResolvedResponse {
+    return setStoredCommentThreadResolved(
+      this.requireEpic(request.epicId),
+      request,
+    );
+  }
+
+  deleteCommentThread(
+    request: DeleteCommentThreadRequest,
+  ): DeleteCommentThreadResponse {
+    return deleteStoredCommentThread(this.requireEpic(request.epicId), request);
+  }
+
+  listCommentThreads(
+    request: ListCommentThreadsRequest,
+  ): ListCommentThreadsResponse {
+    return listStoredCommentThreads(this.requireEpic(request.epicId), request);
+  }
+
+  listCommentThreadsByPath(
+    request: CommentsListThreadsRequest,
+  ): CommentsListThreadsResponse {
+    return listCommentThreadsByPath(
+      request.epicId,
+      this.requireEpic(request.epicId),
+      request,
+    );
+  }
+
+  setCommentThreadStatusByPath(
+    request: CommentsSetThreadStatusRequest,
+  ): CommentsSetThreadStatusResponse {
+    return setCommentThreadStatusByPath(
+      request.epicId,
+      this.requireEpic(request.epicId),
+      request,
+    );
+  }
+
+  resolveArtifactByPath(
+    request: ResolveArtifactByPathRequest,
+  ): ResolveArtifactByPathResponse {
+    return resolveStoredArtifactByPath(
+      request.epicId,
+      this.requireEpic(request.epicId),
+      request,
+    );
   }
 
   updateEpicTitle(request: UpdateEpicRequest): UpdateEpicResponse {
@@ -895,6 +1044,283 @@ export class HostState {
     return { agentId, warnings: resolved.warnings };
   }
 
+  async forkAgent(request: ForkAgentRequest): Promise<ForkAgentResponse> {
+    const epic = this.epics.get(request.epicId);
+    if (epic === undefined) {
+      throw new StoreError(
+        "E_INVALID_ARGUMENT",
+        `Unknown epic ${request.epicId}`,
+      );
+    }
+    const method = "agent.fork";
+    const senderAgentId = resolveAgentId(epic, request.senderAgentId, method);
+    const sourceAgentId = resolveAgentId(epic, request.agentId, method);
+    const sender = agentChatRecord(epic, senderAgentId);
+    const sourceRecord = agentChatRecord(epic, sourceAgentId);
+    if (sender === null) {
+      throw new StoreError(
+        "RPC_ERROR",
+        `${method}: sender agent '${request.senderAgentId}' was not found.`,
+      );
+    }
+    if (sourceRecord === null) {
+      throw new StoreError(
+        "E_HOST_UNSUPPORTED",
+        `${method}: only local GUI agents can be forked by this local host.`,
+      );
+    }
+    if (sender.userId !== sourceRecord.userId) {
+      throw new StoreError("FORBIDDEN", sourceAgentId);
+    }
+    if (sender.hostId !== this.hostId || sourceRecord.hostId !== this.hostId) {
+      throw new StoreError(
+        "RPC_ERROR",
+        `${method}: source and sender must be local to host '${this.hostId}'.`,
+      );
+    }
+    const source =
+      sourceRecord.chat ?? this.hydrateLocalGuiChat(epic, sourceAgentId);
+    if (source === null || source.settings === null) {
+      throw new StoreError(
+        "RPC_ERROR",
+        `${method}: source agent '${sourceAgentId}' has no GUI checkpoint settings.`,
+      );
+    }
+    const profileOverrideApplied = request.profileSelection.kind !== "inherit";
+    const profileId =
+      request.profileSelection.kind === "inherit"
+        ? source.settings.profileId
+        : request.profileSelection.kind === "ambient"
+          ? null
+          : request.profileSelection.profileId;
+    if (profileId !== null) {
+      assertLocalProfileAvailable(source.settings.harnessId, profileId);
+    }
+    const settings: ChatRunSettings = {
+      ...source.settings,
+      permissionMode: request.permissionMode,
+      profileId,
+    };
+    let checkpointIndex = -1;
+    for (const [index, message] of source.messages.entries()) {
+      if (message.role === "assistant") {
+        checkpointIndex = index;
+      }
+    }
+    const checkpoint =
+      checkpointIndex < 0 ? null : source.messages[checkpointIndex];
+    const forkedFromMessageId =
+      checkpoint?.role === "assistant" ? checkpoint.messageId : null;
+    const checkpointMessages =
+      checkpointIndex < 0 ? [] : source.messages.slice(0, checkpointIndex + 1);
+    const agentId = randomUUID();
+    await this.withSerializedChatAction(request.epicId, agentId, async () => {
+      const fork = this.insertChat(epic, {
+        chatId: agentId,
+        parentId: senderAgentId,
+        hostId: this.hostId,
+        title: request.name ?? source.title,
+        settings,
+        initialBinding: "none",
+        isTitleEditedByUser: request.name !== null,
+      });
+      fork.messages = [...checkpointMessages];
+      if (request.workspace === null) {
+        const sourceBinding = this.getBinding({
+          epicId: request.epicId,
+          ownerId: sourceAgentId,
+          ownerKind: "chat",
+        }).binding;
+        if (sourceBinding !== null) {
+          this.storeOwnerBinding(
+            {
+              epicId: request.epicId,
+              ownerId: agentId,
+              ownerKind: "chat",
+            },
+            sourceBinding,
+          );
+        }
+      } else {
+        await this.replaceAgentWorkspace(
+          request.epicId,
+          agentId,
+          request.workspace,
+        );
+      }
+    });
+    return {
+      agentId,
+      sourceAgentId,
+      forkedFromMessageId,
+      warnings: [],
+      effectiveProfileId: profileId,
+      profileOverrideApplied,
+    };
+  }
+
+  configureAgent(request: AgentConfigureRequestV20): AgentConfigureResponse {
+    const resolved = this.resolveAgentConfiguration(request);
+    this.commitAgentConfiguration(request.epicId, resolved);
+    return resolved.response;
+  }
+
+  async configureAgentFromAgent(
+    request: AgentConfigureRequestV20 & {
+      readonly workspace: CreateAgentWorkspace | null;
+    },
+  ): Promise<AgentConfigureResponse> {
+    const resolved = this.resolveAgentConfiguration(request);
+    await this.withSerializedChatAction(
+      request.epicId,
+      resolved.targetAgentId,
+      async () => {
+        if (request.workspace !== null) {
+          await this.replaceAgentWorkspace(
+            request.epicId,
+            resolved.targetAgentId,
+            request.workspace,
+          );
+        }
+        this.commitAgentConfiguration(request.epicId, resolved);
+      },
+    );
+    return resolved.response;
+  }
+
+  private resolveAgentConfiguration(
+    request: AgentConfigureRequestV20,
+  ): ResolvedAgentConfiguration {
+    const epic = this.epics.get(request.epicId);
+    if (epic === undefined) {
+      throw new StoreError(
+        "E_INVALID_ARGUMENT",
+        `Unknown epic ${request.epicId}`,
+      );
+    }
+    const method = "agent.configure";
+    const senderAgentId = resolveAgentId(epic, request.senderAgentId, method);
+    const targetAgentId = resolveAgentId(epic, request.agentId, method);
+    const sender = agentChatRecord(epic, senderAgentId);
+    const target = agentChatRecord(epic, targetAgentId);
+    if (sender === null) {
+      throw new StoreError(
+        "RPC_ERROR",
+        `${method}: sender agent '${request.senderAgentId}' was not found.`,
+      );
+    }
+    if (sender.hostId !== this.hostId) {
+      throw new StoreError(
+        "RPC_ERROR",
+        `${method}: sender agent '${senderAgentId}' is not local to host '${this.hostId}'.`,
+      );
+    }
+    if (target === null) {
+      throw new StoreError(
+        "RPC_ERROR",
+        `${method}: agent '${request.agentId}' was not found.`,
+      );
+    }
+    if (sender.userId !== target.userId) {
+      throw new StoreError("FORBIDDEN", targetAgentId);
+    }
+    if (target.hostId !== this.hostId) {
+      throw new StoreError(
+        "RPC_ERROR",
+        `${method}: TARGET_NOT_LOCAL - agent '${targetAgentId}' runs on another host, not on this one ('${this.hostId}').`,
+      );
+    }
+    if (!isLocalGuiHarnessId(request.harnessId)) {
+      throw new StoreError(
+        "E_HOST_UNSUPPORTED",
+        `${method}: gui harness '${request.harnessId}' is not supported by this local host.`,
+      );
+    }
+    const model = localGuiModelsFor(request.harnessId).find(
+      (candidate) => candidate.slug === request.model,
+    );
+    if (model === undefined) {
+      throw new StoreError(
+        "RPC_ERROR",
+        `${method}: model '${request.model}' is not available for harness '${request.harnessId}'.`,
+      );
+    }
+    const warnings: string[] = [];
+    let reasoningEffort = request.reasoningEffort;
+    if (
+      reasoningEffort !== null &&
+      !model.supportedReasoningEfforts.some(
+        (effort) => effort.id === reasoningEffort,
+      )
+    ) {
+      warnings.push(
+        `reasoningEffort '${reasoningEffort}' is not available for model '${model.slug}' and was ignored.`,
+      );
+      reasoningEffort = null;
+    }
+    if (request.fastMode) {
+      warnings.push(
+        `fastMode is not available for model '${model.slug}' and was ignored.`,
+      );
+    }
+    const record = findChatRecord(this.epics, request.epicId, targetAgentId);
+    if (record === null) {
+      throw new StoreError(
+        "RPC_ERROR",
+        `${method}: agent '${targetAgentId}' has no GUI chat record.`,
+      );
+    }
+    const currentSettings =
+      record.chat?.settings ?? chatRunSettingsFromEntry(record.entry);
+    const permissionMode =
+      request.permissionMode ??
+      currentSettings?.permissionMode ??
+      "full_access";
+    const profileId =
+      request.profileSelection.kind === "profile"
+        ? request.profileSelection.profileId
+        : null;
+    if (profileId !== null) {
+      assertLocalProfileAvailable(request.harnessId, profileId);
+    }
+    const settings: ChatRunSettings = {
+      harnessId: request.harnessId,
+      model: model.slug,
+      permissionMode,
+      reasoningEffort,
+      serviceTier: null,
+      agentMode: "regular",
+      profileId,
+    };
+    return {
+      targetAgentId,
+      settings,
+      response: {
+        settings: {
+          harnessId: settings.harnessId,
+          model: settings.model,
+          profileSelection: request.profileSelection,
+          reasoningEffort: settings.reasoningEffort,
+          fastMode: false,
+          permissionMode: settings.permissionMode,
+          agentMode: settings.agentMode,
+        },
+        warnings,
+      },
+    };
+  }
+
+  private commitAgentConfiguration(
+    epicId: string,
+    resolved: ResolvedAgentConfiguration,
+  ): void {
+    this.updateChatRunSettings({
+      epicId,
+      chatId: resolved.targetAgentId,
+      settings: resolved.settings,
+    });
+  }
+
   listAgents(request: ListAgentsRequest): ListAgentsResponse {
     const epic = this.epics.get(request.epicId);
     if (epic === undefined) {
@@ -1028,9 +1454,298 @@ export class HostState {
           folderPaths: folderContext.folderPaths,
           isWorktree: folderContext.isWorktree,
           runConfig: null,
+          archived: record.archived,
         };
       }),
     };
+  }
+
+  async getAgentTranscript(
+    request: GetAgentTranscriptRequest,
+  ): Promise<GetAgentTranscriptResponse> {
+    const epic = this.epics.get(request.epicId);
+    if (epic === undefined) {
+      throw new StoreError(
+        "E_INVALID_ARGUMENT",
+        `Unknown epic ${request.epicId}`,
+      );
+    }
+    const method = "agent.getTranscript";
+    const agentId = resolveAgentId(epic, request.agentId, method);
+    const target = agentChatRecord(epic, agentId);
+    if (target === null) {
+      throw new StoreError(
+        "RPC_ERROR",
+        `${method}: agent '${request.agentId}' was not found.`,
+      );
+    }
+    if (target.userId !== LOCAL_USER_ID) {
+      throw new StoreError("FORBIDDEN", agentId);
+    }
+    const messages = guiAgentTranscriptMessages(epic, agentId);
+    return {
+      transcript: await writeAgentTranscript(agentId, messages),
+    };
+  }
+
+  async getAgentTranscriptFromAgent(request: {
+    readonly senderAgentId: string;
+    readonly epicId: string;
+    readonly agentId: string;
+  }): Promise<GetAgentTranscriptResponse> {
+    const epic = this.epics.get(request.epicId);
+    if (epic === undefined) {
+      throw new StoreError(
+        "E_INVALID_ARGUMENT",
+        `Unknown epic ${request.epicId}`,
+      );
+    }
+    const method = "traycer_get_transcript";
+    const senderAgentId = resolveAgentId(epic, request.senderAgentId, method);
+    const agentId = resolveAgentId(epic, request.agentId, method);
+    const sender = agentChatRecord(epic, senderAgentId);
+    const target = agentChatRecord(epic, agentId);
+    if (sender === null) {
+      throw new StoreError(
+        "RPC_ERROR",
+        `${method}: sender agent '${request.senderAgentId}' was not found.`,
+      );
+    }
+    if (target === null) {
+      throw new StoreError(
+        "RPC_ERROR",
+        `${method}: agent '${request.agentId}' was not found.`,
+      );
+    }
+    if (sender.userId !== target.userId) {
+      throw new StoreError("FORBIDDEN", agentId);
+    }
+    return {
+      transcript: await writeAgentTranscript(
+        agentId,
+        guiAgentTranscriptMessages(epic, agentId),
+      ),
+    };
+  }
+
+  async stopAgent(request: StopAgentRequest): Promise<StopAgentResponse> {
+    const epic = this.epics.get(request.epicId);
+    if (epic === undefined) {
+      throw new StoreError(
+        "E_INVALID_ARGUMENT",
+        `Unknown epic ${request.epicId}`,
+      );
+    }
+    const agentIds = stopAgentIds(
+      epic,
+      this.hostId,
+      request.agentId,
+      request.cascade,
+    );
+    const stopped = await this.stopSelectedAgents(request.epicId, agentIds);
+    return { stoppedAgentIds: stopped.stoppedAgentIds };
+  }
+
+  async stopAgentFromAgent(
+    request: AgentStopToolRequest,
+  ): Promise<AgentStopToolResponse> {
+    const epic = this.epics.get(request.epicId);
+    if (epic === undefined) {
+      throw new StoreError(
+        "E_INVALID_ARGUMENT",
+        `Unknown epic ${request.epicId}`,
+      );
+    }
+    const method = "traycer_stop_agent";
+    const senderAgentId = resolveAgentId(epic, request.senderAgentId, method);
+    const targetAgentId = resolveAgentId(epic, request.agentId, method);
+    const sender = agentChatRecord(epic, senderAgentId);
+    const target = agentChatRecord(epic, targetAgentId);
+    if (sender === null) {
+      throw new StoreError(
+        "RPC_ERROR",
+        `${method}: sender agent '${request.senderAgentId}' was not found.`,
+      );
+    }
+    if (target === null) {
+      throw new StoreError(
+        "RPC_ERROR",
+        `${method}: agent '${request.agentId}' was not found.`,
+      );
+    }
+    if (sender.userId !== target.userId) {
+      throw new StoreError("FORBIDDEN", targetAgentId);
+    }
+    const subtree = stopAgentSubtree(epic, targetAgentId, request.cascade);
+    if (subtree.some((entry) => entry.agentId === senderAgentId)) {
+      const relationship =
+        targetAgentId === senderAgentId ? "" : "'s own subtree";
+      throw new StoreError(
+        "RPC_ERROR",
+        `${method}: TARGET_IS_SELF - '${senderAgentId}' is the calling agent${relationship}, and stopping it would abort the very turn awaiting this call. Nothing was stopped. To retire yourself once your work is done, call traycer_archive_agent with your own agent id; to stop a child, address that child directly.`,
+      );
+    }
+    if (target.hostId !== this.hostId) {
+      throw new StoreError(
+        "RPC_ERROR",
+        `${method}: TARGET_NOT_LOCAL - agent '${targetAgentId}' runs on another host, not on this one ('${this.hostId}'). Stopping reaches into this host's sessions only, so nothing was stopped. Ask an agent on that host to stop it.`,
+      );
+    }
+    const selectedAgentIds: string[] = [];
+    const skippedAgentIds: string[] = [];
+    for (const candidate of subtree) {
+      if (
+        candidate.entry.get("userId") === sender.userId &&
+        candidate.entry.get("hostId") === this.hostId
+      ) {
+        selectedAgentIds.push(candidate.agentId);
+      } else {
+        skippedAgentIds.push(candidate.agentId);
+      }
+    }
+    const stopped = await this.stopSelectedAgents(
+      request.epicId,
+      selectedAgentIds,
+    );
+    const archivedAgentIds: string[] = [];
+    const notArchivedAgentIds: string[] = [];
+    if (request.archive) {
+      const failed = new Set(stopped.failedAgentIds);
+      for (const agentId of selectedAgentIds) {
+        if (failed.has(agentId)) {
+          continue;
+        }
+        try {
+          this.setChatArchived({
+            epicId: request.epicId,
+            chatId: agentId,
+            archived: true,
+          });
+          archivedAgentIds.push(agentId);
+        } catch {
+          notArchivedAgentIds.push(agentId);
+        }
+      }
+    }
+    return {
+      stoppedAgentIds: stopped.stoppedAgentIds,
+      archivedAgentIds,
+      notArchivedAgentIds,
+      skippedAgentIds,
+      failedAgentIds: stopped.failedAgentIds,
+    };
+  }
+
+  archiveAgentFromAgent(
+    request: AgentArchiveToolRequest,
+  ): AgentArchiveToolResponse {
+    const epic = this.epics.get(request.epicId);
+    if (epic === undefined) {
+      throw new StoreError(
+        "E_INVALID_ARGUMENT",
+        `Unknown epic ${request.epicId}`,
+      );
+    }
+    const method = "traycer_archive_agent";
+    const senderAgentId = resolveAgentId(epic, request.senderAgentId, method);
+    const targetAgentId = resolveAgentId(epic, request.agentId, method);
+    const sender = agentChatRecord(epic, senderAgentId);
+    const target = agentChatRecord(epic, targetAgentId);
+    if (sender === null) {
+      throw new StoreError(
+        "RPC_ERROR",
+        `${method}: sender agent '${request.senderAgentId}' was not found.`,
+      );
+    }
+    if (target === null) {
+      throw new StoreError(
+        "RPC_ERROR",
+        `${method}: agent '${request.agentId}' was not found.`,
+      );
+    }
+    if (sender.userId !== target.userId) {
+      throw new StoreError("FORBIDDEN", targetAgentId);
+    }
+    if (target.hostId !== this.hostId && target.hostId !== "legacy") {
+      throw new StoreError(
+        "RPC_ERROR",
+        `TARGET_NOT_LOCAL: ${method} refused to archive agent '${targetAgentId}' - it runs on host '${target.hostId}', not on this host ('${this.hostId}'). Only the host that runs an agent can observe whether it is still working, so archiving it from here could hide a live run. Archive it from its own host instead.`,
+      );
+    }
+    const isSelf = targetAgentId === senderAgentId;
+    const key = chatKey(request.epicId, targetAgentId);
+    if (
+      !isSelf &&
+      (this.inflight.has(key) ||
+        (this.queuedAgentMessages.get(key)?.length ?? 0) > 0)
+    ) {
+      throw new StoreError(
+        "RPC_ERROR",
+        `AGENT_BUSY: ${method} refused to archive agent '${targetAgentId}' - nothing was changed. Archiving would force the agent inactive in every list while its run kept going. A turn is in progress, or one is about to start. Stopping the agent clears a turn - but NOT a detached subagent, workflow or scheduled wake, which all survive a stop. Wait for it to go idle - or stop the agent - and retry.`,
+      );
+    }
+    if (!isSelf) {
+      const result = this.setChatArchived({
+        epicId: request.epicId,
+        chatId: targetAgentId,
+        archived: true,
+      });
+      return {
+        agentId: targetAgentId,
+        archived: true,
+        updated: result.updated,
+      };
+    }
+    const record = resolveArchiveRecord(epic, targetAgentId);
+    if (record === null) {
+      throw archiveRecordMissing(request.epicId, targetAgentId);
+    }
+    if (typeof record.entry.get("archivedAt") === "number") {
+      return { agentId: targetAgentId, archived: true, updated: false };
+    }
+    const now = Date.now();
+    epic.doc.transact(() => {
+      record.entry.set("archivedAt", now);
+      record.entry.set("updatedAt", now);
+      if (record.chat !== null) {
+        record.chat.archivedAt = now;
+        record.chat.updatedAt = now;
+      }
+    });
+    return { agentId: targetAgentId, archived: true, updated: true };
+  }
+
+  private async stopSelectedAgents(
+    epicId: string,
+    agentIds: readonly string[],
+  ): Promise<{
+    readonly stoppedAgentIds: string[];
+    readonly failedAgentIds: string[];
+  }> {
+    for (const agentId of agentIds) {
+      this.beginAgentCancellation(epicId, agentId);
+    }
+    const stoppedAgentIds: string[] = [];
+    const failedAgentIds: string[] = [];
+    try {
+      for (const agentId of agentIds) {
+        try {
+          this.purgeAgentTraffic(epicId, agentId);
+          if (this.requestStop(epicId, agentId)) {
+            stoppedAgentIds.push(agentId);
+            await this.waitForIdle(epicId, agentId);
+          }
+          this.purgeAgentTraffic(epicId, agentId);
+        } catch {
+          failedAgentIds.push(agentId);
+        }
+      }
+    } finally {
+      for (const agentId of agentIds) {
+        this.endAgentCancellation(epicId, agentId);
+      }
+    }
+    return { stoppedAgentIds, failedAgentIds };
   }
 
   listTasks(): ListTasksResponse {
@@ -1043,6 +1758,14 @@ export class HostState {
 
   getEpic(epicId: string): StoredEpic | null {
     return this.epics.get(epicId) ?? null;
+  }
+
+  private requireEpic(epicId: string): StoredEpic {
+    const epic = this.epics.get(epicId);
+    if (epic === undefined) {
+      throw new StoreError("E_INVALID_ARGUMENT", `Unknown epic ${epicId}`);
+    }
+    return epic;
   }
 
   getChat(epicId: string, chatId: string): StoredChat | null {
@@ -1411,6 +2134,15 @@ export class HostState {
     return { rows, folderlessCwd };
   }
 
+  workspacePathsForAgentEpic(epicId: string, senderAgentId: string): string[] {
+    this.listAgents({ epicId, senderAgentId, scope: "user" });
+    const epic = this.getEpic(epicId);
+    if (epic === null) {
+      throw new StoreError("E_INVALID_ARGUMENT", `Unknown epic ${epicId}`);
+    }
+    return epic.workspaces.map((workspace) => workspace.workspacePath);
+  }
+
   async recordPreparedWorkspaceMappings(
     folders: readonly PreparedWorkspaceFolder[],
   ): Promise<void> {
@@ -1661,8 +2393,16 @@ export class HostState {
     }
     return {
       ...request,
-      senderAgentId: resolveAgentId(epic, request.senderAgentId),
-      receiverAgentId: resolveAgentId(epic, request.receiverAgentId),
+      senderAgentId: resolveAgentId(
+        epic,
+        request.senderAgentId,
+        "agent.sendMessage",
+      ),
+      receiverAgentId: resolveAgentId(
+        epic,
+        request.receiverAgentId,
+        "agent.sendMessage",
+      ),
     };
   }
 
@@ -1671,6 +2411,10 @@ export class HostState {
     chatId: string,
   ): PendingTurn | null {
     const key = chatKey(epicId, chatId);
+    if (this.cancellingChatKeys.has(key)) {
+      this.queuedAgentMessages.delete(key);
+      return null;
+    }
     if (this.getChat(epicId, chatId) === null) {
       this.queuedAgentMessages.delete(key);
       return null;
@@ -1854,8 +2598,9 @@ export class HostState {
     request: SendAgentMessageRequest,
   ): void {
     if (
+      !this.cancellingAgentIds.has(request.receiverAgentId) &&
       this.getChat(request.epicId, request.receiverAgentId)?.runStatus !==
-      "stopping"
+        "stopping"
     ) {
       return;
     }
@@ -2054,6 +2799,42 @@ export class HostState {
     });
   }
 
+  private purgeAgentTraffic(epicId: string, agentId: string): void {
+    const queueKey = chatKey(epicId, agentId);
+    const hadQueue = this.queuedAgentMessages.delete(queueKey);
+    for (const [responseId, pending] of this.pendingAgentResponses) {
+      if (
+        pending.senderAgentId !== agentId &&
+        pending.receiverAgentId !== agentId
+      ) {
+        continue;
+      }
+      this.pendingAgentResponses.delete(responseId);
+      this.pendingAgentResponseIdsByPair.delete(
+        agentResponsePairKey(pending.senderAgentId, pending.receiverAgentId),
+      );
+    }
+    if (hadQueue) {
+      this.emitChat(epicId, agentId, {
+        kind: "queueChanged",
+        hasBinaryPayload: false,
+        epicId,
+        chatId: agentId,
+        queue: queuedAgentQueueState([]),
+      });
+    }
+  }
+
+  private beginAgentCancellation(epicId: string, agentId: string): void {
+    incrementCount(this.cancellingAgentIds, agentId);
+    incrementCount(this.cancellingChatKeys, chatKey(epicId, agentId));
+  }
+
+  private endAgentCancellation(epicId: string, agentId: string): void {
+    decrementCount(this.cancellingAgentIds, agentId);
+    decrementCount(this.cancellingChatKeys, chatKey(epicId, agentId));
+  }
+
   subscribeChat(
     epicId: string,
     chatId: string,
@@ -2150,6 +2931,8 @@ export class HostState {
     }
     this.idleWaiters.clear();
     this.inflight.clear();
+    this.cancellingAgentIds.clear();
+    this.cancellingChatKeys.clear();
     this.queuedAgentMessages.clear();
     this.pendingAgentResponses.clear();
     this.pendingAgentResponseIdsByPair.clear();
@@ -2274,7 +3057,7 @@ export class HostState {
     if (workspace.entries.length === 0) {
       return;
     }
-    await this.createWorktree({
+    const response = await this.createWorktree({
       epicId,
       ownerId: agentId,
       ownerKind: "chat",
@@ -2293,6 +3076,73 @@ export class HostState {
               worktreePath: entry.path,
             };
       }),
+    });
+    const failures = response.perEntry.filter((entry) => !entry.ok);
+    if (failures.length > 0) {
+      throw new StoreError(
+        "RPC_ERROR",
+        failures
+          .map(
+            (failure) =>
+              failure.errorMessage ??
+              `Could not bind workspace ${failure.workspacePath}.`,
+          )
+          .join("\n"),
+      );
+    }
+  }
+
+  private async replaceAgentWorkspace(
+    epicId: string,
+    agentId: string,
+    workspace: NonNullable<CreateAgentWorkspace>,
+  ): Promise<void> {
+    const owner = { epicId, ownerId: agentId, ownerKind: "chat" as const };
+    this.guardOwnerBindingMutation(owner);
+    await this.withSerializedOwnerBindingMutation(owner, async () => {
+      this.guardOwnerBindingMutation(owner);
+      if (workspace.entries.length === 0) {
+        this.storeOwnerBinding(owner, {
+          workspaceMode: "folderless",
+          entries: [],
+        });
+        return;
+      }
+      const entries: WorktreeBindingEntry[] = [];
+      for (const [index, entry] of workspace.entries.entries()) {
+        const workspacePath = entry.workspacePath ?? entry.path;
+        const intent =
+          entry.path === workspacePath
+            ? {
+                kind: "local" as const,
+                workspacePath,
+                repoIdentifier: null,
+                isPrimary: index === 0,
+              }
+            : {
+                kind: "import" as const,
+                workspacePath,
+                worktreePath: entry.path,
+                repoIdentifier: null,
+                isPrimary: index === 0,
+              };
+        const resolved = await localOrImportedEntry(
+          intent,
+          this.worktreeRoot ?? join(homedir(), ".traycer", "worktrees"),
+          Date.now,
+        );
+        if (!resolved.result.ok) {
+          throw new StoreError(
+            "RPC_ERROR",
+            resolved.result.errorMessage ??
+              `Could not bind workspace ${resolved.result.workspacePath}.`,
+          );
+        }
+        entries.push(resolved.entry);
+      }
+      this.storeOwnerBinding(owner, {
+        entries: enforceSinglePrimary(entries),
+      });
     });
   }
 
@@ -2507,6 +3357,12 @@ type ResolvedGuiAgentSettings = {
   readonly warnings: string[];
 };
 
+type ResolvedAgentConfiguration = {
+  readonly targetAgentId: string;
+  readonly settings: ChatRunSettings;
+  readonly response: AgentConfigureResponse;
+};
+
 function resolveGuiAgentSettings(
   request: CreateAgentRequestV30,
   sender: StoredChat,
@@ -2661,6 +3517,19 @@ export function projectStoredEpicLight(epic: StoredEpic): EpicLight {
 
 function chatKey(epicId: string, chatId: string): string {
   return `${epicId}:${chatId}`;
+}
+
+function incrementCount(counts: Map<string, number>, key: string): void {
+  counts.set(key, (counts.get(key) ?? 0) + 1);
+}
+
+function decrementCount(counts: Map<string, number>, key: string): void {
+  const count = counts.get(key);
+  if (count === undefined || count <= 1) {
+    counts.delete(key);
+    return;
+  }
+  counts.set(key, count - 1);
 }
 
 function normalizedRepoIdentifier(identifier: TaskRepoIdentifier): string {
@@ -3148,7 +4017,37 @@ function agentChatRecord(
   };
 }
 
-function resolveAgentId(epic: StoredEpic, agentId: string): string {
+function guiAgentTranscriptMessages(
+  epic: StoredEpic,
+  agentId: string,
+): readonly Message[] {
+  const live = epic.chats.get(agentId);
+  if (live !== undefined) {
+    return live.messages;
+  }
+  const chats = epic.doc.getMap<unknown>("epic").get("chats");
+  const entry = chats instanceof Y.Map ? chats.get(agentId) : undefined;
+  if (!(entry instanceof Y.Map)) {
+    throw new StoreError(
+      "RPC_ERROR",
+      `agent.getTranscript: agent '${agentId}' has no GUI transcript.`,
+    );
+  }
+  const parsed = chatSchema.safeParse(entry.toJSON());
+  if (!parsed.success) {
+    throw new StoreError(
+      "RPC_ERROR",
+      `agent.getTranscript: agent '${agentId}' has an invalid GUI transcript.`,
+    );
+  }
+  return parsed.data.messages;
+}
+
+function resolveAgentId(
+  epic: StoredEpic,
+  agentId: string,
+  method: string,
+): string {
   const root = epic.doc.getMap<unknown>("epic");
   const chats = root.get("chats");
   const tuiAgents = root.get("tuiAgents");
@@ -3173,7 +4072,7 @@ function resolveAgentId(epic: StoredEpic, agentId: string): string {
   if (matches.length > 1) {
     throw new StoreError(
       "RPC_ERROR",
-      `agent.sendMessage: AMBIGUOUS_AGENT_ID - '${agentId}' matches multiple agents; provide more characters.`,
+      `${method}: AMBIGUOUS_AGENT_ID - '${agentId}' matches multiple agents; provide more characters.`,
     );
   }
   return agentId;
@@ -3465,6 +4364,66 @@ function artifactFolderSlug(title: string): string {
 
 function trimHyphenEdges(value: string): string {
   return value.replace(/^-+|-+$/g, "");
+}
+
+function stopAgentIds(
+  epic: StoredEpic,
+  localHostId: string,
+  rootAgentId: string,
+  cascade: boolean,
+): string[] {
+  return stopAgentSubtree(epic, rootAgentId, cascade)
+    .filter((candidate) => candidate.entry.get("hostId") === localHostId)
+    .map((candidate) => candidate.agentId);
+}
+
+function stopAgentSubtree(
+  epic: StoredEpic,
+  rootAgentId: string,
+  cascade: boolean,
+): Array<{
+  readonly agentId: string;
+  readonly entry: Y.Map<unknown>;
+}> {
+  const chats = epic.doc.getMap<unknown>("epic").get("chats");
+  if (!(chats instanceof Y.Map) || !(chats.get(rootAgentId) instanceof Y.Map)) {
+    throw new StoreError(
+      "RPC_ERROR",
+      `agent.stop: agent '${rootAgentId}' was not found.`,
+    );
+  }
+  const selected: Array<{
+    readonly agentId: string;
+    readonly entry: Y.Map<unknown>;
+  }> = [];
+  const queue = [rootAgentId];
+  const seen = new Set(queue);
+  while (queue.length > 0) {
+    const agentId = queue.shift();
+    if (agentId === undefined) {
+      break;
+    }
+    const record = chats.get(agentId);
+    if (!(record instanceof Y.Map)) {
+      continue;
+    }
+    selected.push({ agentId, entry: record });
+    if (!cascade) {
+      continue;
+    }
+    for (const [candidateId, candidate] of chats) {
+      if (
+        seen.has(candidateId) ||
+        !(candidate instanceof Y.Map) ||
+        candidate.get("parentId") !== agentId
+      ) {
+        continue;
+      }
+      seen.add(candidateId);
+      queue.push(candidateId);
+    }
+  }
+  return selected;
 }
 
 function seedChatInDoc(doc: Y.Doc, chat: StoredChat): void {

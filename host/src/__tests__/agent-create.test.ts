@@ -10,10 +10,13 @@ import { hostFrameSchema } from "@traycer/protocol/framework/ws-protocol";
 import {
   createAgentResponseSchema,
   createAgentRequestSchemaV30,
+  forkAgentRequestSchema,
+  forkAgentResponseSchema,
   listAgentsRequestSchema,
   listAgentsResponseSchema,
   listAgentsResponseSchemaV60,
 } from "@traycer/protocol/host/agent/shared";
+import { agentConfigureResponseSchema } from "@traycer/protocol/host/agent/profiles";
 import {
   chatSubscribeClientFrameSchema,
   chatSubscribeServerFrameSchema,
@@ -85,9 +88,25 @@ describe("agent.create", () => {
     execFileSync("git", ["-C", workspace, "commit", "-m", "base"]);
 
     const requests: TurnRequest[] = [];
+    let releaseActiveSourceTurn = (): void => {
+      return;
+    };
+    const activeSourceTurn = new Promise<void>((resolve) => {
+      releaseActiveSourceTurn = resolve;
+    });
     const runner: TurnRunner = {
       async run(request, emit) {
         requests.push(request);
+        if (requests.length === 3) {
+          await Promise.race([
+            activeSourceTurn,
+            new Promise<void>((resolve) => {
+              request.signal.addEventListener("abort", () => resolve(), {
+                once: true,
+              });
+            }),
+          ]);
+        }
         emit({ kind: "text", text: "child reply" });
         return { text: "child reply", sessionId: null };
       },
@@ -103,6 +122,9 @@ describe("agent.create", () => {
       manifest: {
         "agent.create": { major: 3, minor: 0 },
         "agent.list": { major: 6, minor: 0 },
+      },
+      optionalManifest: {
+        "agent.configure": { major: 4, minor: 0 },
       },
     });
 
@@ -370,6 +392,152 @@ describe("agent.create", () => {
     expect(requests).toHaveLength(1);
     expect(requests[0]?.cwd).toBe(worktreePath);
 
+    const configureFrame = await rpc(
+      freshRpc,
+      "agent-configure",
+      "agent.configure",
+      { major: 4, minor: 0 },
+      {
+        epicId: "epic-agent-create",
+        senderAgentId: "parent-agent",
+        agentId: createdAgent.agentId,
+        harnessId: "claude",
+        model: "claude-sonnet-4",
+        profileSelection: { kind: "ambient" },
+        reasoningEffort: null,
+        fastMode: false,
+        permissionMode: "auto_accept_edits",
+      },
+    );
+    expect(configureFrame).toMatchObject({ kind: "response", error: null });
+    expect(
+      agentConfigureResponseSchema.parse(responseResult(configureFrame)),
+    ).toEqual({
+      settings: {
+        harnessId: "claude",
+        model: "claude-sonnet-4",
+        profileSelection: { kind: "ambient" },
+        reasoningEffort: null,
+        fastMode: false,
+        permissionMode: "auto_accept_edits",
+        agentMode: "regular",
+      },
+      warnings: [],
+    });
+
+    const peerSendFrame = await rpc(
+      freshRpc,
+      "agent-send-after-configure",
+      "agent.sendMessage",
+      { major: 1, minor: 0 },
+      {
+        senderAgentId: "parent-agent",
+        epicId: "epic-agent-create",
+        receiverAgentId: createdAgent.agentId,
+        prompt: "run with the newly configured harness",
+        responseId: null,
+        expectReply: false,
+      },
+    );
+    expect(peerSendFrame).toMatchObject({ kind: "response", error: null });
+    await server.state.waitForIdle("epic-agent-create", createdAgent.agentId);
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toMatchObject({
+      harnessId: "claude",
+      model: "claude-sonnet-4",
+      permissionMode: "auto_accept_edits",
+      reasoningEffort: null,
+      serviceTier: null,
+      cwd: worktreePath,
+    });
+
+    const activeSendFrame = await rpc(
+      freshRpc,
+      "agent-send-before-fork",
+      "agent.sendMessage",
+      { major: 1, minor: 0 },
+      {
+        senderAgentId: "parent-agent",
+        epicId: "epic-agent-create",
+        receiverAgentId: createdAgent.agentId,
+        prompt: "this active message must not enter the fork checkpoint",
+        responseId: null,
+        expectReply: false,
+      },
+    );
+    expect(activeSendFrame).toMatchObject({ kind: "response", error: null });
+    expect(requests).toHaveLength(3);
+
+    const forkFrame = await rpc(
+      freshRpc,
+      "agent-fork",
+      "agent.fork",
+      { major: 1, minor: 0 },
+      forkAgentRequestSchema.parse({
+        epicId: "epic-agent-create",
+        senderAgentId: "parent-agent",
+        agentId: createdAgent.agentId,
+        name: "Forked reviewer",
+        permissionMode: "supervised",
+        workspace: null,
+        profileSelection: { kind: "inherit" },
+      }),
+    );
+    expect(forkFrame).toMatchObject({ kind: "response", error: null });
+    const forked = forkAgentResponseSchema.parse(responseResult(forkFrame));
+    expect(forked).toMatchObject({
+      sourceAgentId: createdAgent.agentId,
+      warnings: [],
+      effectiveProfileId: null,
+      profileOverrideApplied: false,
+    });
+    expect(forked.forkedFromMessageId).toEqual(expect.any(String));
+
+    const forkStream = await openStream(server.websocketUrl, sockets);
+    forkStream.ws.send(
+      JSON.stringify({
+        kind: "subscribe",
+        method: "chat.subscribe",
+        schemaVersion: { major: 1, minor: 6 },
+        params: {
+          epicId: "epic-agent-create",
+          chatId: forked.agentId,
+        },
+      }),
+    );
+    expect(
+      chatSubscribeServerFrameSchema.parse(
+        JSON.parse(await forkStream.pump.next()),
+      ),
+    ).toMatchObject({
+      kind: "snapshot",
+      snapshot: {
+        chat: {
+          id: forked.agentId,
+          parentId: "parent-agent",
+          title: "Forked reviewer",
+          settings: {
+            harnessId: "claude",
+            model: "claude-sonnet-4",
+            permissionMode: "supervised",
+            profileId: null,
+          },
+          messages: [
+            { role: "user", messageId: "child-message" },
+            { role: "assistant" },
+            { role: "user", message: { kind: "agent" } },
+            {
+              role: "assistant",
+              messageId: forked.forkedFromMessageId,
+            },
+          ],
+        },
+        worktreeBinding: binding.binding,
+      },
+    });
+    releaseActiveSourceTurn();
+    await server.state.waitForIdle("epic-agent-create", createdAgent.agentId);
+
     const exactBindingFrame = await rpc(
       rpcConnection,
       "agent-create-exact-binding",
@@ -481,6 +649,42 @@ describe("agent.create", () => {
         reasoningEffort: null,
         serviceTier: null,
       },
+    });
+
+    const configuredFrame = await rpc(
+      connection,
+      "agent-configure-catalog",
+      "agent.configure",
+      { major: 4, minor: 0 },
+      {
+        senderAgentId: "parent-catalog",
+        epicId: "epic-catalog",
+        agentId: created.agentId,
+        harnessId: "codex",
+        model: "gpt-5-codex",
+        profileSelection: { kind: "ambient" },
+        reasoningEffort: "high",
+        fastMode: true,
+        permissionMode: null,
+      },
+    );
+    expect(configuredFrame).toMatchObject({ kind: "response", error: null });
+    expect(
+      agentConfigureResponseSchema.parse(responseResult(configuredFrame)),
+    ).toEqual({
+      settings: {
+        harnessId: "codex",
+        model: "gpt-5-codex",
+        profileSelection: { kind: "ambient" },
+        reasoningEffort: null,
+        fastMode: false,
+        permissionMode: "full_access",
+        agentMode: "regular",
+      },
+      warnings: [
+        "reasoningEffort 'high' is not available for model 'gpt-5-codex' and was ignored.",
+        "fastMode is not available for model 'gpt-5-codex' and was ignored.",
+      ],
     });
   });
 

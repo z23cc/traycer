@@ -2,6 +2,7 @@ import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { startAgentA2AMcpBridge } from "../a2a-mcp-bridge";
 import { createProcessTurnRunner } from "../cli-runner";
 
 async function createFakeCodexAppServer(): Promise<{
@@ -17,16 +18,98 @@ async function createFakeCodexAppServer(): Promise<{
     `#!/usr/bin/env node
 const fs = require("node:fs");
 const readline = require("node:readline");
+if (process.argv[2] === "--version") {
+  process.stdout.write(process.env.TRAYCER_TEST_CODEX_VERSION || "codex-cli 0.147.0");
+  process.exit(0);
+}
 const tracePath = process.env.TRAYCER_TEST_CODEX_TRACE;
 const scenario = process.env.TRAYCER_TEST_CODEX_SCENARIO || "text";
 const trace = {
   args: process.argv.slice(2),
   a2aToken: process.env.TRAYCER_A2A_MCP_TOKEN || null,
+  a2aMcp: null,
+  a2aError: null,
   requests: [],
 };
 let completionTimer = null;
 function save() { fs.writeFileSync(tracePath, JSON.stringify(trace)); }
 function send(value) { process.stdout.write(JSON.stringify(value) + "\\n"); }
+function parseMcpResponse(raw) {
+  if (raw.length === 0) return null;
+  try { return JSON.parse(raw); } catch {
+    const data = raw
+      .split(/\\r?\\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice("data:".length).trim())
+      .find((line) => line.length > 0);
+    if (data === undefined) throw new Error("MCP response was not JSON or SSE JSON");
+    return JSON.parse(data);
+  }
+}
+async function callMcp(url, authorization, payload) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: authorization,
+      Accept: "application/json, text/event-stream",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  const raw = await response.text();
+  if (!response.ok) {
+    throw new Error("MCP " + String(payload.method) + " failed: " + String(response.status) + " " + raw);
+  }
+  return parseMcpResponse(raw);
+}
+async function exerciseAgentA2A() {
+  const prefix = "mcp_servers.traycer_a2a.url=";
+  const config = trace.args.find((arg) => arg.startsWith(prefix));
+  if (config === undefined) throw new Error("Codex argv had no Traycer MCP URL");
+  if (trace.a2aToken === null) throw new Error("Codex env had no Traycer MCP token");
+  const url = JSON.parse(config.slice(prefix.length));
+  const authorization = "Bearer " + trace.a2aToken;
+  const initialized = await callMcp(url, authorization, {
+    jsonrpc: "2.0",
+    id: "initialize-codex",
+    method: "initialize",
+    params: {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "traycer-fake-codex", version: "1.0.0" },
+    },
+  });
+  await callMcp(url, authorization, {
+    jsonrpc: "2.0",
+    method: "notifications/initialized",
+    params: {},
+  });
+  const listed = await callMcp(url, authorization, {
+    jsonrpc: "2.0",
+    id: "tools-list-codex",
+    method: "tools/list",
+    params: {},
+  });
+  const tools = listed && listed.result && Array.isArray(listed.result.tools)
+    ? listed.result.tools.map((tool) => tool && tool.name).filter(Boolean)
+    : [];
+  const called = await callMcp(url, authorization, {
+    jsonrpc: "2.0",
+    id: "tools-call-codex",
+    method: "tools/call",
+    params: {
+      name: "traycer_send_message",
+      arguments: {
+        toAgentId: process.env.TRAYCER_TEST_A2A_TARGET || "parent-agent",
+        message: "reply from fake Codex",
+        expectReply: false,
+        responseId: null,
+      },
+    },
+  });
+  trace.a2aMcp = { url, initialized, tools, called };
+  save();
+}
 save();
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const request = JSON.parse(line);
@@ -180,6 +263,34 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
           params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } },
         });
       }, 25);
+      return;
+    }
+    if (scenario === "a2a-mcp") {
+      void exerciseAgentA2A()
+        .then(() => {
+          send({
+            jsonrpc: "2.0",
+            method: "item/agentMessage/delta",
+            params: { threadId: "thread-1", turnId: "turn-1", itemId: "message-1", delta: "replied through A2A" },
+          });
+          send({
+            jsonrpc: "2.0",
+            method: "turn/completed",
+            params: { threadId: "thread-1", turn: { id: "turn-1" } },
+          });
+        })
+        .catch((error) => {
+          trace.a2aError = error instanceof Error ? error.message : String(error);
+          save();
+          send({
+            jsonrpc: "2.0",
+            method: "turn/completed",
+            params: {
+              threadId: "thread-1",
+              turn: { id: "turn-1", status: "failed", error: { message: trace.a2aError } },
+            },
+          });
+        });
       return;
     }
     if (scenario === "approval") {
@@ -450,6 +561,7 @@ process.stdout.write(JSON.stringify(payload) + "\\n");
       ...process.env,
       TRAYCER_CODEX_PATH: path,
       TRAYCER_TEST_CODEX_TRACE: tracePath,
+      TRAYCER_TEST_CODEX_VERSION: "codex-cli 0.147.0",
       TRAYCER_A2A_MCP_TOKEN: "wrong-inherited-token",
       PATH: process.env.PATH,
     });
@@ -490,11 +602,163 @@ process.stdout.write(JSON.stringify(payload) + "\\n");
       'mcp_servers.traycer_a2a.url="http://127.0.0.1:43210/mcp"',
       "-c",
       'mcp_servers.traycer_a2a.bearer_token_env_var="TRAYCER_A2A_MCP_TOKEN"',
+      "-c",
+      "mcp_servers.traycer_a2a.tool_timeout_sec=31536000",
+      "-c",
+      'features.code_mode.direct_only_tool_namespaces=["mcp__traycer_a2a","traycer_a2a"]',
+      "-c",
+      "tools.experimental_request_user_input.enabled=false",
       "app-server",
       "--listen",
       "stdio://",
     ]);
     expect(trace.a2aToken).toBe("secret-token");
+  });
+
+  it("omits the code-mode A2A namespace for Codex versions before 0.142", async () => {
+    const { dir, path, tracePath } = await createFakeCodexAppServer();
+    const runner = createProcessTurnRunner({
+      ...process.env,
+      TRAYCER_CODEX_PATH: path,
+      TRAYCER_TEST_CODEX_TRACE: tracePath,
+      TRAYCER_TEST_CODEX_VERSION:
+        "runtime warning from dependency 99.0.0\ncodex-cli 0.141.0",
+      PATH: process.env.PATH,
+    });
+
+    await runner.run(
+      {
+        harnessId: "codex",
+        model: "gpt-5-codex",
+        permissionMode: "supervised",
+        reasoningEffort: null,
+        serviceTier: null,
+        prompt: "reply to the parent",
+        cwd: dir,
+        sessionId: null,
+        signal: new AbortController().signal,
+        traycerA2AMcp: {
+          url: "http://127.0.0.1:43210/mcp",
+          token: "legacy-secret-token",
+        },
+      },
+      () => {
+        return;
+      },
+    );
+
+    const trace = JSON.parse(await readFile(tracePath, "utf8")) as {
+      readonly args: string[];
+      readonly a2aToken: string | null;
+    };
+    expect(trace.args).toEqual([
+      "-c",
+      'mcp_servers.traycer_a2a.url="http://127.0.0.1:43210/mcp"',
+      "-c",
+      'mcp_servers.traycer_a2a.bearer_token_env_var="TRAYCER_A2A_MCP_TOKEN"',
+      "-c",
+      "mcp_servers.traycer_a2a.tool_timeout_sec=31536000",
+      "-c",
+      "tools.experimental_request_user_input.enabled=false",
+      "app-server",
+      "--listen",
+      "stdio://",
+    ]);
+    expect(trace.a2aToken).toBe("legacy-secret-token");
+  });
+
+  it("lets a Codex app-server discover and call the host-owned A2A tool", async () => {
+    const sent: unknown[] = [];
+    const bridge = await startAgentA2AMcpBridge(
+      (request) => {
+        sent.push(request);
+        return { ok: true, result: { responseId: null } };
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    );
+    const session = bridge.openSession({
+      agentId: "codex-agent",
+      epicId: "epic-codex-a2a",
+    });
+    const { dir, path, tracePath } = await createFakeCodexAppServer();
+    const runner = createProcessTurnRunner({
+      ...process.env,
+      TRAYCER_CODEX_PATH: path,
+      TRAYCER_TEST_CODEX_TRACE: tracePath,
+      TRAYCER_TEST_CODEX_SCENARIO: "a2a-mcp",
+      TRAYCER_TEST_CODEX_VERSION: "codex-cli 0.147.0",
+      TRAYCER_TEST_A2A_TARGET: "parent-agent",
+      PATH: process.env.PATH,
+    });
+
+    try {
+      const result = await runner.run(
+        {
+          harnessId: "codex",
+          model: "gpt-5-codex",
+          permissionMode: "supervised",
+          reasoningEffort: null,
+          serviceTier: null,
+          prompt: "reply to the parent",
+          cwd: dir,
+          sessionId: null,
+          signal: new AbortController().signal,
+          traycerA2AMcp: { url: session.url, token: session.token },
+        },
+        () => {
+          return;
+        },
+      );
+      expect(result.text).toBe("replied through A2A");
+
+      const trace = JSON.parse(await readFile(tracePath, "utf8")) as {
+        readonly a2aError: string | null;
+        readonly a2aMcp: {
+          readonly url: string;
+          readonly tools: string[];
+          readonly called: unknown;
+        } | null;
+      };
+      expect(trace.a2aError).toBeNull();
+      expect(trace.a2aMcp).toMatchObject({
+        url: session.url,
+        tools: [
+          "traycer_send_message",
+          "traycer_list_harness_models",
+          "traycer_list_provider_profiles",
+          "traycer_get_provider_profile_rate_limits",
+        ],
+        called: {
+          jsonrpc: "2.0",
+          id: "tools-call-codex",
+          result: {
+            content: [
+              { type: "text", text: JSON.stringify({ responseId: null }) },
+            ],
+          },
+        },
+      });
+      expect(sent).toEqual([
+        {
+          senderAgentId: "codex-agent",
+          epicId: "epic-codex-a2a",
+          receiverAgentId: "parent-agent",
+          prompt: "reply from fake Codex",
+          expectReply: false,
+          responseId: null,
+        },
+      ]);
+    } finally {
+      session.dispose();
+      await bridge.close();
+    }
   });
 
   it("resumes the existing Codex thread before starting a follow-up turn", async () => {

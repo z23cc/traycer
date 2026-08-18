@@ -5,6 +5,10 @@ import { hostRpcRegistry } from "@traycer/protocol/host/registry";
 import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-floor";
 
 const IMPLEMENTED_OPTIONAL_METHOD_NAMES = [
+  "agent.configure",
+  "agent.fork",
+  "agent.getProviderProfileRateLimits",
+  "agent.listProviderProfiles",
   "epic.getChatRunSettings",
   "epic.setChatArchived",
   "epic.updateChatProfile",
@@ -29,6 +33,7 @@ export function hostConnectionManifest(): SplitConnectionManifest {
     manifest: {
       ...split.manifest,
       "agent.list": { major: 6, minor: 0 },
+      "git.listChangedFiles": { major: 1, minor: 0 },
       "workspace.prepareFolders": { major: 1, minor: 0 },
       "worktree.create": { major: 1, minor: 0 },
       "worktree.createPaths": { major: 1, minor: 0 },
