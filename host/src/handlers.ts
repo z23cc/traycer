@@ -60,8 +60,13 @@ import {
   gitListChangedFilesRequestSchema,
 } from "@traycer/protocol/host/git-schemas";
 import { hostNotificationsListRequestSchema } from "@traycer/protocol/host/notifications/host-notifications";
+import { rateLimitUsageRequestSchemaV12 } from "@traycer/protocol/host/rate-limit/schemas";
 import {
   workspaceListDirectoryRequestSchema,
+  workspaceListFileTreeRequestSchema,
+  workspaceGitMentionSuggestionsRequestSchema,
+  workspacePathMentionSuggestionsRequestSchema,
+  type WorkspaceGitMentionSuggestionsRequest,
   workspacePrepareFoldersRequestSchemaV11,
   workspaceReadFileRequestSchema,
   workspaceResolvePathsByRepoIdentifiersRequestSchema,
@@ -77,6 +82,17 @@ import {
   workspaceBindingRemoveEntryRequestSchema,
 } from "@traycer/protocol/host/worktree-schemas";
 import { listWorkspaceDirectory, readWorkspaceFile } from "./workspace-fs";
+import {
+  listWorkspaceFileTree,
+  mentionWorkspaceFiles,
+  mentionWorkspaceFolders,
+} from "./workspace-file-tree";
+import {
+  mentionWorkspaceGitBranches,
+  mentionWorkspaceGitCommits,
+  mentionWorkspaceGitRoot,
+  mentionWorkspaceWorktrees,
+} from "./workspace-git-mentions";
 import { resolveHarnessExecutable } from "./cli-resolve";
 import { probeGitCapabilities } from "./git-probe";
 import { listGitChangedFiles } from "./git-status";
@@ -128,6 +144,26 @@ function hostStatus(): HandlerResult {
       busy: false,
       busySessionCount: 0,
       updateProgress: null,
+    },
+  };
+}
+
+function getRateLimitUsage(params: unknown): HandlerResult {
+  const parsed = rateLimitUsageRequestSchemaV12.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  return {
+    ok: true,
+    result: {
+      totalTokens: 15,
+      remainingTokens: 15,
+      providerRateLimits:
+        parsed.data.providerId === undefined
+          ? null
+          : {
+              provider: parsed.data.providerId,
+              available: false,
+              reason: "rate_limits_not_available",
+            },
     },
   };
 }
@@ -287,6 +323,7 @@ export function createHandlers(
   const handlers: Readonly<Record<string, MethodHandler>> = {
     "host.status": hostStatus,
     "host.getRuntimeCapabilities": runtimeCapabilities,
+    "host.getRateLimitUsage": (params) => getRateLimitUsage(params),
     "providers.list": providersList,
     "agent.gui.listHarnesses": listGuiHarnesses,
     "agent.gui.listModels": listGuiModels,
@@ -336,6 +373,13 @@ export function createHandlers(
     "workspace.resolvePathsByRepoIdentifiers": (params) =>
       resolvePathsByRepoIdentifiers(state, params),
     "workspace.listDirectory": (params) => listDirectory(params),
+    "workspace.listFileTree": (params) => listFileTree(params),
+    "workspace.mentionFiles": (params) => mentionFiles(params),
+    "workspace.mentionFolders": (params) => mentionFolders(params),
+    "workspace.mentionWorktrees": (params) => mentionWorktrees(params),
+    "workspace.mentionGitRoot": (params) => mentionGitRoot(params),
+    "workspace.mentionGitBranches": (params) => mentionGitBranches(params),
+    "workspace.mentionGitCommits": (params) => mentionGitCommits(params),
     "workspace.readFile": (params) => readFile(params),
     "epic.create": (params) => createEpic(state, runner, params),
     "epic.createArtifact": (params) => createArtifact(state, params),
@@ -827,6 +871,63 @@ function readFile(params: unknown): HandlerResult {
       error: read.error,
     },
   };
+}
+
+function listFileTree(params: unknown): HandlerResult {
+  const parsed = workspaceListFileTreeRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  try {
+    return { ok: true, result: listWorkspaceFileTree(parsed.data) };
+  } catch (error) {
+    return storeFailure(error);
+  }
+}
+
+function mentionFiles(params: unknown): HandlerResult {
+  const parsed = workspacePathMentionSuggestionsRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  return { ok: true, result: mentionWorkspaceFiles(parsed.data) };
+}
+
+function mentionFolders(params: unknown): HandlerResult {
+  const parsed = workspacePathMentionSuggestionsRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  return { ok: true, result: mentionWorkspaceFolders(parsed.data) };
+}
+
+async function mentionWorktrees(params: unknown): Promise<HandlerResult> {
+  const parsed = workspacePathMentionSuggestionsRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  try {
+    return { ok: true, result: await mentionWorkspaceWorktrees(parsed.data) };
+  } catch (error) {
+    return storeFailure(error);
+  }
+}
+
+async function mentionGitRoot(params: unknown): Promise<HandlerResult> {
+  return await gitMentionRequest(params, mentionWorkspaceGitRoot);
+}
+
+async function mentionGitBranches(params: unknown): Promise<HandlerResult> {
+  return await gitMentionRequest(params, mentionWorkspaceGitBranches);
+}
+
+async function mentionGitCommits(params: unknown): Promise<HandlerResult> {
+  return await gitMentionRequest(params, mentionWorkspaceGitCommits);
+}
+
+async function gitMentionRequest(
+  params: unknown,
+  action: (request: WorkspaceGitMentionSuggestionsRequest) => Promise<unknown>,
+): Promise<HandlerResult> {
+  const parsed = workspaceGitMentionSuggestionsRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  try {
+    return { ok: true, result: await action(parsed.data) };
+  } catch (error) {
+    return storeFailure(error);
+  }
 }
 
 function gitCapabilities(params: unknown): HandlerResult {

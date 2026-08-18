@@ -34,6 +34,7 @@ export function hostConnectionManifest(): SplitConnectionManifest {
       ...split.manifest,
       "agent.list": { major: 6, minor: 0 },
       "git.listChangedFiles": { major: 1, minor: 0 },
+      "host.getRateLimitUsage": { major: 3, minor: 0 },
       "workspace.prepareFolders": { major: 1, minor: 0 },
       "worktree.create": { major: 1, minor: 0 },
       "worktree.createPaths": { major: 1, minor: 0 },
