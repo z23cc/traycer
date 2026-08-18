@@ -1,0 +1,32 @@
+{
+  "name": "@traycer/host",
+  "license": "MIT",
+  "version": "0.0.0-dev",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun src/index.ts",
+    "compile": "tsc --noEmit",
+    "lint": "eslint . --cache --fix --max-warnings 0",
+    "format": "bun x prettier --write .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@traycer/protocol": "workspace:*",
+    "ws": "^8.18.3",
+    "y-protocols": "catalog:",
+    "yjs": "^13.6.32",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@types/ws": "^8.18.1",
+    "@typescript-eslint/eslint-plugin": "catalog:",
+    "@typescript-eslint/parser": "catalog:",
+    "eslint": "catalog:",
+    "prettier": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

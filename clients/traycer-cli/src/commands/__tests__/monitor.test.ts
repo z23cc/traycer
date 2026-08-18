@@ -365,6 +365,43 @@ describe("role awareness frames (negotiated @1.1)", () => {
   });
 });
 
+describe("inbox notice guidance", () => {
+  it("keeps same-direction follow-ups on the pending thread", async () => {
+    const stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+    const result = runMonitor({ agentId: "a1", epicId: "e1" }).catch((e) => e);
+    await flush(0);
+
+    sessions[0].serverFrame?.({
+      kind: "notice",
+      hasBinaryPayload: false,
+      notice: {
+        kind: "inactivity",
+        senderAgentId: "a1",
+        responseId: "response-thread-1",
+        receiverAgentId: "peer-1",
+        receiverTitle: "Peer agent",
+        receiverHarnessId: "codex",
+        epicId: "e1",
+        reason: "turn-ended",
+        detail: null,
+        droppedReceivers: null,
+        noticedAt: 123,
+      },
+    });
+
+    const output = stdoutSpy.mock.calls.map((call) => String(call[0])).join("");
+    expect(output).toContain(
+      'traycer agent send --to peer-1 --expect-reply --message "<follow-up>"',
+    );
+    expect(output).not.toContain("--response-id response-thread-1");
+
+    stdoutSpy.mockRestore();
+    void result;
+  });
+});
+
 describe("mixed-version inbox message frames", () => {
   it("parses and prints an old-host (@1.0-negotiated) message frame with no eventId, and never calls agent.inbox.ack for it", async () => {
     getMethodSchemaVersionMock.mockReturnValueOnce({ major: 1, minor: 0 });

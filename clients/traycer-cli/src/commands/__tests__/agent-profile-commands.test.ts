@@ -173,6 +173,62 @@ describe("--profile parsing", () => {
 });
 
 describe("agent create profile selection", () => {
+  it("sends the complete v3 request and preserves successful warnings in both outputs", async () => {
+    rpcMock.mockResolvedValue({
+      agentId: "agent_child",
+      warnings: ["reasoning was ignored", "fast mode was ignored"],
+    });
+
+    const result = await buildAgentCreateCommand({
+      epicId: "epic_1",
+      senderAgentId: "agent_parent",
+      name: "Review child",
+      surface: "gui",
+      harness: "codex",
+      model: "gpt-5.4",
+      reasoningEffort: "high",
+      fast: true,
+      permissionMode: "supervised",
+      profile: null,
+      cwd: null,
+      workspacePaths: [],
+      workspaceEntries: [
+        "/Users/traycer/src/project=/Users/traycer/.traycer/worktrees/project/review",
+      ],
+    })(makeCtx());
+
+    expect(rpcMock).toHaveBeenCalledWith("agent.create", {
+      senderAgentId: "agent_parent",
+      epicId: "epic_1",
+      name: "Review child",
+      surface: "gui",
+      harnessId: "codex",
+      model: "gpt-5.4",
+      agentMode: "regular",
+      reasoningEffort: "high",
+      fastMode: true,
+      permissionMode: "supervised",
+      workspace: {
+        entries: [
+          {
+            path: "/Users/traycer/.traycer/worktrees/project/review",
+            workspacePath: "/Users/traycer/src/project",
+          },
+        ],
+      },
+      profileSelection: { kind: "last_used" },
+    });
+    expect(result).toEqual({
+      data: {
+        agentId: "agent_child",
+        warnings: ["reasoning was ignored", "fast mode was ignored"],
+      },
+      human:
+        "agent_child\nWarnings:\n- reasoning was ignored\n- fast mode was ignored",
+      exitCode: 0,
+    });
+  });
+
   it("defaults permission mode to full access and forwards an override", async () => {
     rpcMock.mockResolvedValue({ agentId: "agent_child", warnings: [] });
 

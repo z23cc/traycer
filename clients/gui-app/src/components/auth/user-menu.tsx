@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { TooltipWrapper } from "@/components/ui/tooltip-wrapper";
 import { computeInitials } from "@/lib/auth/compute-initials";
+import { isLocalAuthEnabled } from "@/lib/auth/local-session";
 import { resolveManageSubscriptionUrl } from "@/lib/auth/manage-subscription-url";
 import { useAuthService } from "@/lib/host";
 import { useRunnerHost } from "@/providers/use-runner-host";
@@ -41,9 +42,11 @@ export function UserMenu(props: UserMenuProps) {
   const settingsChord = useBindingForAction("app.settings.open");
   useTitleBarDragSuppression("user-menu", open);
   const initials = computeInitials(props.userName, props.email);
+  const localAuth = isLocalAuthEnabled();
   const manageSubscriptionUrl = resolveManageSubscriptionUrl(
     runnerHost.authnBaseUrl,
   );
+  const hasMenuActions = props.showAppSettings || !localAuth;
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
       <TooltipWrapper
@@ -89,7 +92,7 @@ export function UserMenu(props: UserMenuProps) {
             {props.email}
           </span>
         </div>
-        <DropdownMenuSeparator />
+        {hasMenuActions ? <DropdownMenuSeparator /> : null}
         {props.showAppSettings ? (
           <DropdownMenuItem
             data-testid="user-menu-app-settings"
@@ -114,36 +117,42 @@ export function UserMenu(props: UserMenuProps) {
             )}
           </DropdownMenuItem>
         ) : null}
-        <DropdownMenuItem
-          data-testid="user-menu-manage-subscription"
-          onSelect={() => {
-            setOpen(false);
-            void runnerHost.openExternalLink(manageSubscriptionUrl).then(() => {
-              Analytics.getInstance().track(
-                AnalyticsEvent.SubscriptionManagementOpened,
-                { source: "direct_ui" },
-              );
-            });
-          }}
-        >
-          <ExternalLink className="size-3.5" />
-          Manage subscription
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem
-          data-testid="user-menu-sign-out"
-          variant="destructive"
-          onSelect={() => {
-            setOpen(false);
-            Analytics.getInstance().track(AnalyticsEvent.SignOutRequested, {
-              source: "direct_ui",
-            });
-            void auth.signOut();
-          }}
-        >
-          <LogOut className="size-3.5" />
-          Sign out
-        </DropdownMenuItem>
+        {localAuth ? null : (
+          <>
+            <DropdownMenuItem
+              data-testid="user-menu-manage-subscription"
+              onSelect={() => {
+                setOpen(false);
+                void runnerHost
+                  .openExternalLink(manageSubscriptionUrl)
+                  .then(() => {
+                    Analytics.getInstance().track(
+                      AnalyticsEvent.SubscriptionManagementOpened,
+                      { source: "direct_ui" },
+                    );
+                  });
+              }}
+            >
+              <ExternalLink className="size-3.5" />
+              Manage subscription
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              data-testid="user-menu-sign-out"
+              variant="destructive"
+              onSelect={() => {
+                setOpen(false);
+                Analytics.getInstance().track(AnalyticsEvent.SignOutRequested, {
+                  source: "direct_ui",
+                });
+                void auth.signOut();
+              }}
+            >
+              <LogOut className="size-3.5" />
+              Sign out
+            </DropdownMenuItem>
+          </>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

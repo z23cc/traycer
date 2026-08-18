@@ -2,9 +2,10 @@
 
 Default branch: `main`. Bun 1.3.12 workspaces + Nx.
 
-Open-source **clients, CLI, and protocol**. The Traycer Host and cloud backends
-are **not** here — the CLI provisions a signed host from GitHub Releases; see
-[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
+Open-source **clients, CLI, protocol, and a local host**. The official
+Traycer cloud backends are **not** here. `host/` is this fork's in-repo
+WebSocket host; the official signed host from GitHub Releases is still
+what `make dev-desktop` provisions — see [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
 
 ## Nested docs (read when editing there)
 
@@ -16,6 +17,7 @@ are **not** here — the CLI provisions a signed host from GitHub Releases; see
 | Path | Package | Role |
 |---|---|---|
 | `protocol/` | `@traycer/protocol` | Client⇄host wire contract |
+| `host/` | `@traycer/host` | Local host (WS `/rpc` + Claude/Codex CLIs, no Traycer cloud) |
 | `clients/traycer-cli/` | `@traycer-clients/traycer-cli` | CLI (host install, auth, agents) |
 | `clients/shared/` | `@traycer-clients/shared` | Transport / auth / formatting |
 | `clients/gui-app/` | `@traycer-clients/gui-app` | GUI renderer |
@@ -36,8 +38,9 @@ make dev-desktop                # signed host from Releases + HMR desktop
 make dev-desktop VERSION=1.2.3  # pin host release
 ```
 
-`make dev-desktop` talks to the **production** cloud — no local backends. Details:
-[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
+`make dev-desktop` starts the in-repo `@traycer/host` plus the HMR desktop.
+`make dev-desktop VERSION=1.2.3` still provisions an official signed host.
+Details: [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
 
 **Commits:** do **not** manually run `compile` / `build` / `lint` / `format`
 before committing. `pre-commit` already runs the affected workspace checks

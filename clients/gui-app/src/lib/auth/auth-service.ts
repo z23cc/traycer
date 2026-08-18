@@ -64,6 +64,12 @@ import { projectShareableTeams } from "@/hooks/epic/use-epic-shareable-teams";
 import { onWakeReconnect } from "@/lib/host/wake-reconnect";
 import { appLogger, describeLogError } from "@/lib/logger";
 import { AuthTokenStore } from "./auth-token-store";
+import {
+  LOCAL_AUTH_BEARER,
+  createLocalAuthenticatedUser,
+  isLocalAuthBearer,
+  isLocalAuthEnabled,
+} from "./local-session";
 
 // Legacy encrypted-localStorage token slots (the pre-§3 desktop store). Two
 // separate string slots — NOT one JSON blob — matching the retired
@@ -553,6 +559,10 @@ export class AuthService {
     if (this.isDisposed()) {
       return;
     }
+    if (isLocalAuthEnabled()) {
+      this.applyLocalSession();
+      return;
+    }
     const generation = this.identityGeneration;
     if (snapshot.status === "signing-in") {
       if (!this.isIdentityCurrent(generation)) {
@@ -613,6 +623,10 @@ export class AuthService {
 
   async start(): Promise<void> {
     if (this.disposed) {
+      return;
+    }
+    if (isLocalAuthEnabled()) {
+      this.applyLocalSession();
       return;
     }
     // Rehydration defers to any identity transition that starts while it is
@@ -1160,6 +1174,10 @@ export class AuthService {
     if (this.disposed) {
       return;
     }
+    if (isLocalAuthEnabled()) {
+      this.applyLocalSession();
+      return;
+    }
     this.identityGeneration += 1;
     // Explicit user intent replaces the automatic loop: a pending recovery
     // tick would only race the attempt (it stands down, but its timer would
@@ -1236,6 +1254,10 @@ export class AuthService {
 
   async signOut(): Promise<void> {
     if (this.isDisposed()) {
+      return;
+    }
+    if (isLocalAuthEnabled()) {
+      this.applyLocalSession();
       return;
     }
     // Invalidate any sign-in finalization that already passed its epoch fence
@@ -1519,6 +1541,9 @@ export class AuthService {
    * credits live only in the query cache - never duplicated into the store.
    */
   async fetchAuthenticatedUser(): Promise<AuthenticatedUser | null> {
+    if (isLocalAuthBearer(this.currentBearer)) {
+      return createLocalAuthenticatedUser();
+    }
     const outcome = await this.revalidateCurrentContext();
     // `null` (no live context) or `rejected` (revalidate already signed out) →
     // no user; the panel renders its signed-out/empty state, not an error.
@@ -1593,6 +1618,9 @@ export class AuthService {
     }
     if (this.currentBearer === null) {
       return null;
+    }
+    if (isLocalAuthBearer(this.currentBearer)) {
+      return { hosts: [] };
     }
     // Two independent callers reach this endpoint: the globally-mounted
     // `HostDirectoryService` poll and the Settings liveness query, plus their
@@ -1690,6 +1718,9 @@ export class AuthService {
     signal: AbortSignal,
   ): Promise<ListUserSessionsResponse | null> {
     signal.throwIfAborted();
+    if (isLocalAuthBearer(this.currentBearer)) {
+      return { sessions: [] };
+    }
     const initialAuthority = this.captureLiveSessionAuthority();
     if (initialAuthority === null) {
       return null;
@@ -2317,6 +2348,9 @@ export class AuthService {
     if (!this.isLiveSessionAuthority(expected)) {
       return;
     }
+    if (isLocalAuthBearer(expected.bearer)) {
+      return;
+    }
     // Defer to an in-flight reactive revalidation. Both paths drive the locked
     // `rotate`; awaiting here serializes the proactive and reactive refreshes
     // within this process, and the file lock serializes across processes - so at
@@ -2741,7 +2775,29 @@ export class AuthService {
    * locked `rotate` path, never here.
    */
   private validateToken(token: string): Promise<ValidationOutcome> {
+    if (isLocalAuthBearer(token)) {
+      return Promise.resolve({
+        kind: "valid",
+        user: createLocalAuthenticatedUser(),
+      });
+    }
     return this.runnerHost.validateAuthTokenIdentity(token);
+  }
+
+  /**
+   * Projects a machine-local identity with no Traycer-cloud JWT. Used when
+   * this fork talks to a self-hosted Host. Does not persist the bearer.
+   */
+  private applyLocalSession(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.settleSessionRecovery("local-session");
+    this.applySignedIn(
+      LOCAL_AUTH_BEARER,
+      createLocalAuthenticatedUser(),
+      undefined,
+    );
   }
 
   /**

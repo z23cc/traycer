@@ -9,15 +9,14 @@ GIT_ROOT := $(shell git rev-parse --show-toplevel)
 # ---------------------------------------------------------------------------
 # Developer stack
 #
-# Runs the desktop dev shell (Vite HMR) against PRODUCTION, with the Traycer
-# host DOWNLOADED from GitHub Releases. The Traycer Host and cloud backend are
-# not part of this repo — the CLI provisions the real signed host release and
-# the clients talk to the production cloud. macOS/Linux.
+# Runs the desktop dev shell (Vite HMR) against the in-repo local host.
+# Pass VERSION= to download an official signed host instead.
 #
-#   make dev-desktop                 # download + run against the LATEST host
-#   make dev-desktop VERSION=1.2.3   # pin a specific host release
-#   make host-stop                   # stop the dev host (leaves it installed)
-#   make host-clean                  # deregister + remove the dev host
+#   make dev-desktop                 # in-repo @traycer/host + HMR desktop
+#   make dev-desktop VERSION=1.2.3   # official host release + HMR desktop
+#   make dev-host                    # in-repo host only
+#   make host-stop                   # stop an official-dev host service
+#   make host-clean                  # deregister + remove an official-dev host
 #
 # The CLI verifies the downloaded host against the signing public key committed
 # in clients/traycer-cli/src/config.ts, so no key setup is needed. The dev host
@@ -30,6 +29,11 @@ CLI := bun clients/traycer-cli/src/index.ts
 
 dev-desktop:
 	@bun run dev-desktop -- $(if $(strip $(VERSION)),--release $(VERSION),) $(ARGS)
+
+# Local host from this repo (no GitHub Releases binary, no Traycer JWT).
+# Writes ~/.traycer/host/dev[-runs/<slot>]/pid.json for Desktop discovery.
+dev-host:
+	@bun host/src/index.ts
 
 # Stop the dev host service (leaves it installed).
 host-stop:

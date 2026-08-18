@@ -856,7 +856,7 @@ function printInboxNotice(notice: AgentInboxNotice): void {
     "",
     `[traycer inbox] inactivity notice — ${inactivityHeadline(notice, receiverLabel)}${harnessSuffix} (responseId ${notice.responseId})`,
     `[traycer inbox] check what it is doing: traycer agent transcript --agent-id ${notice.receiverAgentId}`,
-    `[traycer inbox] the request is still open; a follow-up on the same thread can be sent with: traycer agent send --to ${notice.receiverAgentId} --response-id ${notice.responseId} --message "<follow-up>"`,
+    `[traycer inbox] the request is still open; send a follow-up on the same thread with: traycer agent send --to ${notice.receiverAgentId} --expect-reply --message "<follow-up>"`,
     `[traycer inbox] based on your judgment decide how to proceed — read transcript, follow up, launch a new agent, etc.`,
     "",
   ];

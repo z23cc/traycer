@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { resolveWorktreeBranchSelection } from "../worktree-create";
+import {
+  buildWorktreeCreateCommand,
+  resolveWorktreeBranchSelection,
+} from "../worktree-create";
 import { callHostRpc } from "../../internal/host-rpc";
 import { CliError, CLI_ERROR_CODES } from "../../runner/errors";
+import type { CommandContext } from "../../runner/runner";
 
 const loggerMock = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -30,6 +34,7 @@ vi.mock("../../internal/host-rpc", async () => {
 const rpcMock = vi.mocked(callHostRpc);
 
 const WORKSPACE = "/Users/dev/src/traycer";
+const ctx = {} as CommandContext;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -196,5 +201,91 @@ describe("resolveWorktreeBranchSelection", () => {
       }),
     ).rejects.toMatchObject({ code: CLI_ERROR_CODES.INVALID_ARGUMENT });
     expect(rpcMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("buildWorktreeCreateCommand", () => {
+  it("returns the complete successful host result after sending the canonical create-paths request", async () => {
+    const response = {
+      entries: [
+        {
+          workspacePath: WORKSPACE,
+          path: "/Users/dev/.traycer/worktrees/acme__traycer/feature-x",
+          mode: "worktree" as const,
+          repoIdentifier: { owner: "acme", repo: "traycer" },
+          branch: "feature/x",
+        },
+      ],
+      perEntry: [
+        {
+          workspacePath: WORKSPACE,
+          ok: true,
+          worktreePath: "/Users/dev/.traycer/worktrees/acme__traycer/feature-x",
+          branch: "feature/x",
+          errorMessage: null,
+        },
+      ],
+    };
+    rpcMock.mockResolvedValue(response);
+
+    const result = await buildWorktreeCreateCommand({
+      workspacePath: WORKSPACE,
+      newBranch: "feature/x",
+      existingBranch: null,
+      sourceBranch: "main",
+      carryUncommittedChanges: true,
+    })(ctx);
+
+    expect(rpcMock).toHaveBeenCalledOnce();
+    expect(rpcMock).toHaveBeenCalledWith("worktree.createPaths", {
+      entries: [
+        {
+          workspacePath: WORKSPACE,
+          branch: {
+            type: "new",
+            name: "feature/x",
+            source: "main",
+            carryUncommittedChanges: true,
+            collision: "fail",
+          },
+        },
+      ],
+    });
+    expect(result).toEqual({
+      data: response,
+      human: JSON.stringify(response, null, 2),
+      exitCode: 0,
+    });
+  });
+
+  it("preserves a per-entry failure result and exits unsuccessfully", async () => {
+    const response = {
+      entries: [],
+      perEntry: [
+        {
+          workspacePath: WORKSPACE,
+          ok: false,
+          worktreePath: null,
+          branch: "release/1.0",
+          errorMessage:
+            "release/1.0 is already checked out in /Users/dev/src/release",
+        },
+      ],
+    };
+    rpcMock.mockResolvedValue(response);
+
+    const result = await buildWorktreeCreateCommand({
+      workspacePath: WORKSPACE,
+      newBranch: null,
+      existingBranch: "release/1.0",
+      sourceBranch: null,
+      carryUncommittedChanges: false,
+    })(ctx);
+
+    expect(result).toEqual({
+      data: response,
+      human: JSON.stringify(response, null, 2),
+      exitCode: 1,
+    });
   });
 });

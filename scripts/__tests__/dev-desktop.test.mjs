@@ -68,6 +68,13 @@ describe("dev-desktop CLI argv construction", () => {
     ).toBe("1.2.3");
     expect(devDesktop.parseReleaseArg(["bun", "script"])).toBeNull();
   });
+
+  it("defaults to the in-repo host unless --release is set", () => {
+    expect(devDesktop.parseHostMode(["bun", "script"])).toBe("local");
+    expect(
+      devDesktop.parseHostMode(["bun", "script", "--release", "1.2.3"]),
+    ).toBe("official");
+  });
 });
 
 describe("dev-desktop slot resolution", () => {
@@ -124,6 +131,7 @@ describe("dev-desktop concurrent stack entries", () => {
       "/tmp/traycer/example-slot/host.log",
       "example-slot",
       19123,
+      "official",
     );
     const electronEntry = entries.find((e) => e.name === "electron");
     const hostEntry = entries.find((e) => e.name === "host");
@@ -134,6 +142,20 @@ describe("dev-desktop concurrent stack entries", () => {
     expect(hostEntry?.command).toContain(
       "/tmp/traycer/example-slot/host.log",
     );
+  });
+
+  it("local host mode starts the in-repo host and marks Electron as TRAYCER_LOCAL_HOST", () => {
+    const entries = devDesktop.buildDevDesktopEntries(
+      "/tmp/traycer/example-slot/host.log",
+      "example-slot",
+      19123,
+      "local",
+    );
+    const electronEntry = entries.find((e) => e.name === "electron");
+    const hostEntry = entries.find((e) => e.name === "host");
+    expect(electronEntry.command).toContain("TRAYCER_LOCAL_HOST=1");
+    expect(hostEntry.command).toContain("bun host/src/index.ts");
+    expect(hostEntry.command).toContain("TRAYCER_HOST_ENV=dev");
   });
 
   it("makes concurrent shutdown triggers await the same teardown", async () => {

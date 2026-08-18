@@ -33,6 +33,7 @@ import {
   waitForHostReady,
   type HostReadinessResult,
 } from "./host-readiness";
+import { isLocalInRepoHost } from "./host-local-mode";
 import {
   clearHostRemovedByUser,
   isHostRemovedByUser,
@@ -1893,12 +1894,41 @@ export class HostController {
         if (await isHostRemovedByUser()) {
           return { kind: "ok", value: { running: false, version: null } };
         }
+        if (isLocalInRepoHost(process.env)) {
+          return this.convergeReadyLocalInRepoHost();
+        }
         if (await this.isPackagedMacOwned()) {
           return this.convergeReadyPackagedMac(force);
         }
         return this.convergeReadyCliOwned(force);
       },
     );
+  }
+
+  private async convergeReadyLocalInRepoHost(): Promise<
+    MutationOutcome<ConvergeReadyOk>
+  > {
+    const readiness = await waitForHostReady(
+      HOST_READY_TIMEOUT_MS,
+      this.layout.pidMetadataFile,
+      HOST_READY_POLL_MS,
+      null,
+    );
+    if (!readiness.ready) {
+      return {
+        kind: "failed",
+        message: `In-repo host is not reachable (${readiness.reason}). Start it with make dev-desktop or make dev-host.`,
+      };
+    }
+    if (!(await this.publishReachableHostSnapshot())) {
+      return this.failedAfterServiceCycle(
+        "In-repo host became unavailable while publishing reachability.",
+      );
+    }
+    return {
+      kind: "ok",
+      value: { running: true, version: readiness.version },
+    };
   }
 
   private async convergeReadyCliOwned(

@@ -1,11 +1,9 @@
 #!/usr/bin/env bun
 // Dev orchestrator for `make dev-desktop` (OSS).
 //
-// Mirrors the internal `make dev-desktop` flow, but the Traycer host is
-// DOWNLOADED from GitHub Releases instead of built from source — the
-// Traycer Host and cloud backend are not part of this repo. The desktop runs
-// against PRODUCTION: its baked config points at the real cloud, and the CLI
-// provisions the real signed host release.
+// Mirrors the internal `make dev-desktop` flow. This fork's default is the
+// in-repo `@traycer/host` (no GitHub Releases download, no Traycer JWT).
+// Pass `--release <version>` to provision the official signed host instead.
 //
 // Multi-run: each invocation gets its own dev slot, derived deterministically
 // from the repo root (override via `--slot <name>` / `DEV_DESKTOP_SLOT`), so
@@ -22,22 +20,12 @@
 //     `bun <repo>/clients/traycer-cli/src/index.ts "$@"`, so the OS service
 //     plist resolves to a stable executable path (launchd's PATH is minimal,
 //     so absolute paths are baked into the wrapper).
-//   - Invokes `traycer host install [--release <version>]
-//     --allow-self-invocation`. The CLI runs from source
-//     (`config.environment === "dev"`), so it targets the dev slot
-//     automatically: it downloads + verifies the released host, swaps this
-//     run's dev install dir, writes
-//     `~/.traycer/host/dev-runs/<slot>/install/install.json`, registers the
-//     slot-specific dev OS service label, and starts the host. With no
-//     `--release`, the CLI installs `latest`.
-//   - Runs the HMR Electron shell (on a hash-derived, availability-checked
-//     renderer port — a fixed port would make every worktree but the first
-//     fail outright) + tails `~/.traycer/host/dev-runs/<slot>/host.log` under
-//     `concurrently`.
-//   - On Ctrl-C, runs `traycer host uninstall --all` so this run's dev
-//     install + service are gone. `~/.traycer/` user data is preserved (no
-//     --purge); any production host/CLI state in the prod slot, and any other
-//     run's dev-runs/<slot>, are never touched.
+//   - Default: starts `bun host/src/index.ts` (in-repo host) and the HMR
+//     Electron shell. Sets `TRAYCER_LOCAL_HOST=1` so Desktop skips
+//     `traycer host ensure` (which would download the official binary).
+//   - `--release <version>`: the original OSS path — `traycer host install
+//     --release` downloads the signed host, tails its log, and uninstalls
+//     on Ctrl-C.
 
 "use strict";
 
@@ -377,6 +365,10 @@ function parseReleaseArg(argv) {
   return null;
 }
 
+function parseHostMode(argv) {
+  return parseReleaseArg(argv) === null ? "local" : "official";
+}
+
 // Build the argv the orchestrator hands the CLI. The CLI runs from source
 // (`config.environment === "dev"`), so every command targets the dev slot
 // automatically — there is no flag to pass. `--allow-self-invocation` lets the
@@ -531,17 +523,26 @@ function resolveConcurrentlyBin() {
 // `resolveDesktopRuntimeIdentity` — this orchestrator only needs to hand it
 // the slot and the renderer's allocated port (`clients/desktop/scripts/dev/
 // dev-stack.cjs` derives `TRAYCER_DESKTOP_DEV_URL` from `PORT` itself).
-function buildDevDesktopEntries(hostLogPath, slot, port) {
+function buildDevDesktopEntries(hostLogPath, slot, port, hostMode) {
+  const mode = hostMode === "official" ? "official" : "local";
+  const electronEnv =
+    mode === "local"
+      ? `DEV_DESKTOP_SLOT=${shellEscape(slot)} PORT=${shellEscape(String(port))} TRAYCER_LOCAL_HOST=1`
+      : `DEV_DESKTOP_SLOT=${shellEscape(slot)} PORT=${shellEscape(String(port))}`;
+  const hostCommand =
+    mode === "local"
+      ? `DEV_DESKTOP_SLOT=${shellEscape(slot)} TRAYCER_HOST_ENV=dev bun host/src/index.ts`
+      : `tail -n 0 -F ${shellEscape(hostLogPath)}`;
   return [
     {
       name: "electron",
       color: "green",
-      command: `DEV_DESKTOP_SLOT=${shellEscape(slot)} PORT=${shellEscape(String(port))} bun run --cwd clients/desktop dev`,
+      command: `${electronEnv} bun run --cwd clients/desktop dev`,
     },
     {
       name: "host",
       color: "gray",
-      command: `tail -n 0 -F ${shellEscape(hostLogPath)}`,
+      command: hostCommand,
     },
   ];
 }
@@ -630,6 +631,7 @@ function runConcurrentStack(options) {
 
 async function main() {
   const release = parseReleaseArg(process.argv);
+  const hostMode = parseHostMode(process.argv);
 
   // Resolve this run's slot once and set it ambiently: the CLI path helpers
   // dynamically imported below (`cliInstallHomeDir`/`hostLogPath`) read
@@ -664,47 +666,47 @@ async function main() {
 
   const slotEnv = buildDevDesktopSlotEnv(slot);
 
-  // Prefer a locally-cached (or freshly downloaded + cached) archive so
-  // re-runs don't re-download the same release; fall back to the plain
-  // registry install when the cache can't be resolved.
-  const cachedArchive = await resolveCachedHostArchive(release);
-  const args =
-    cachedArchive !== null
-      ? buildHostInstallFromArgs(cachedArchive)
-      : buildHostInstallArgs({ release });
-  log(
-    cachedArchive !== null
-      ? `installing host from cache: bun ${args.join(" ")}`
-      : release
-        ? `installing host release ${release}: bun ${args.join(" ")}`
-        : `installing latest host release: bun ${args.join(" ")}`,
-  );
-  const status = runCli(args, slotEnv);
-  if (status !== 0) {
-    console.error(
-      [
-        ``,
-        `[dev-desktop] traycer host install failed (exit ${status}).`,
-        ``,
-        `If it failed verifying the host signature, the downloaded release is`,
-        `not signed by the trust root committed in`,
-        `clients/traycer-cli/src/config.ts (host signing key id`,
-        `847ef539119a1961). Confirm the published host release is signed with`,
-        `the current key.`,
-        ``,
-      ].join("\n"),
+  if (hostMode === "official") {
+    const cachedArchive = await resolveCachedHostArchive(release);
+    const args =
+      cachedArchive !== null
+        ? buildHostInstallFromArgs(cachedArchive)
+        : buildHostInstallArgs({ release });
+    log(
+      cachedArchive !== null
+        ? `installing host from cache: bun ${args.join(" ")}`
+        : `installing host release ${release}: bun ${args.join(" ")}`,
     );
-    process.exit(1);
-    return;
+    const status = runCli(args, slotEnv);
+    if (status !== 0) {
+      console.error(
+        [
+          ``,
+          `[dev-desktop] traycer host install failed (exit ${status}).`,
+          ``,
+          `If it failed verifying the host signature, the downloaded release is`,
+          `not signed by the trust root committed in`,
+          `clients/traycer-cli/src/config.ts (host signing key id`,
+          `847ef539119a1961). Confirm the published host release is signed with`,
+          `the current key.`,
+          ``,
+        ].join("\n"),
+      );
+      process.exit(1);
+      return;
+    }
+    log("dev host installed + service registered via CLI");
+  } else {
+    log("using in-repo @traycer/host (pass --release <version> for the official binary)");
   }
-  log("dev host installed + service registered via CLI");
 
   runConcurrentStack({
-    entries: buildDevDesktopEntries(hostLog, slot, port),
+    entries: buildDevDesktopEntries(hostLog, slot, port, hostMode),
     cwd: REPO_ROOT,
     onTeardown: async () => {
-      // Deregister the dev host + service. Leaves ~/.traycer/ user data
-      // (credentials, config) intact; the production slot was never touched.
+      if (hostMode !== "official") {
+        return;
+      }
       const code = runCli(buildHostUninstallArgs(), slotEnv);
       if (code !== 0) {
         console.warn(
@@ -732,6 +734,7 @@ module.exports = {
   buildDevDesktopSlotEnv,
   createTeardown,
   parseReleaseArg,
+  parseHostMode,
   parseSlotArg,
   resolveDevDesktopSlot,
   preferredPortForSlot,

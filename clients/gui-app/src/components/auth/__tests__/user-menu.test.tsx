@@ -25,6 +25,7 @@ import {
   type HostRpcRegistry,
 } from "@/lib/host";
 import { RunnerHostProvider } from "@/providers/runner-host-provider";
+import { setLocalAuthEnabledForTests } from "@/lib/auth/local-session";
 import { useAuthStore } from "@/stores/auth/auth-store";
 import { useTitleBarDragStore } from "@/stores/layout/title-bar-drag-store";
 import { formatChordForDisplay } from "@/lib/keybindings/chord";
@@ -142,6 +143,7 @@ describe("<UserMenu />", () => {
 
   afterEach(() => {
     cleanup();
+    setLocalAuthEnabledForTests(null);
     useAuthStore.getState().setSignedOut();
     useTitleBarDragStore.setState({ suppressors: new Set() });
     restoreFetch();
@@ -218,6 +220,26 @@ describe("<UserMenu />", () => {
       expect(isSuppressed()).toBe(false);
     });
 
+    result.cleanupClient();
+  });
+
+  it("hides Traycer subscription and sign-out when local auth is enabled", async () => {
+    setLocalAuthEnabledForTests(true);
+    const host = buildHost();
+    const result = mountMenu(
+      host,
+      <UserMenu
+        userName="Local"
+        email="local@localhost"
+        avatarUrl={null}
+        showAppSettings={false}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("user-menu-trigger"));
+    expect(await screen.findByTestId("user-menu-identity")).toBeTruthy();
+    expect(screen.queryByTestId("user-menu-manage-subscription")).toBeNull();
+    expect(screen.queryByTestId("user-menu-sign-out")).toBeNull();
     result.cleanupClient();
   });
 
