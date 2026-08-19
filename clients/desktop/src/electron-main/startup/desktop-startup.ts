@@ -930,7 +930,7 @@ function runDeferredBackground(state: BootState, services: AppServices): void {
 // caller is `runDesktopStartup`, and it invokes the real reconciliation that
 // determines whether a launch is allowed to apply, activate, or do nothing.
 export function runDeferred<
-  TState,
+  TState extends { readonly config: DesktopConfig },
   TServices extends {
     readonly hostController: IpcHostController;
     readonly menu: HostUpdateMenuSurface;
@@ -941,6 +941,12 @@ export function runDeferred<
   runBackground: (state: TState, services: TServices) => void,
 ): void {
   runBackground(state, services);
+  if (state.config.isDev) {
+    log.info(
+      "[host-controller] dev desktop detected - skipping signed-host launch convergence",
+    );
+    return;
+  }
   void timed("deferred", "host-launch-converge", () =>
     runLaunchHostConvergeReconcile(services.hostController, services.menu),
   );

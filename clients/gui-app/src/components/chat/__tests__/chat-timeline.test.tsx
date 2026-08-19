@@ -73,6 +73,7 @@ const legendListPolicyProps = vi.hoisted(() => ({
     maintainScrollAtEnd: unknown;
     maintainScrollAtEndThreshold: unknown;
     maintainVisibleContentPosition: unknown;
+    recycleItems: unknown;
   },
 }));
 
@@ -83,6 +84,7 @@ vi.mock("@legendapp/list/react", async (importOriginal) => {
       maintainScrollAtEnd: props.maintainScrollAtEnd,
       maintainScrollAtEndThreshold: props.maintainScrollAtEndThreshold,
       maintainVisibleContentPosition: props.maintainVisibleContentPosition,
+      recycleItems: props.recycleItems,
     };
     return <actual.LegendList {...props} />;
   };
@@ -1199,7 +1201,7 @@ describe("ChatTimeline LegendList strict-edge policy config", () => {
     cleanup();
   });
 
-  it("pins maintainScrollAtEndThreshold=0, MVCP maintenance, and the library's own maintainScrollAtEnd permanently disabled", async () => {
+  it("pins strict edge behavior and explicitly preserves remount-on-reuse rows", async () => {
     // Fixup (callback-synchronous-follow): the library's own
     // `maintainScrollAtEnd` is NEVER passed at all anymore - not even
     // conditionally - since every one of its call sites (data/item/footer/
@@ -1215,5 +1217,6 @@ describe("ChatTimeline LegendList strict-edge policy config", () => {
       true,
     );
     expect(legendListPolicyProps.last?.maintainScrollAtEnd).toBeUndefined();
+    expect(legendListPolicyProps.last?.recycleItems).toBe(false);
   });
 });

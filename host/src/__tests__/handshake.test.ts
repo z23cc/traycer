@@ -86,6 +86,7 @@ describe("local host handshake", () => {
       "agent.configure": { major: 4, minor: 0 },
       "agent.fork": { major: 1, minor: 0 },
       "agent.getProviderProfileRateLimits": { major: 4, minor: 0 },
+      "agent.inbox.ack": { major: 1, minor: 0 },
       "agent.listProviderProfiles": { major: 4, minor: 0 },
       "epic.getChatRunSettings": { major: 1, minor: 0 },
       "epic.setChatArchived": { major: 1, minor: 0 },
@@ -152,7 +153,10 @@ describe("local host handshake", () => {
         result: expect.objectContaining({
           harnessId: "claude",
           models: expect.arrayContaining([
-            expect.objectContaining({ slug: "claude-sonnet-4" }),
+            expect.objectContaining({
+              slug: "sonnet",
+              label: "Claude Sonnet 5",
+            }),
           ]),
         }),
       }),

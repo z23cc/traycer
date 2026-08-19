@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import * as Y from "yjs";
 import { Awareness } from "y-protocols/awareness";
 import type { JsonContent } from "@traycer/protocol/common/registry";
@@ -16,6 +16,8 @@ import type {
   CreateArtifactResponse,
   CreateEpicRequest,
   CreateEpicResponse,
+  CreateTuiAgentRequest,
+  CreateTuiAgentResponse,
   CreateCommentThreadRequest,
   CreateCommentThreadResponse,
   DeleteCommentRequest,
@@ -28,6 +30,8 @@ import type {
   DeleteArtifactResponse,
   DeleteChatRequest,
   DeleteChatResponse,
+  DeleteTuiAgentRequest,
+  DeleteTuiAgentResponse,
   EpicLight,
   ListTasksResponse,
   ListCommentThreadsRequest,
@@ -36,6 +40,10 @@ import type {
   RenameArtifactResponse,
   RenameChatRequest,
   RenameChatResponse,
+  RenameTuiAgentRequest,
+  RenameTuiAgentResponse,
+  RemoveEpicRepoRequest,
+  RemoveEpicRepoResponse,
   ReparentArtifactRequest,
   ReparentArtifactResponse,
   ReparentChatRequest,
@@ -61,6 +69,20 @@ import type {
   UpdateArtifactStatusResponse,
   UserTaskWorkspace,
 } from "@traycer/protocol/host/epic/unary-schemas";
+import type {
+  GenerateTuiAgentTitleRequest,
+  GenerateTuiAgentTitleResponse,
+  RecordTuiAgentActivityRequestV11,
+  RecordTuiAgentActivityResponse,
+  TuiAgentTurnEndedRequest,
+  TuiAgentTurnEndedResponse,
+} from "@traycer/protocol/host/agent/tui/unary-schemas";
+import type {
+  AgentInboxAckRequest,
+  AgentInboxMessageV12,
+  AgentInboxReadRequestV20,
+  AgentInboxReadResponseV20,
+} from "@traycer/protocol/host/agent/inbox";
 import type {
   CommentsListThreadsRequest,
   CommentsListThreadsResponse,
@@ -104,6 +126,9 @@ import type {
   WorktreeCreateResponse,
   WorktreeCreatePathsRequest,
   WorktreeCreatePathsResponse,
+  WorktreeImportRequest,
+  WorktreeImportResponse,
+  WorktreeHostEntryOwner,
   WorktreeSetEntryModeRequest,
   WorktreeSetEntryModeResponse,
   WorkspaceBindingRemoveEntryRequest,
@@ -120,6 +145,7 @@ import {
   chatRunSettingsSchema,
   type ChatRunSettings,
 } from "@traycer/protocol/persistence/epic/schemas";
+import { tuiAgentSchema } from "@traycer/protocol/persistence/epic/tui-agents";
 import { ArtifactRoomManager } from "./artifact-rooms";
 import {
   createCommentThread as createStoredCommentThread,
@@ -137,6 +163,7 @@ import { writeAgentTranscript } from "./agent-transcript";
 import { directoryExists, isGitRepo } from "./git-probe";
 import {
   isLocalGuiHarnessId,
+  localGuiModelFor,
   localGuiModelsFor,
   type LocalGuiHarnessId,
   type LocalGuiModel,
@@ -152,6 +179,9 @@ import {
   RepoWorkspacePersistence,
 } from "./repo-workspace-persistence";
 import { summarizeWorktreeWorkspacePaths } from "./worktree-summary";
+import { TerminalSessionManager } from "./terminal-session-manager";
+import { TuiAgentService } from "./tui-agent-service";
+import { AgentInboxService } from "./agent-inbox-service";
 
 export const LOCAL_USER_ID = "local-user";
 
@@ -231,6 +261,10 @@ type AgentChatRecord = {
   readonly userId: string;
   readonly title: string | null;
   readonly harnessId: string | null;
+};
+
+type AgentMessageRecord = AgentChatRecord & {
+  readonly surface: "gui" | "tui";
 };
 
 type PendingAgentResponse = {
@@ -313,7 +347,10 @@ export type AgentArchiveToolResponse = {
 
 export class HostState {
   readonly hostId: string;
+  readonly terminalSessions = new TerminalSessionManager();
   readonly epics = new Map<string, StoredEpic>();
+  private readonly tuiAgentService: TuiAgentService;
+  private readonly agentInboxService: AgentInboxService;
   private readonly notificationsDoc = new Y.Doc();
   private readonly repoWorkspaceMappings = new Map<
     string,
@@ -345,6 +382,15 @@ export class HostState {
     private readonly worktreeRoot: string | undefined,
   ) {
     this.hostId = hostId;
+    this.tuiAgentService = new TuiAgentService({
+      hostId,
+      userId: LOCAL_USER_ID,
+    });
+    this.agentInboxService = new AgentInboxService(
+      hostId,
+      LOCAL_USER_ID,
+      Date.now,
+    );
     for (const mapping of repoWorkspacePersistence?.listMappings() ?? []) {
       this.repoWorkspaceMappings.set(mapping.workspacePath, mapping);
     }
@@ -352,6 +398,116 @@ export class HostState {
 
   getNotificationsDoc(): Y.Doc {
     return this.notificationsDoc;
+  }
+
+  createTuiAgent(request: CreateTuiAgentRequest): CreateTuiAgentResponse {
+    return this.tuiAgentService.create(
+      this.requireEpic(request.epicId).doc,
+      request,
+    );
+  }
+
+  removeEpicRepo(request: RemoveEpicRepoRequest): RemoveEpicRepoResponse {
+    const epic = this.requireEpic(request.epicId);
+    const index = epic.repos.findIndex(
+      (association) =>
+        association.repoIdentifier !== null &&
+        association.repoIdentifier.owner === request.repoIdentifier.owner &&
+        association.repoIdentifier.repo === request.repoIdentifier.repo,
+    );
+    if (index < 0) return { success: false };
+    epic.repos.splice(index, 1);
+    epic.light.updatedAt = Date.now();
+    epic.doc.getMap<unknown>("epic").set("updatedAt", epic.light.updatedAt);
+    return { success: true };
+  }
+
+  deleteTuiAgent(request: DeleteTuiAgentRequest): DeleteTuiAgentResponse {
+    const epic = this.requireEpic(request.epicId);
+    const response = this.tuiAgentService.delete(epic.doc, request);
+    if (response.deleted) {
+      this.agentInboxService.remove(
+        epic.doc,
+        request.epicId,
+        request.tuiAgentId,
+      );
+    }
+    return response;
+  }
+
+  readAgentInbox(request: AgentInboxReadRequestV20): AgentInboxReadResponseV20 {
+    return this.agentInboxService.read(
+      this.requireEpic(request.epicId).doc,
+      request,
+    );
+  }
+
+  acknowledgeAgentInbox(request: AgentInboxAckRequest): void {
+    this.agentInboxService.ack(this.requireEpic(request.epicId).doc, request);
+  }
+
+  subscribeAgentInbox(
+    epicId: string,
+    agentId: string,
+    sink: (message: AgentInboxMessageV12) => void,
+  ): () => void {
+    return this.agentInboxService.subscribe(
+      this.requireEpic(epicId).doc,
+      epicId,
+      agentId,
+      sink,
+    );
+  }
+
+  renameTuiAgent(request: RenameTuiAgentRequest): RenameTuiAgentResponse {
+    return this.tuiAgentService.rename(
+      this.requireEpic(request.epicId).doc,
+      request,
+    );
+  }
+
+  async generateTuiAgentTitle(
+    request: GenerateTuiAgentTitleRequest,
+  ): Promise<GenerateTuiAgentTitleResponse> {
+    if (request.epicId !== null) {
+      return this.tuiAgentService.generateTitle(
+        this.requireEpic(request.epicId).doc,
+        request,
+      );
+    }
+    for (const epic of this.epics.values()) {
+      const response = await this.tuiAgentService.generateTitle(
+        epic.doc,
+        request,
+      );
+      if (response.accepted) return response;
+    }
+    return { accepted: false };
+  }
+
+  recordTuiAgentActivity(
+    request: RecordTuiAgentActivityRequestV11,
+  ): RecordTuiAgentActivityResponse {
+    if (request.epicId !== null) {
+      return this.tuiAgentService.recordActivity(
+        this.requireEpic(request.epicId).doc,
+        request,
+      );
+    }
+    for (const epic of this.epics.values()) {
+      const response = this.tuiAgentService.recordActivity(epic.doc, request);
+      if (response.accepted) return response;
+    }
+    return { accepted: false };
+  }
+
+  recordTuiAgentTurnEnded(
+    request: TuiAgentTurnEndedRequest,
+  ): TuiAgentTurnEndedResponse {
+    return this.tuiAgentService.turnEnded(
+      this.requireEpic(request.epicId).doc,
+      request,
+    );
   }
 
   createEpic(request: CreateEpicRequest): CreateEpicOutcome {
@@ -1236,9 +1392,7 @@ export class HostState {
         `${method}: gui harness '${request.harnessId}' is not supported by this local host.`,
       );
     }
-    const model = localGuiModelsFor(request.harnessId).find(
-      (candidate) => candidate.slug === request.model,
-    );
+    const model = localGuiModelFor(request.harnessId, request.model);
     if (model === undefined) {
       throw new StoreError(
         "RPC_ERROR",
@@ -1402,7 +1556,7 @@ export class HostState {
         active:
           !archived &&
           isLocal &&
-          this.inflight.has(chatKey(request.epicId, agentId)),
+          this.tuiAgentService.isActive(epic.doc, agentId),
         workspaceFolders: stringArrayFromYjs(storedFolders),
       });
     }
@@ -1756,6 +1910,44 @@ export class HostState {
     return { tasks, hasMore: false };
   }
 
+  deleteEpic(epicId: string): boolean {
+    const epic = this.epics.get(epicId);
+    if (epic === undefined) {
+      return false;
+    }
+    for (const chatId of epic.chats.keys()) {
+      const key = chatKey(epicId, chatId);
+      if (this.inflight.has(key)) {
+        throw new StoreError(
+          "ACTIVE_TURN_RUNNING",
+          `Stop the active chat run before deleting task '${epicId}'.`,
+        );
+      }
+    }
+
+    this.terminalSessions.killScope({ kind: "epic", epicId });
+    for (const chatId of epic.chats.keys()) {
+      const key = chatKey(epicId, chatId);
+      this.purgeAgentTraffic(epicId, chatId);
+      this.abortByChat.delete(key);
+      this.chatActionTails.delete(key);
+      this.chatSinks.delete(key);
+      this.idleWaiters.delete(key);
+      this.cancellingChatKeys.delete(key);
+    }
+    for (const [key, binding] of this.worktreeBindings) {
+      if (binding.epicId === epicId) {
+        this.worktreeBindings.delete(key);
+      }
+    }
+    epic.doc.off("update", epic.syncChatMetadata);
+    epic.artifactRooms.dispose();
+    epic.awareness.destroy();
+    epic.doc.destroy();
+    this.epics.delete(epicId);
+    return true;
+  }
+
   getEpic(epicId: string): StoredEpic | null {
     return this.epics.get(epicId) ?? null;
   }
@@ -1788,6 +1980,126 @@ export class HostState {
 
   hasInflightTurns(): boolean {
     return this.inflight.size > 0;
+  }
+
+  inflightTurnCount(): number {
+    return this.inflight.size + this.terminalSessions.runningCount();
+  }
+
+  managedWorktreeRoot(): string {
+    return this.worktreeRoot ?? join(homedir(), ".traycer", "worktrees");
+  }
+
+  worktreeOwnersForPath(worktreePath: string): WorktreeHostEntryOwner[] {
+    const requestedPath = resolve(worktreePath);
+    const owners: WorktreeHostEntryOwner[] = [];
+    for (const stored of this.worktreeBindings.values()) {
+      const matchingEntries = stored.binding.entries.filter(
+        (entry) =>
+          entry.worktreePath !== null &&
+          resolve(entry.worktreePath) === requestedPath,
+      );
+      if (matchingEntries.length === 0) continue;
+      owners.push({
+        epicId: stored.epicId,
+        ownerKind: stored.ownerKind,
+        ownerId: stored.ownerId,
+        updatedAt: Math.max(...matchingEntries.map((entry) => entry.createdAt)),
+      });
+    }
+    return owners;
+  }
+
+  terminalAgentLaunchWorkspace(
+    epicId: string,
+    tuiAgentId: string,
+    requestedMode: "inherit" | "folderless" | undefined,
+  ): {
+    readonly workingDirectory: string;
+    readonly workspaceFolders: string[];
+    readonly worktreeBusyPaths: string[];
+  } {
+    const epic = this.requireEpic(epicId);
+    const binding = bindingForOwner(
+      this.worktreeBindings,
+      epic,
+      epicId,
+      "terminal-agent",
+      tuiAgentId,
+    );
+    if (
+      binding?.workspaceMode === "folderless" ||
+      (binding === null && requestedMode === "folderless")
+    ) {
+      const cwd = ensureFolderlessCwdForEpic(epicId);
+      return {
+        workingDirectory: cwd,
+        workspaceFolders: [],
+        worktreeBusyPaths: [],
+      };
+    }
+
+    const entries =
+      binding?.entries ??
+      epic.workspaces.map((workspace, index) =>
+        localEntry(workspace.workspacePath, index === 0, Date.now()),
+      );
+    if (entries.length === 0) {
+      const cwd = ensureFolderlessCwdForEpic(epicId);
+      return {
+        workingDirectory: cwd,
+        workspaceFolders: [],
+        worktreeBusyPaths: [],
+      };
+    }
+    const missing = entries
+      .map((entry) => entry.worktreePath ?? entry.workspacePath)
+      .filter((path) => !directoryExists(path));
+    if (missing.length > 0) {
+      const [first] = missing;
+      throw new StoreError(
+        "WORKTREE_MISSING",
+        missing.length === 1
+          ? `A bound folder is missing on disk: ${first}. Restore it, re-bind to another folder, or remove it to continue.`
+          : `Bound folders are missing on disk: ${missing.join(", ")}. Restore them, re-bind to other folders, or remove them to continue.`,
+      );
+    }
+    const primary = entries.find((entry) => entry.isPrimary) ?? entries[0];
+    const workspaceFolders = dedupeNonEmptyStrings(
+      entries.map((entry) => entry.worktreePath ?? entry.workspacePath),
+    );
+    return {
+      workingDirectory: primary.worktreePath ?? primary.workspacePath,
+      workspaceFolders,
+      worktreeBusyPaths: dedupeNonEmptyStrings(
+        entries.flatMap((entry) =>
+          entry.mode === "worktree" && entry.worktreePath !== null
+            ? [entry.worktreePath]
+            : [],
+        ),
+      ),
+    };
+  }
+
+  isWorktreePathBusy(worktreePath: string): boolean {
+    const target = resolve(worktreePath);
+    if (this.terminalSessions.isWorktreePathBusy(target)) {
+      return true;
+    }
+    for (const epic of this.epics.values()) {
+      for (const chat of epic.chats.values()) {
+        if (!chat.turnInProgress && chat.runStatus === "idle") continue;
+        if (
+          chat.worktreeBinding?.entries.some(
+            (entry) =>
+              resolve(entry.worktreePath ?? entry.workspacePath) === target,
+          ) === true
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   chatCwd(epicId: string, chatId: string): string {
@@ -1996,6 +2308,33 @@ export class HostState {
 
       return { binding: current ?? { entries: [] }, perEntry };
     });
+  }
+
+  async importWorktree(
+    request: WorktreeImportRequest,
+  ): Promise<WorktreeImportResponse> {
+    const created = await this.createWorktree({
+      epicId: request.epicId,
+      ownerId: request.ownerId,
+      ownerKind: request.ownerKind,
+      entries: request.entries.map((entry) =>
+        entry.worktreePath === null
+          ? {
+              kind: "local" as const,
+              workspacePath: entry.workspacePath,
+              repoIdentifier: entry.repoIdentifier,
+              isPrimary: entry.isPrimary,
+            }
+          : {
+              kind: "import" as const,
+              workspacePath: entry.workspacePath,
+              worktreePath: entry.worktreePath,
+              repoIdentifier: entry.repoIdentifier,
+              isPrimary: entry.isPrimary,
+            },
+      ),
+    });
+    return { binding: created.binding };
   }
 
   async createWorktreePaths(
@@ -2256,7 +2595,7 @@ export class HostState {
         `Unknown epic ${request.epicId}`,
       );
     }
-    const sender = agentChatRecord(epic, request.senderAgentId);
+    const sender = agentMessageRecord(epic, request.senderAgentId);
     if (sender === null) {
       throw new StoreError(
         "RPC_ERROR",
@@ -2269,7 +2608,18 @@ export class HostState {
         `agent.sendMessage: SENDER_NOT_LOCAL - sender '${request.senderAgentId}' is not local to host '${this.hostId}'.`,
       );
     }
-    const receiver = agentChatRecord(epic, request.receiverAgentId);
+    if (
+      sender.surface === "tui" &&
+      sender.harnessId !== "claude" &&
+      sender.harnessId !== "codex" &&
+      sender.harnessId !== "opencode"
+    ) {
+      throw new StoreError(
+        "RPC_ERROR",
+        `agent.sendMessage: SENDER_TUI_UNSUPPORTED - harness '${sender.harnessId}' does not support agent-to-agent messaging.`,
+      );
+    }
+    const receiver = agentMessageRecord(epic, request.receiverAgentId);
     if (receiver === null) {
       throw new StoreError(
         "RPC_ERROR",
@@ -2285,7 +2635,27 @@ export class HostState {
     if (sender.userId !== receiver.userId) {
       throw new StoreError("FORBIDDEN", request.receiverAgentId);
     }
+    if (receiver.surface === "tui" && receiver.harnessId !== "claude") {
+      throw new StoreError(
+        "RPC_ERROR",
+        `agent.sendMessage: RECEIVER_TUI_UNSUPPORTED - harness '${receiver.harnessId}' does not support agent-to-agent messaging.`,
+      );
+    }
     const thread = this.settleAgentResponseThread(request);
+    if (receiver.surface === "tui") {
+      this.agentInboxService.enqueue(epic.doc, request.receiverAgentId, {
+        reply: thread.reply,
+        fromAgentId: request.senderAgentId,
+        senderTitle: sender.title,
+        senderHarnessId: sender.harnessId,
+        epicId: request.epicId,
+        prompt: request.prompt,
+      });
+      return {
+        response: { responseId: thread.responseId },
+        pendingTurn: null,
+      };
+    }
     const receiverChat =
       receiver.chat ?? this.hydrateLocalGuiChat(epic, request.receiverAgentId);
     if (receiverChat === null) {
@@ -2919,6 +3289,7 @@ export class HostState {
   }
 
   dispose(): void {
+    this.terminalSessions.dispose();
     for (const controller of this.abortByChat.values()) {
       controller.abort();
     }
@@ -3462,7 +3833,7 @@ function resolveAgentModel(
 ): { readonly model: string; readonly catalogModel: LocalGuiModel | null } {
   const catalog = localGuiModelsFor(harnessId);
   if (requested !== null && requested.length > 0) {
-    const catalogModel = catalog.find((model) => model.slug === requested);
+    const catalogModel = localGuiModelFor(harnessId, requested);
     if (catalogModel === undefined) {
       throw new StoreError(
         "RPC_ERROR",
@@ -3864,7 +4235,7 @@ function canReadAgentTranscript(
   record: AgentListRecord,
   sameUser: boolean,
 ): boolean {
-  return sameUser && (record.surface === "gui" || record.isLocal);
+  return sameUser && record.surface === "gui";
 }
 
 function selectorRow(
@@ -4014,6 +4385,28 @@ function agentChatRecord(
     userId,
     title: typeof title === "string" && title.length > 0 ? title : null,
     harnessId: settings?.harnessId ?? null,
+  };
+}
+
+function agentMessageRecord(
+  epic: StoredEpic,
+  agentId: string,
+): AgentMessageRecord | null {
+  const gui = agentChatRecord(epic, agentId);
+  if (gui !== null) return { ...gui, surface: "gui" };
+  const stored = epic.doc.getMap<unknown>("epic").get("tuiAgents");
+  const value = stored instanceof Y.Map ? stored.get(agentId) : undefined;
+  const parsed = tuiAgentSchema.safeParse(
+    value instanceof Y.Map ? value.toJSON() : value,
+  );
+  if (!parsed.success || parsed.data.id !== agentId) return null;
+  return {
+    surface: "tui",
+    chat: null,
+    hostId: parsed.data.hostId,
+    userId: parsed.data.userId,
+    title: parsed.data.title.length > 0 ? parsed.data.title : null,
+    harnessId: parsed.data.harnessId,
   };
 }
 

@@ -1,0 +1,9 @@
+{
+  "name": "traycer-tui",
+  "displayName": "Traycer terminal agent integration",
+  "version": "1.0.0",
+  "description": "Connects a Claude terminal agent to its Traycer inbox and lifecycle.",
+  "author": {
+    "name": "Traycer contributors"
+  }
+}

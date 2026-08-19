@@ -374,6 +374,11 @@ export const ChatTimeline = memo(function ChatTimeline({
         getItemType={chatTimelineGetItemType}
         renderItem={renderItem}
         estimatedItemSize={90}
+        // Rows intentionally remount when a virtual slot is reused: message
+        // segments own local lifecycle state that must not leak to another
+        // message. Keep the library's current behavior explicit so upgrades
+        // cannot silently enable recycling and the dev console stays quiet.
+        recycleItems={false}
         // Keep LegendList's proximity threshold explicit for onEndReached and
         // presentation consumers. Follow ownership deliberately reads only
         // fresh DOM geometry inside the latch; this 10% band can never

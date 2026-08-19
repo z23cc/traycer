@@ -23,6 +23,7 @@ import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-flo
 import {
   worktreeCreatePathsResponseSchema,
   worktreeGetBindingResponseSchema,
+  worktreeListAllForHostResponseSchemaV15,
 } from "@traycer/protocol/host/worktree-schemas";
 import { scriptedTurnRunner } from "../cli-runner";
 import { startHostServer, type HostServer } from "../server";
@@ -159,6 +160,45 @@ describe("worktree.createPaths", () => {
         .toString()
         .trim(),
     ).toBe("feature/create-paths");
+
+    ws.send(
+      JSON.stringify({
+        kind: "request",
+        requestId: "list-created-worktree",
+        method: "worktree.listAllForHost",
+        schemaVersion: { major: 1, minor: 5 },
+        params: {
+          includeActivity: false,
+          activityPaths: null,
+          cursor: null,
+          limit: null,
+          forceRefresh: true,
+        },
+      }),
+    );
+    const listedFrame = expectResponse(
+      await nextHostFrame(ws),
+      "list-created-worktree",
+    );
+    expect(listedFrame.error).toBeNull();
+    expect(
+      worktreeListAllForHostResponseSchemaV15.parse(listedFrame.result),
+    ).toEqual({
+      worktrees: [
+        expect.objectContaining({
+          worktreePath: createdPath,
+          repoLabel: "traycer-test/workspace",
+          repoIdentifier: { owner: "traycer-test", repo: "workspace" },
+          branch: "feature/create-paths",
+          inUse: false,
+          uncommittedCount: 0,
+          gitRemovable: true,
+          owners: [],
+          presence: "present",
+        }),
+      ],
+      nextCursor: null,
+    });
   });
 
   it("keeps v1.0 partial failures ordered without creating an owner binding", async () => {

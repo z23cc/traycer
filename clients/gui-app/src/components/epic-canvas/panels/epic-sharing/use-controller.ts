@@ -1,4 +1,5 @@
 import { useMemo, useReducer } from "react";
+import type { PermissionRole } from "@traycer/protocol/host/epic/unary-schemas";
 import {
   useEpicBatchUpdateRoles,
   useEpicGrantAccess,
@@ -97,6 +98,7 @@ export interface SharingRefreshProps {
 }
 
 export interface SharingPanelController {
+  readonly collaborationAvailable: boolean;
   readonly canInvitePeople: boolean;
   readonly showTeams: boolean;
   readonly inviteCardProps: InviteCardProps;
@@ -113,7 +115,6 @@ export function useEpicSharingPanelController(
 ): SharingPanelController {
   const currentRole = useEpicPermissionRole();
   const isOwner = currentRole === "owner";
-  const canInvitePeople = currentRole === "owner" || currentRole === "editor";
   const shareableTeams = useEpicShareableTeams();
 
   // App-active host, deliberately: the panel's grant/revoke/role mutations
@@ -127,6 +128,9 @@ export function useEpicSharingPanelController(
     poll: true,
     staleTime: EPIC_COLLABORATORS_OPEN_REFRESH_MS,
   });
+  const collaborationAvailable =
+    collaboratorsQuery.query.data?.collaboratorsAvailable ?? true;
+  const canInvitePeople = canRoleInvite(currentRole, collaborationAvailable);
   const lastFetchedAt =
     collaboratorsQuery.query.dataUpdatedAt > 0
       ? collaboratorsQuery.query.dataUpdatedAt
@@ -366,8 +370,14 @@ export function useEpicSharingPanelController(
   };
 
   return {
+    collaborationAvailable,
     canInvitePeople,
-    showTeams: isLoading || collaboratorsQuery.isError || teamRows.length > 0,
+    showTeams: shouldShowTeams(
+      collaborationAvailable,
+      isLoading,
+      collaboratorsQuery.isError,
+      teamRows.length,
+    ),
     inviteCardProps: {
       inviteInput: state.inviteInput,
       inputError,
@@ -463,6 +473,22 @@ export function useEpicSharingPanelController(
       onRefresh: handleRefresh,
     },
   };
+}
+
+function canRoleInvite(
+  role: PermissionRole | null,
+  collaborationAvailable: boolean,
+): boolean {
+  return collaborationAvailable && (role === "owner" || role === "editor");
+}
+
+function shouldShowTeams(
+  collaborationAvailable: boolean,
+  isLoading: boolean,
+  hasError: boolean,
+  teamCount: number,
+): boolean {
+  return collaborationAvailable && (isLoading || hasError || teamCount > 0);
 }
 
 function sharingPanelReducer(

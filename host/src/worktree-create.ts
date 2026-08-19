@@ -1298,7 +1298,7 @@ function isWithin(root: string, path: string): boolean {
   );
 }
 
-async function writeEnvironmentFile(
+export async function writeEnvironmentFile(
   worktreePath: string,
   scripts: WorktreeEntryScripts,
   updatedAt: number,

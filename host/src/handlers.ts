@@ -1,18 +1,31 @@
 import { ALL_PERMISSION_MODES } from "@traycer/protocol/persistence/epic/foundation";
+import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ZodType } from "zod";
 import {
+  batchDeleteRequestSchema,
   createCommentThreadRequestSchema,
   createArtifactRequestSchema,
   createChatRequestSchemaV11,
   createEpicRequestSchema,
+  createTuiAgentRequestSchema,
   deleteArtifactRequestSchema,
   deleteCommentRequestSchema,
   deleteCommentThreadRequestSchema,
   deleteChatRequestSchema,
+  deleteTuiAgentRequestSchema,
   editCommentRequestSchema,
+  epicMentionArtifactsRequestSchema,
+  epicMentionEpicsRequestSchema,
+  listEpicCollaboratorsRequestSchema,
   listCommentThreadsRequestSchema,
   renameArtifactRequestSchema,
   renameChatRequestSchema,
+  renameTuiAgentRequestSchema,
+  removeEpicRepoRequestSchema,
   reparentArtifactRequestSchema,
   reparentChatRequestSchema,
   replyToCommentThreadRequestSchema,
@@ -25,11 +38,27 @@ import {
   updateEpicRequestSchema,
 } from "@traycer/protocol/host/epic/unary-schemas";
 import {
+  generateTuiAgentTitleRequestSchema,
+  listTuiHarnessesRequestSchema,
+  prepareTuiLaunchRequestSchemaV11,
+  recordTuiAgentActivityRequestSchemaV11,
+  tuiAgentTurnEndedRequestSchema,
+} from "@traycer/protocol/host/agent/tui/unary-schemas";
+import {
+  agentInboxAckRequestSchema,
+  agentInboxReadRequestSchemaV20,
+} from "@traycer/protocol/host/agent/inbox";
+import {
+  EDITORS,
+  openPathsRequestSchema,
+} from "@traycer/protocol/host/editor/unary-schemas";
+import {
   commentsListThreadsRequestSchema,
   commentsSetThreadStatusRequestSchema,
 } from "@traycer/protocol/host/comments";
 import { getChatRunSettingsRequestSchema } from "@traycer/protocol/host/epic/chat-records";
 import {
+  getGuiAgentPlanRequestSchema,
   listGuiAgentCommandsRequestSchema,
   listGuiAgentModelsRequestSchema,
 } from "@traycer/protocol/host/agent/gui/unary-schemas";
@@ -62,6 +91,22 @@ import {
 import { hostNotificationsListRequestSchema } from "@traycer/protocol/host/notifications/host-notifications";
 import { rateLimitUsageRequestSchemaV12 } from "@traycer/protocol/host/rate-limit/schemas";
 import {
+  speechEnsureModelRequestSchema,
+  speechGetModelStatusRequestSchema,
+} from "@traycer/protocol/host/speech/contracts";
+import {
+  snapshotsClearLocalSnapshotsRequestSchema,
+  snapshotsGetLocalStorageSizeRequestSchema,
+  snapshotsReadSnapshotDiffRequestSchema,
+} from "@traycer/protocol/host/snapshot-schemas";
+import type { ProviderId } from "@traycer/protocol/host/provider-schemas";
+import {
+  createTerminalRequestSchemaV20,
+  killTerminalRequestSchema,
+  listTerminalsRequestSchemaV20,
+  renameTerminalRequestSchema,
+} from "@traycer/protocol/host/terminal/unary-schemas";
+import {
   workspaceListDirectoryRequestSchema,
   workspaceListFileTreeRequestSchema,
   workspaceGitMentionSuggestionsRequestSchema,
@@ -75,10 +120,15 @@ import {
   worktreeGetBindingRequestSchema,
   worktreeCreateRequestSchema,
   worktreeCreatePathsRequestSchema,
+  worktreeDeleteRequestSchema,
+  worktreeImportRequestSchema,
+  worktreeListAllForHostRequestSchemaV15,
   worktreeListBranchesRequestSchema,
   worktreeListBindingsForEpicRequestSchema,
   worktreeListByWorkspacePathsRequestSchemaV14,
   worktreeSetEntryModeRequestSchema,
+  worktreeRetrySetupRequestSchema,
+  worktreeSetRepoScriptsRequestSchema,
   workspaceBindingRemoveEntryRequestSchema,
 } from "@traycer/protocol/host/worktree-schemas";
 import { listWorkspaceDirectory, readWorkspaceFile } from "./workspace-fs";
@@ -118,6 +168,28 @@ import {
   localProviderProfilesFor,
   localProviderRateLimitsFor,
 } from "./local-provider-profiles";
+import type {
+  ProviderRuntimeFacts,
+  ProviderRuntimeFactsById,
+} from "./provider-catalog";
+import type { ProviderConfigStore } from "./provider-config-store";
+import { createProviderHandlers } from "./provider-handlers";
+import { TuiAgentServiceError } from "./tui-agent-service";
+import { AgentInboxServiceError } from "./agent-inbox-service";
+import {
+  WorktreeDeletionError,
+  WorktreeDeletionService,
+} from "./worktree-deletion-service";
+import { writeEnvironmentFile } from "./worktree-create";
+import { listAllWorktreesForHost } from "./worktree-host-list";
+import {
+  resolveAgentGuiGetPlan,
+  resolveEpicMentionEpics,
+  resolveEpicMentionReviews,
+  resolveEpicMentionSpecs,
+  resolveEpicMentionStories,
+  resolveEpicMentionTickets,
+} from "./local-projections";
 
 export type HandlerResult =
   | { readonly ok: true; readonly result: unknown }
@@ -133,16 +205,20 @@ export type MethodDispatcher = (
 ) => HandlerResult | Promise<HandlerResult>;
 
 const PERMISSION_MODES = [...ALL_PERMISSION_MODES];
+const CLAUDE_TUI_PLUGIN_PATH = fileURLToPath(
+  new URL("../resources/claude-tui-plugin", import.meta.url),
+);
 
-function hostStatus(): HandlerResult {
+function hostStatus(state: HostState): HandlerResult {
+  const busySessionCount = state.inflightTurnCount();
   return {
     ok: true,
     result: {
       ready: true,
       hostVersion: HOST_PACKAGE_VERSION,
       protocolVersion: HOST_PROTOCOL_VERSION,
-      busy: false,
-      busySessionCount: 0,
+      busy: busySessionCount > 0,
+      busySessionCount,
       updateProgress: null,
     },
   };
@@ -182,12 +258,317 @@ function runtimeCapabilities(): HandlerResult {
   };
 }
 
-function providersList(): HandlerResult {
+function localProviderRuntimeFacts(): ProviderRuntimeFactsById {
+  const facts = new Map<ProviderId, ProviderRuntimeFacts>();
+  const localProviders = [
+    { providerId: "claude-code", command: "claude" },
+    { providerId: "codex", command: "codex" },
+  ] as const;
+  for (const { providerId, command } of localProviders) {
+    const path = resolveHarnessExecutable(command, process.env);
+    if (path === null) continue;
+    facts.set(providerId, {
+      bundled: null,
+      path: {
+        path,
+        version: null,
+        available: true,
+        versionPending: false,
+      },
+      custom: new Map(),
+      auth: null,
+      authPending: false,
+      checkedAt: Date.now(),
+      availabilityPending: false,
+      apiKey: null,
+    });
+  }
+  return facts;
+}
+
+function speechModelStatus(params: unknown): HandlerResult {
+  const parsed = speechGetModelStatusRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
   return {
     ok: true,
     result: {
-      providers: [],
-      native: null,
+      modelId: parsed.data.modelId ?? "default",
+      installed: false,
+      downloadState: "absent",
+      downloadProgress: null,
+      sizeBytes: null,
+      errorMessage: null,
+      engineAvailable: false,
+    },
+  };
+}
+
+function ensureSpeechModel(params: unknown): HandlerResult {
+  const parsed = speechEnsureModelRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  return {
+    ok: true,
+    result: {
+      modelId: parsed.data.modelId ?? "default",
+      installed: false,
+      downloadState: "absent",
+      downloadProgress: null,
+      sizeBytes: null,
+      errorMessage: "On-device speech is not available on this local host.",
+      engineAvailable: false,
+    },
+  };
+}
+
+function createTerminal(state: HostState, params: unknown): HandlerResult {
+  const parsed = createTerminalRequestSchemaV20.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  try {
+    return {
+      ok: true,
+      result: { session: state.terminalSessions.create(parsed.data) },
+    };
+  } catch (error) {
+    return storeFailure(error);
+  }
+}
+
+function listTerminals(state: HostState, params: unknown): HandlerResult {
+  const parsed = listTerminalsRequestSchemaV20.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  return {
+    ok: true,
+    result: {
+      sessions: state.terminalSessions.list(parsed.data),
+      homeCwd: homedir(),
+    },
+  };
+}
+
+function killTerminal(state: HostState, params: unknown): HandlerResult {
+  const parsed = killTerminalRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  return {
+    ok: true,
+    result: { killed: state.terminalSessions.kill(parsed.data.sessionId) },
+  };
+}
+
+function renameTerminal(state: HostState, params: unknown): HandlerResult {
+  const parsed = renameTerminalRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  return {
+    ok: true,
+    result: {
+      updated: state.terminalSessions.rename(
+        parsed.data.sessionId,
+        parsed.data.title,
+      ),
+    },
+  };
+}
+
+function snapshotStorageSize(params: unknown): HandlerResult {
+  const parsed = snapshotsGetLocalStorageSizeRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  return { ok: true, result: { bytes: 0 } };
+}
+
+function clearLocalSnapshots(params: unknown): HandlerResult {
+  const parsed = snapshotsClearLocalSnapshotsRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  return { ok: true, result: { clearedBytes: 0 } };
+}
+
+function readSnapshotDiff(params: unknown): HandlerResult {
+  const parsed = snapshotsReadSnapshotDiffRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  return {
+    ok: true,
+    result: {
+      beforeContent: null,
+      afterContent: null,
+      reason: "blob_missing",
+    },
+  };
+}
+
+function readAgentInbox(state: HostState, params: unknown): HandlerResult {
+  const parsed = agentInboxReadRequestSchemaV20.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  try {
+    return { ok: true, result: state.readAgentInbox(parsed.data) };
+  } catch (error) {
+    return storeFailure(error);
+  }
+}
+
+function acknowledgeAgentInbox(
+  state: HostState,
+  params: unknown,
+): HandlerResult {
+  const parsed = agentInboxAckRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  try {
+    state.acknowledgeAgentInbox(parsed.data);
+    return { ok: true, result: {} };
+  } catch (error) {
+    return storeFailure(error);
+  }
+}
+
+async function openEditorPaths(params: unknown): Promise<HandlerResult> {
+  const parsed = openPathsRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  const editor = EDITORS.find(
+    (candidate) => candidate.id === parsed.data.editorId,
+  );
+  if (editor === undefined) {
+    return invalidArgument(`Unknown editor ${parsed.data.editorId}`);
+  }
+  if (process.platform !== "darwin" && process.platform !== "linux") {
+    return hostUnsupported("editor.openPaths on this operating system");
+  }
+  const urls = parsed.data.paths.map((path) => {
+    const fileUrl = pathToFileURL(resolve(path));
+    return `${editor.urlScheme}://file${fileUrl.pathname}`;
+  });
+  try {
+    if (process.platform === "darwin") {
+      await execFilePromise("open", urls);
+    } else {
+      for (const url of urls) await execFilePromise("xdg-open", [url]);
+    }
+    return { ok: true, result: {} };
+  } catch (error) {
+    return {
+      ok: false,
+      code: "RPC_ERROR",
+      message: `Unable to open ${parsed.data.editorId}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+function execFilePromise(
+  command: string,
+  args: readonly string[],
+): Promise<void> {
+  return new Promise((resolvePromise, reject) => {
+    execFile(
+      command,
+      [...args],
+      { timeout: 10_000, maxBuffer: 64 * 1024 },
+      (error) => {
+        if (error === null) resolvePromise();
+        else reject(error);
+      },
+    );
+  });
+}
+
+async function setRepoScripts(
+  state: HostState,
+  params: unknown,
+): Promise<HandlerResult> {
+  const parsed = worktreeSetRepoScriptsRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  const epic = state.getEpic(parsed.data.epicId);
+  if (epic === null) {
+    return invalidArgument(`Unknown epic ${parsed.data.epicId}`);
+  }
+  const requestedPath = resolve(parsed.data.workspacePath);
+  if (
+    !epic.workspaces.some(
+      (workspace) => resolve(workspace.workspacePath) === requestedPath,
+    )
+  ) {
+    return invalidArgument(
+      `Workspace ${parsed.data.workspacePath} is not linked to epic ${parsed.data.epicId}`,
+    );
+  }
+  try {
+    await writeEnvironmentFile(
+      requestedPath,
+      { setup: parsed.data.setup, teardown: parsed.data.teardown },
+      Date.now(),
+    );
+    return { ok: true, result: { updated: true } };
+  } catch (error) {
+    return storeFailure(error);
+  }
+}
+
+async function deleteWorktree(
+  state: HostState,
+  params: unknown,
+): Promise<HandlerResult> {
+  const parsed = worktreeDeleteRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  try {
+    const result = await new WorktreeDeletionService(
+      state.managedWorktreeRoot(),
+    ).delete(
+      {
+        worktreePath: parsed.data.worktreePath,
+        expectedRepositoryRoot: parsed.data.workspacePath,
+      },
+      {
+        isBusy: ({ worktreePath }) => state.isWorktreePathBusy(worktreePath),
+        reportEvent: () => {},
+      },
+    );
+    return { ok: true, result: { deleted: result.deleted } };
+  } catch (error) {
+    if (error instanceof WorktreeDeletionError) {
+      return {
+        ok: false,
+        code: error.code === "BUSY" ? "WORKTREE_BUSY" : "RPC_ERROR",
+        message: error.message,
+      };
+    }
+    return storeFailure(error);
+  }
+}
+
+function listEpicCollaborators(
+  state: HostState,
+  params: unknown,
+): HandlerResult {
+  const parsed = listEpicCollaboratorsRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  if (state.getEpic(parsed.data.epicId) === null) {
+    return invalidArgument(`Unknown epic ${parsed.data.epicId}`);
+  }
+  return {
+    ok: true,
+    result: { collaborators: [], collaboratorsAvailable: false },
+  };
+}
+
+function batchDeleteEpics(state: HostState, params: unknown): HandlerResult {
+  const parsed = batchDeleteRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  return {
+    ok: true,
+    result: {
+      results: parsed.data.ids.map((taskId) => {
+        try {
+          return state.deleteEpic(taskId)
+            ? { taskId, success: true }
+            : {
+                taskId,
+                success: false,
+                errorMessage: `Task '${taskId}' was not found`,
+              };
+        } catch (error) {
+          return {
+            taskId,
+            success: false,
+            errorMessage:
+              error instanceof Error ? error.message : String(error),
+          };
+        }
+      }),
     },
   };
 }
@@ -200,11 +581,189 @@ function guiHarness(id: "claude" | "codex", label: string): unknown {
     enabled: true,
     available: availability.available,
     error: availability.error,
-    modes: ["gui"],
+    modes: ["gui", "tui"],
     requiresApiKey: false,
     supportedPermissionModes: PERMISSION_MODES,
     availabilityPending: false,
   };
+}
+
+function listTuiHarnesses(params: unknown): HandlerResult {
+  const parsed = listTuiHarnessesRequestSchema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  return {
+    ok: true,
+    result: {
+      harnesses: [
+        tuiHarness("claude", "Claude Code"),
+        tuiHarness("codex", "Codex"),
+      ],
+    },
+  };
+}
+
+function tuiHarness(id: "claude" | "codex", label: string): unknown {
+  const availability = guiHarnessAvailability(id);
+  return {
+    id,
+    label,
+    enabled: true,
+    available: availability.available,
+    error: availability.error,
+    availabilityPending: false,
+  };
+}
+
+function prepareTuiLaunch(
+  state: HostState,
+  providerConfig: ProviderConfigStore,
+  params: unknown,
+): HandlerResult {
+  const parsed = prepareTuiLaunchRequestSchemaV11.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  const request = parsed.data;
+  if (request.harnessId !== "claude" && request.harnessId !== "codex") {
+    return hostUnsupported(
+      `agent.tui.prepareLaunch harness '${request.harnessId}'`,
+    );
+  }
+  if (
+    request.forkSourceHarnessSessionId !== null ||
+    request.forkSourceTuiAgentId !== null
+  ) {
+    return hostUnsupported("agent.tui.prepareLaunch session forking");
+  }
+  if (request.profileId !== null) {
+    return hostUnsupported("agent.tui.prepareLaunch managed profiles");
+  }
+  const executable = resolveHarnessExecutable(request.harnessId, process.env);
+  if (executable === null) {
+    return {
+      ok: false,
+      code: "RPC_ERROR",
+      message: `${request.harnessId} CLI is not available on this host.`,
+    };
+  }
+  try {
+    const workspace = state.terminalAgentLaunchWorkspace(
+      request.epicId,
+      request.tuiAgentId ?? randomUUID(),
+      request.workspaceMode,
+    );
+    const providerId = request.harnessId === "claude" ? "claude-code" : "codex";
+    const configuredArgs =
+      request.terminalAgentArgs ??
+      providerConfig.get(providerId).terminalAgentArgs;
+    const extraArgs = parseCommandLineArguments(configuredArgs);
+    const launch = tuiLaunchArguments({
+      harnessId: request.harnessId,
+      harnessSessionId: request.harnessSessionId,
+      model: request.model,
+      extraArgs,
+    });
+    return {
+      ok: true,
+      result: {
+        harnessId: request.harnessId,
+        harnessSessionId: launch.harnessSessionId,
+        terminalShellCommand: executable,
+        terminalShellArgs: launch.args,
+        hostId: state.hostId,
+        workingDirectory: workspace.workingDirectory,
+        workspaceFolders: workspace.workspaceFolders,
+        worktreeBusyPaths: workspace.worktreeBusyPaths,
+      },
+    };
+  } catch (error) {
+    return storeFailure(error);
+  }
+}
+
+function tuiLaunchArguments(input: {
+  readonly harnessId: "claude" | "codex";
+  readonly harnessSessionId: string | null;
+  readonly model: string | null;
+  readonly extraArgs: readonly string[];
+}): { readonly harnessSessionId: string | null; readonly args: string[] } {
+  const modelArgs =
+    input.model === null || input.model.length === 0
+      ? []
+      : ["--model", input.model];
+  if (input.harnessId === "claude") {
+    const harnessSessionId = input.harnessSessionId ?? randomUUID();
+    const sessionArgs =
+      input.harnessSessionId === null
+        ? ["--session-id", harnessSessionId]
+        : ["--resume", harnessSessionId];
+    return {
+      harnessSessionId,
+      args: [
+        ...sessionArgs,
+        ...modelArgs,
+        "--plugin-dir",
+        CLAUDE_TUI_PLUGIN_PATH,
+        ...input.extraArgs,
+      ],
+    };
+  }
+  return {
+    harnessSessionId: input.harnessSessionId,
+    args:
+      input.harnessSessionId === null
+        ? [...modelArgs, ...input.extraArgs]
+        : ["resume", input.harnessSessionId, ...modelArgs, ...input.extraArgs],
+  };
+}
+
+function parseCommandLineArguments(value: string): string[] {
+  const args: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  let active = false;
+  for (const character of value) {
+    if (escaped) {
+      current += character;
+      escaped = false;
+      active = true;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      escaped = true;
+      active = true;
+      continue;
+    }
+    if (quote !== null) {
+      if (character === quote) quote = null;
+      else current += character;
+      active = true;
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      active = true;
+      continue;
+    }
+    if (/\s/u.test(character)) {
+      if (active) {
+        args.push(current);
+        current = "";
+        active = false;
+      }
+      continue;
+    }
+    current += character;
+    active = true;
+  }
+  if (escaped) current += "\\";
+  if (quote !== null) {
+    throw new StoreError(
+      "E_INVALID_ARGUMENT",
+      "Terminal agent arguments contain an unterminated quote.",
+    );
+  }
+  if (active) args.push(current);
+  return args;
 }
 
 function listGuiHarnesses(): HandlerResult {
@@ -299,6 +858,14 @@ function unimplemented(method: string): HandlerResult {
   };
 }
 
+function hostUnsupported(capability: string): HandlerResult {
+  return {
+    ok: false,
+    code: "E_HOST_UNSUPPORTED",
+    message: `${capability} is not available on this local host`,
+  };
+}
+
 function parsedStoreRequest<T>(
   schema: ZodType<T>,
   params: unknown,
@@ -313,21 +880,83 @@ function parsedStoreRequest<T>(
   }
 }
 
+async function parsedAsyncStoreRequest<T>(
+  schema: ZodType<T>,
+  params: unknown,
+  action: (request: T) => Promise<unknown>,
+): Promise<HandlerResult> {
+  const parsed = schema.safeParse(params);
+  if (!parsed.success) return invalidArgument(parsed.error.message);
+  try {
+    return { ok: true, result: await action(parsed.data) };
+  } catch (error) {
+    return storeFailure(error);
+  }
+}
+
 export function createHandlers(
   state: HostState,
   runner: TurnRunner,
   selectionGuide: AgentSelectionGuideStore | undefined,
+  providerConfig: ProviderConfigStore,
 ): {
   readonly handleMethod: MethodDispatcher;
 } {
+  const providerHandlers = createProviderHandlers({
+    config: providerConfig,
+    runtimeFacts: localProviderRuntimeFacts,
+  });
   const handlers: Readonly<Record<string, MethodHandler>> = {
-    "host.status": hostStatus,
+    "host.status": () => hostStatus(state),
     "host.getRuntimeCapabilities": runtimeCapabilities,
     "host.getRateLimitUsage": (params) => getRateLimitUsage(params),
-    "providers.list": providersList,
+    ...providerHandlers,
+    "providers.startLogin": () =>
+      hostUnsupported("providers.startLogin authentication flow"),
+    "providers.awaitLogin": () =>
+      hostUnsupported("providers.awaitLogin authentication flow"),
+    "providers.cancelLogin": () =>
+      hostUnsupported("providers.cancelLogin authentication flow"),
+    "providers.setApiKey": () =>
+      hostUnsupported("providers.setApiKey secret storage"),
+    "providers.clearApiKey": () =>
+      hostUnsupported("providers.clearApiKey secret storage"),
+    "speech.getModelStatus": (params) => speechModelStatus(params),
+    "speech.ensureModel": (params) => ensureSpeechModel(params),
+    "terminal.create": (params) => createTerminal(state, params),
+    "terminal.kill": (params) => killTerminal(state, params),
+    "terminal.list": (params) => listTerminals(state, params),
+    "terminal.rename": (params) => renameTerminal(state, params),
+    "snapshots.getLocalStorageSize": (params) => snapshotStorageSize(params),
+    "snapshots.clearLocalSnapshots": (params) => clearLocalSnapshots(params),
+    "snapshots.readSnapshotDiff": (params) => readSnapshotDiff(params),
+    "editor.openPaths": (params) => openEditorPaths(params),
     "agent.gui.listHarnesses": listGuiHarnesses,
     "agent.gui.listModels": listGuiModels,
     "agent.gui.listCommands": listGuiCommands,
+    "agent.gui.getPlan": (params) =>
+      parsedStoreRequest(getGuiAgentPlanRequestSchema, params, (request) =>
+        resolveAgentGuiGetPlan(state, request),
+      ),
+    "agent.tui.listHarnesses": listTuiHarnesses,
+    "agent.tui.prepareLaunch": (params) =>
+      prepareTuiLaunch(state, providerConfig, params),
+    "agent.tui.generateTitle": (params) =>
+      parsedAsyncStoreRequest(
+        generateTuiAgentTitleRequestSchema,
+        params,
+        (request) => state.generateTuiAgentTitle(request),
+      ),
+    "agent.tui.recordActivity": (params) =>
+      parsedStoreRequest(
+        recordTuiAgentActivityRequestSchemaV11,
+        params,
+        (request) => state.recordTuiAgentActivity(request),
+      ),
+    "agent.tui.turnEnded": (params) =>
+      parsedStoreRequest(tuiAgentTurnEndedRequestSchema, params, (request) =>
+        state.recordTuiAgentTurnEnded(request),
+      ),
     "agent.create": (params) => createAgent(state, params),
     "agent.configure": (params) => configureAgent(state, params),
     "agent.fork": (params) => forkAgent(state, params),
@@ -340,6 +969,8 @@ export function createHandlers(
     "agent.getTranscript": (params) => getAgentTranscript(state, params),
     "agent.sendMessage": (params) => sendAgentMessage(state, runner, params),
     "agent.stop": (params) => stopAgent(state, params),
+    "agent.inbox.read": (params) => readAgentInbox(state, params),
+    "agent.inbox.ack": (params) => acknowledgeAgentInbox(state, params),
     "agent.selectionGuide": (params) =>
       resolveAgentSelectionGuide(state, selectionGuide, params),
     "agent.selectionGuide.getGlobal": (params) =>
@@ -354,15 +985,29 @@ export function createHandlers(
     "git.listChangedFiles": (params) => gitChangedFiles(params),
     "git.getFileDiff": (params) => gitFileDiff(params),
     "git.getFileDiffs": (params) => gitFileDiffs(params),
-    "worktree.listAllForHost": () => ({
-      ok: true,
-      result: { worktrees: [], nextCursor: null },
-    }),
+    "worktree.listAllForHost": (params) =>
+      parsedAsyncStoreRequest(
+        worktreeListAllForHostRequestSchemaV15,
+        params,
+        (request) => listAllWorktreesForHost(state, request),
+      ),
     "worktree.getBinding": (params) => getBinding(state, params),
     "worktree.create": (params) => createWorktree(state, params),
     "worktree.createPaths": (params) => createWorktreePaths(state, params),
+    "worktree.import": (params) =>
+      parsedAsyncStoreRequest(worktreeImportRequestSchema, params, (request) =>
+        state.importWorktree(request),
+      ),
+    "worktree.delete": (params) => deleteWorktree(state, params),
     "worktree.listBranches": (params) => listBranches(params),
     "worktree.setEntryMode": (params) => setWorktreeEntryMode(state, params),
+    "worktree.retrySetup": (params) => {
+      const parsed = worktreeRetrySetupRequestSchema.safeParse(params);
+      return parsed.success
+        ? hostUnsupported("worktree.retrySetup orchestration")
+        : invalidArgument(parsed.error.message);
+    },
+    "worktree.setRepoScripts": (params) => setRepoScripts(state, params),
     "workspaceBinding.removeEntry": (params) =>
       removeWorktreeBindingEntry(state, params),
     "worktree.listBindingsForEpic": (params) =>
@@ -382,6 +1027,23 @@ export function createHandlers(
     "workspace.mentionGitCommits": (params) => mentionGitCommits(params),
     "workspace.readFile": (params) => readFile(params),
     "epic.create": (params) => createEpic(state, runner, params),
+    "epic.createTuiAgent": (params) =>
+      parsedStoreRequest(createTuiAgentRequestSchema, params, (request) =>
+        state.createTuiAgent(request),
+      ),
+    "epic.deleteTuiAgent": (params) =>
+      parsedStoreRequest(deleteTuiAgentRequestSchema, params, (request) =>
+        state.deleteTuiAgent(request),
+      ),
+    "epic.renameTuiAgent": (params) =>
+      parsedStoreRequest(renameTuiAgentRequestSchema, params, (request) =>
+        state.renameTuiAgent(request),
+      ),
+    "epic.batchDelete": (params) => batchDeleteEpics(state, params),
+    "epic.removeRepo": (params) =>
+      parsedStoreRequest(removeEpicRepoRequestSchema, params, (request) =>
+        state.removeEpicRepo(request),
+      ),
     "epic.createArtifact": (params) => createArtifact(state, params),
     "epic.createCommentThread": (params) =>
       parsedStoreRequest(createCommentThreadRequestSchema, params, (request) =>
@@ -445,6 +1107,35 @@ export function createHandlers(
     "epic.getChatRunSettings": (params) => getChatRunSettings(state, params),
     "epic.deleteChat": (params) => deleteChat(state, params),
     "epic.listTasks": () => ({ ok: true, result: state.listTasks() }),
+    "epic.listCollaborators": (params) => listEpicCollaborators(state, params),
+    "epic.grantAccess": () =>
+      hostUnsupported("epic.grantAccess cloud collaboration"),
+    "epic.batchUpdateRoles": () =>
+      hostUnsupported("epic.batchUpdateRoles cloud collaboration"),
+    "epic.revokeCollaborator": () =>
+      hostUnsupported("epic.revokeCollaborator cloud collaboration"),
+    "phase.migrateToEpic": () =>
+      hostUnsupported("phase.migrateToEpic cloud migration"),
+    "epic.mentionEpics": (params) =>
+      parsedStoreRequest(epicMentionEpicsRequestSchema, params, (request) =>
+        resolveEpicMentionEpics(state, request),
+      ),
+    "epic.mentionSpecs": (params) =>
+      parsedStoreRequest(epicMentionArtifactsRequestSchema, params, (request) =>
+        resolveEpicMentionSpecs(state, request),
+      ),
+    "epic.mentionTickets": (params) =>
+      parsedStoreRequest(epicMentionArtifactsRequestSchema, params, (request) =>
+        resolveEpicMentionTickets(state, request),
+      ),
+    "epic.mentionStories": (params) =>
+      parsedStoreRequest(epicMentionArtifactsRequestSchema, params, (request) =>
+        resolveEpicMentionStories(state, request),
+      ),
+    "epic.mentionReviews": (params) =>
+      parsedStoreRequest(epicMentionArtifactsRequestSchema, params, (request) =>
+        resolveEpicMentionReviews(state, request),
+      ),
   };
   return {
     handleMethod(
@@ -1442,7 +2133,11 @@ async function deleteChat(
 }
 
 function storeFailure(error: unknown): HandlerResult {
-  if (error instanceof StoreError) {
+  if (
+    error instanceof StoreError ||
+    error instanceof TuiAgentServiceError ||
+    error instanceof AgentInboxServiceError
+  ) {
     return { ok: false, code: error.code, message: error.message };
   }
   return {

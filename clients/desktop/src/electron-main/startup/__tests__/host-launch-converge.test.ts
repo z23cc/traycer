@@ -567,6 +567,49 @@ describe("runLaunchHostConvergeReconcile (fixup B1 + B2)", () => {
     }
   });
 
+  it("skips signed-host launch convergence for a dev desktop", async () => {
+    const controller = fakeHostController(
+      fakeStatus(true, "pendingActivation", false),
+      {
+        kind: "ok",
+        value: { appliedVersion: "1.4.1", runningActivated: true },
+      },
+      { kind: "ok", value: { activated: true } },
+    );
+    const background = vi.fn();
+
+    try {
+      __setDesktopStartupTestHooks({
+        config: {
+          environment: "dev",
+          isDev: true,
+          preloadPath: "/tmp/preload.js",
+          iconPath: "/tmp/icon.png",
+          authnBaseUrl: "https://auth.example.test",
+        },
+        runPreReady: () => undefined,
+        whenReady: async () => undefined,
+        runOnReady: async () => undefined,
+        runWindowPhase: async () => ({
+          hostController: controller,
+          menu: fakeMenu(),
+        }),
+        runDeferredBackground: background,
+      });
+
+      await runDesktopStartup();
+      await Promise.resolve();
+
+      expect(background).toHaveBeenCalledOnce();
+      expect(controller.stageLatestCalls).toBe(0);
+      expect(controller.applyStagedCalls).toEqual([]);
+      expect(controller.activateInstalledCalls).toEqual([]);
+      expect(controller.convergeReadyCalls).toEqual([]);
+    } finally {
+      __setDesktopStartupTestHooks(null);
+    }
+  });
+
   it("B1: force-refreshes the registry and updates the menu after a successful apply", async () => {
     const readyStatus = fakeStatus(true, "unavailable", false);
     const convergedStatus = fakeStatus(false, "activated", false);

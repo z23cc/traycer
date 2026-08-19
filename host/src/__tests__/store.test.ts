@@ -114,7 +114,7 @@ describe("HostState agent directory", () => {
     }
   });
 
-  it("enumerates replicated GUI and TUI records with signed scope and capability gates", () => {
+  it("enumerates replicated GUI and TUI records with honest local capability gates", () => {
     const state = stateWithEpic();
     state.createChat({
       epicId: "epic-1",
@@ -230,7 +230,7 @@ describe("HostState agent directory", () => {
     ).toMatchObject({
       surface: "tui",
       active: false,
-      capabilities: { readTranscript: true, sendMessage: true },
+      capabilities: { readTranscript: false, sendMessage: true },
       folderPaths: ["/local/tui"],
       isWorktree: false,
     });
@@ -413,7 +413,7 @@ describe("HostState agent directory", () => {
       surface: "tui",
       harnessId: "claude",
       folderPaths: ["/plain/tui"],
-      capabilities: { readTranscript: true, sendMessage: true },
+      capabilities: { readTranscript: false, sendMessage: true },
     });
     state.dispose();
   });

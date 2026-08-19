@@ -27,6 +27,7 @@ import {
 import { hostRpcRegistry } from "@traycer/protocol/host/registry";
 import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-floor";
 import { scriptedTurnRunner } from "../cli-runner";
+import { ProviderConfigStore } from "../provider-config-store";
 import { dispatchRequest, type DispatchOutcome } from "../dispatch";
 import { createHandlers } from "../handlers";
 import { startHostServer, type HostServer } from "../server";
@@ -59,6 +60,7 @@ describe("workspace.prepareFolders", () => {
       state,
       scriptedTurnRunner([]),
       undefined,
+      ProviderConfigStore.createTransient(),
     );
     const folderPaths = [
       "   ",
@@ -137,6 +139,7 @@ describe("workspace.prepareFolders", () => {
       state,
       scriptedTurnRunner([]),
       undefined,
+      ProviderConfigStore.createTransient(),
     );
 
     const plain = await dispatchRequest({
@@ -202,6 +205,7 @@ describe("workspace.prepareFolders", () => {
       state,
       scriptedTurnRunner([]),
       undefined,
+      ProviderConfigStore.createTransient(),
     );
 
     const prepared = await dispatchRequest({

@@ -17,6 +17,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 
 interface TestState {
   role: PermissionRole;
+  collaboratorsAvailable: boolean;
   collaborators: EpicCollaboratorsView;
   shareableTeams: ReadonlyArray<{
     readonly teamId: string;
@@ -62,6 +63,7 @@ interface TestState {
 
 const testState = vi.hoisted<TestState>(() => ({
   role: "owner",
+  collaboratorsAvailable: true,
   collaborators: { directUsers: [], teams: [], flatRows: [] },
   shareableTeams: [],
   grantAccess: { mutate: vi.fn(), isPending: false, variables: undefined },
@@ -97,6 +99,10 @@ vi.mock("@/hooks/epics/use-epic-collaborators-query", () => ({
     isFetching: testState.collaboratorsQuery.isFetching,
     isLoading: false,
     query: {
+      data: {
+        collaborators: [],
+        collaboratorsAvailable: testState.collaboratorsAvailable,
+      },
       dataUpdatedAt: testState.collaboratorsQuery.dataUpdatedAt,
       refetch: testState.collaboratorsQuery.refetch,
     },
@@ -224,6 +230,7 @@ const SHARED_TEAM: EpicTeamCollaboratorView = {
 
 function resetTestState(): void {
   testState.role = "owner";
+  testState.collaboratorsAvailable = true;
   testState.collaborators = {
     directUsers: [],
     teams: [],
@@ -420,6 +427,25 @@ describe("<SharingPanel />", () => {
     renderSharingPanel();
 
     expect(screen.queryByText("Teams")).toBeNull();
+    expect(screen.queryByTestId("epic-sharing-teams-list")).toBeNull();
+  });
+
+  it("shows a capability notice instead of cloud collaboration controls", () => {
+    testState.collaboratorsAvailable = false;
+    testState.collaborators = {
+      directUsers: [DIRECT_USER],
+      teams: [SHARED_TEAM],
+      flatRows: [DIRECT_USER, ...SHARED_TEAM.members],
+    };
+    testState.shareableTeams = [
+      { teamId: "team-1", slug: "traycerai", avatarUrl: null },
+    ];
+
+    renderSharingPanel();
+
+    expect(screen.getByTestId("epic-sharing-unavailable")).toBeTruthy();
+    expect(screen.queryByTestId("invite-card")).toBeNull();
+    expect(screen.queryByText("People with access")).toBeNull();
     expect(screen.queryByTestId("epic-sharing-teams-list")).toBeNull();
   });
 

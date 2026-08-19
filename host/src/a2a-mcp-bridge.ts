@@ -87,6 +87,7 @@ type AgentA2AMcpSession = AgentA2AMcpLaunchContext & {
 export type AgentA2AMcpBridge = {
   readonly openSession: (identity: AgentA2AMcpIdentity) => AgentA2AMcpSession;
   readonly releaseSession: (identity: AgentA2AMcpIdentity) => void;
+  readonly releaseEpic: (epicId: string) => void;
   readonly close: () => Promise<void>;
 };
 
@@ -775,6 +776,15 @@ export async function startAgentA2AMcpBridge(
       }
       tokensBySessionKey.delete(sessionKey);
       identities.delete(token);
+    },
+    releaseEpic(epicId): void {
+      for (const [sessionKey, token] of tokensBySessionKey) {
+        if (identities.get(token)?.epicId !== epicId) {
+          continue;
+        }
+        tokensBySessionKey.delete(sessionKey);
+        identities.delete(token);
+      }
     },
     close(): Promise<void> {
       if (closed) {

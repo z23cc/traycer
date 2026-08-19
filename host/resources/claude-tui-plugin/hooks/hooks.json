@@ -1,0 +1,48 @@
+{
+  "description": "Reports Claude terminal-agent lifecycle events to Traycer.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${TRAYCER_CLI}\" agent session-observed-from-hook --provider claude",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${TRAYCER_CLI}\" agent title-from-hook --provider claude",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"${TRAYCER_CLI}\" agent activity-from-hook --provider claude --event start",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${TRAYCER_CLI}\" agent activity-from-hook --provider claude --event stop",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "\"${TRAYCER_CLI}\" agent turn-ended-from-hook --provider claude",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

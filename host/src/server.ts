@@ -1,7 +1,10 @@
 import { createServer, type Server } from "node:http";
 import { WebSocketServer, type RawData, type WebSocket } from "ws";
 import type { HostFrame } from "@traycer/protocol/framework/ws-protocol";
-import { deleteChatRequestSchema } from "@traycer/protocol/host/epic/unary-schemas";
+import {
+  batchDeleteResponseSchema,
+  deleteChatRequestSchema,
+} from "@traycer/protocol/host/epic/unary-schemas";
 import { worktreeWorkspaceSummarySchemaV13 } from "@traycer/protocol/host/worktree-schemas";
 import {
   startAgentA2AMcpBridge,
@@ -9,7 +12,11 @@ import {
   wrapTurnRunnerWithAgentA2A,
 } from "./a2a-mcp-bridge";
 import { createProcessTurnRunner, type TurnRunner } from "./cli-runner";
-import { createHandlers, type MethodDispatcher } from "./handlers";
+import {
+  createHandlers,
+  type HandlerResult,
+  type MethodDispatcher,
+} from "./handlers";
 import { createRpcSession } from "./rpc-session";
 import { RepoWorkspacePersistence } from "./repo-workspace-persistence";
 import {
@@ -19,6 +26,7 @@ import {
 } from "./stream-session";
 import { HostState } from "./store";
 import { AgentSelectionGuideStore } from "./agent-selection-guide";
+import { ProviderConfigStore } from "./provider-config-store";
 import { summarizeWorktreeWorkspacePaths } from "./worktree-summary";
 
 export type HostServerOptions = {
@@ -49,6 +57,10 @@ export async function startHostServer(
     options?.worktreeRoot,
   );
   const selectionGuide = new AgentSelectionGuideStore(options?.hostHome);
+  const providerConfig =
+    options?.hostHome === undefined
+      ? ProviderConfigStore.createTransient()
+      : await ProviderConfigStore.open(options.hostHome);
   let methodDispatcher: MethodDispatcher | null = null;
   const a2aMcpBridge = await startAgentA2AMcpBridge(
     (request) => {
@@ -103,7 +115,12 @@ export async function startHostServer(
   );
   const baseRunner = options?.runner ?? createProcessTurnRunner(process.env);
   const runner = wrapTurnRunnerWithAgentA2A(baseRunner, a2aMcpBridge);
-  const handlers = createHandlers(state, runner, selectionGuide);
+  const handlers = createHandlers(
+    state,
+    runner,
+    selectionGuide,
+    providerConfig,
+  );
   const handleMethod = withAgentA2ASessionRelease(
     handlers.handleMethod,
     a2aMcpBridge,
@@ -165,26 +182,38 @@ function withAgentA2ASessionRelease(
 ): MethodDispatcher {
   return (method, params) => {
     const handled = dispatcher(method, params);
-    if (method !== "epic.deleteChat") {
+    if (method !== "epic.deleteChat" && method !== "epic.batchDelete") {
       return handled;
     }
     if (handled instanceof Promise) {
       return handled.then((result) => {
-        releaseDeletedAgentSession(bridge, params, result.ok);
+        releaseDeletedAgentSessions(bridge, method, params, result);
         return result;
       });
     }
-    releaseDeletedAgentSession(bridge, params, handled.ok);
+    releaseDeletedAgentSessions(bridge, method, params, handled);
     return handled;
   };
 }
 
-function releaseDeletedAgentSession(
+function releaseDeletedAgentSessions(
   bridge: AgentA2AMcpBridge,
+  method: string,
   params: unknown,
-  deleted: boolean,
+  result: HandlerResult,
 ): void {
-  if (!deleted) {
+  if (!result.ok) {
+    return;
+  }
+  if (method === "epic.batchDelete") {
+    const parsed = batchDeleteResponseSchema.safeParse(result.result);
+    if (parsed.success) {
+      for (const deleted of parsed.data.results) {
+        if (deleted.success) {
+          bridge.releaseEpic(deleted.taskId);
+        }
+      }
+    }
     return;
   }
   const parsed = deleteChatRequestSchema.safeParse(params);

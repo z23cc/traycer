@@ -8,6 +8,7 @@ const IMPLEMENTED_OPTIONAL_METHOD_NAMES = [
   "agent.configure",
   "agent.fork",
   "agent.getProviderProfileRateLimits",
+  "agent.inbox.ack",
   "agent.listProviderProfiles",
   "epic.getChatRunSettings",
   "epic.setChatArchived",

@@ -24,6 +24,22 @@ import {
   type NotificationsStreamBinding,
 } from "./notifications-stream";
 import { HostState } from "./store";
+import {
+  openGitStatusStream,
+  type GitStatusStreamBinding,
+} from "./git-status-stream";
+import {
+  openTerminalStream,
+  type TerminalStreamBinding,
+} from "./terminal-stream";
+import {
+  openWorktreeDeleteStream,
+  type WorktreeDeleteStreamBinding,
+} from "./worktree-delete-stream";
+import {
+  openAgentInboxStream,
+  type AgentInboxStreamBinding,
+} from "./agent-inbox-stream";
 
 type StreamSend = (data: string | Uint8Array) => void;
 type StreamReject = (code: string, reason: string) => void;
@@ -48,7 +64,13 @@ type PendingBinaryFrame = {
   readonly envelope: StreamMethodFrameEnvelope;
 };
 
-type MethodStreamBinding = EpicStreamBinding | NotificationsStreamBinding;
+type MethodStreamBinding =
+  | EpicStreamBinding
+  | GitStatusStreamBinding
+  | NotificationsStreamBinding
+  | TerminalStreamBinding
+  | AgentInboxStreamBinding
+  | WorktreeDeleteStreamBinding;
 
 export function createStreamSession(
   send: StreamSend,
@@ -307,8 +329,26 @@ function bindSubscription(
   if (method === "chat.subscribe") {
     return bindChatSubscribe(send, state, schemaVersion, params, reject);
   }
+  if (method === "git.subscribeStatus") {
+    return bindGitStatusSubscribe(send, schemaVersion, params, reject);
+  }
   if (method === "notifications.subscribe") {
     return bindNotificationsSubscribe(send, state, params, reject);
+  }
+  if (method === "terminal.subscribe") {
+    return bindTerminalSubscribe(send, state, schemaVersion, params, reject);
+  }
+  if (method === "agent.inbox.subscribe") {
+    return bindAgentInboxSubscribe(send, state, schemaVersion, params, reject);
+  }
+  if (method === "worktree.deleteByPath") {
+    return bindWorktreeDeleteSubscribe(
+      send,
+      state,
+      schemaVersion,
+      params,
+      reject,
+    );
   }
   reject("E_HOST_UNSUPPORTED", `${method} is not implemented`);
   return {
@@ -316,6 +356,125 @@ function bindSubscription(
     unsubscribe: null,
     chat: null,
     methodStream: null,
+  };
+}
+
+function bindAgentInboxSubscribe(
+  send: StreamSend,
+  state: HostState,
+  schemaVersion: { readonly major: number; readonly minor: number },
+  params: unknown,
+  reject: StreamReject,
+): {
+  readonly accepted: boolean;
+  readonly unsubscribe: (() => void) | null;
+  readonly chat: BoundChat | null;
+  readonly methodStream: MethodStreamBinding | null;
+} {
+  const opened = openAgentInboxStream(send, state, schemaVersion, params);
+  if (!opened.accepted) {
+    reject(opened.code, opened.reason);
+    return {
+      accepted: false,
+      unsubscribe: null,
+      chat: null,
+      methodStream: null,
+    };
+  }
+  return {
+    accepted: true,
+    unsubscribe: opened.binding.dispose,
+    chat: null,
+    methodStream: opened.binding,
+  };
+}
+
+function bindWorktreeDeleteSubscribe(
+  send: StreamSend,
+  state: HostState,
+  schemaVersion: { readonly major: number; readonly minor: number },
+  params: unknown,
+  reject: StreamReject,
+): {
+  readonly accepted: boolean;
+  readonly unsubscribe: (() => void) | null;
+  readonly chat: BoundChat | null;
+  readonly methodStream: MethodStreamBinding | null;
+} {
+  const opened = openWorktreeDeleteStream(send, state, schemaVersion, params);
+  if (!opened.accepted) {
+    reject(opened.code, opened.reason);
+    return {
+      accepted: false,
+      unsubscribe: null,
+      chat: null,
+      methodStream: null,
+    };
+  }
+  return {
+    accepted: true,
+    unsubscribe: opened.binding.dispose,
+    chat: null,
+    methodStream: opened.binding,
+  };
+}
+
+function bindGitStatusSubscribe(
+  send: StreamSend,
+  schemaVersion: { readonly major: number; readonly minor: number },
+  params: unknown,
+  reject: StreamReject,
+): {
+  readonly accepted: boolean;
+  readonly unsubscribe: (() => void) | null;
+  readonly chat: BoundChat | null;
+  readonly methodStream: MethodStreamBinding | null;
+} {
+  const opened = openGitStatusStream(send, schemaVersion, params, undefined);
+  if (!opened.accepted) {
+    reject(opened.code, opened.reason);
+    return {
+      accepted: false,
+      unsubscribe: null,
+      chat: null,
+      methodStream: null,
+    };
+  }
+  return {
+    accepted: true,
+    unsubscribe: opened.binding.dispose,
+    chat: null,
+    methodStream: opened.binding,
+  };
+}
+
+function bindTerminalSubscribe(
+  send: StreamSend,
+  state: HostState,
+  schemaVersion: { readonly major: number; readonly minor: number },
+  params: unknown,
+  reject: StreamReject,
+): {
+  readonly accepted: boolean;
+  readonly unsubscribe: (() => void) | null;
+  readonly chat: BoundChat | null;
+  readonly methodStream: MethodStreamBinding | null;
+} {
+  const opened = openTerminalStream(send, state, schemaVersion, params);
+  if (!opened.accepted) {
+    reject(opened.code, opened.reason);
+    return {
+      accepted: false,
+      unsubscribe: null,
+      chat: null,
+      methodStream: null,
+    };
+  }
+  return {
+    accepted: true,
+    unsubscribe: opened.binding.dispose,
+    chat: null,
+    methodStream: opened.binding,
   };
 }
 
@@ -495,12 +654,28 @@ function advertisedStreamManifest(): Record<
   const full = buildStreamManifest(hostStreamRpcRegistry);
   const epic = full["epic.subscribe"];
   const chat = full["chat.subscribe"];
+  const git = full["git.subscribeStatus"];
+  const terminal = full["terminal.subscribe"];
+  const agentInbox = full["agent.inbox.subscribe"];
+  const worktreeDelete = full["worktree.deleteByPath"];
   const manifest: Record<string, { major: number; minor: number }> = {};
   if (epic !== undefined) {
     manifest["epic.subscribe"] = epic;
   }
   if (chat !== undefined) {
     manifest["chat.subscribe"] = chat;
+  }
+  if (git !== undefined) {
+    manifest["git.subscribeStatus"] = { major: 1, minor: 0 };
+  }
+  if (terminal !== undefined) {
+    manifest["terminal.subscribe"] = terminal;
+  }
+  if (agentInbox !== undefined) {
+    manifest["agent.inbox.subscribe"] = agentInbox;
+  }
+  if (worktreeDelete !== undefined) {
+    manifest["worktree.deleteByPath"] = { major: 1, minor: 0 };
   }
   manifest["notifications.subscribe"] = { major: 1, minor: 0 };
   return manifest;

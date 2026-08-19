@@ -27,6 +27,7 @@ function SharingPanelContent(props: {
   readonly controller: SharingPanelController;
 }) {
   const {
+    collaborationAvailable,
     canInvitePeople,
     showTeams,
     inviteCardProps,
@@ -42,19 +43,30 @@ function SharingPanelContent(props: {
     <div className="flex flex-col">
       <SharingPanelHeader {...refreshProps} />
 
+      {!collaborationAvailable ? (
+        <div
+          className="border-b border-border/50 p-3 text-ui-sm text-muted-foreground"
+          data-testid="epic-sharing-unavailable"
+        >
+          Collaboration controls are unavailable on this local host.
+        </div>
+      ) : null}
+
       {canInvitePeople ? (
         <PanelSection title={undefined} hint={undefined} className="gap-3">
           <InviteCard {...inviteCardProps} />
         </PanelSection>
       ) : null}
 
-      <PanelSection
-        title="People with access"
-        hint={peopleHint}
-        className={undefined}
-      >
-        <PeopleWithAccess {...peopleProps} />
-      </PanelSection>
+      {collaborationAvailable ? (
+        <PanelSection
+          title="People with access"
+          hint={peopleHint}
+          className={undefined}
+        >
+          <PeopleWithAccess {...peopleProps} />
+        </PanelSection>
+      ) : null}
 
       {showTeams ? (
         <PanelSection title="Teams" hint={teamHint} className={undefined}>

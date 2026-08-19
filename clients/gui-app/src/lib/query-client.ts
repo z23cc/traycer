@@ -4,7 +4,11 @@ import {
   QueryClient,
   type QueryKey,
 } from "@tanstack/react-query";
-import { RetryableTransportError } from "@traycer-clients/shared/host-transport/host-messenger";
+import {
+  HostRpcError,
+  RetryableTransportError,
+} from "@traycer-clients/shared/host-transport/host-messenger";
+import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-floor";
 import {
   appLogger,
   describeLogErrorSummary,
@@ -33,6 +37,7 @@ export function createAppQueryClient(): QueryClient {
   const client = new QueryClient({
     queryCache: new QueryCache({
       onError: (error, query) => {
+        if (isExpectedUnsupportedHostMethod(error)) return;
         appLogger.warn("[query] request failed", {
           queryKey: summarizeQueryKey(query.queryKey),
           failureCount: query.state.fetchFailureCount,
@@ -44,6 +49,7 @@ export function createAppQueryClient(): QueryClient {
     }),
     mutationCache: new MutationCache({
       onError: (error, _variables, _context, mutation) => {
+        if (isExpectedUnsupportedHostMethod(error)) return;
         appLogger.warn("[mutation] request failed", {
           mutationKey: summarizeQueryKey(mutation.options.mutationKey ?? []),
           failureCount: mutation.state.failureCount,
@@ -86,6 +92,14 @@ export function createAppQueryClient(): QueryClient {
   });
   installConditionPollEpisodeCoordinator(client);
   return client;
+}
+
+function isExpectedUnsupportedHostMethod(error: unknown): boolean {
+  return (
+    error instanceof HostRpcError &&
+    error.code === "E_HOST_UNSUPPORTED" &&
+    !RELEASED_FLOOR_METHOD_NAMES.includes(error.method)
+  );
 }
 
 export const queryClient = createAppQueryClient();

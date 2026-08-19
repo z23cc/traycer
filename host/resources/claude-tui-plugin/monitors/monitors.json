@@ -1,0 +1,7 @@
+[
+  {
+    "name": "traycer-agent-inbox",
+    "command": "\"${TRAYCER_CLI}\" monitor",
+    "description": "Inbound messages from other Traycer agents"
+  }
+]
