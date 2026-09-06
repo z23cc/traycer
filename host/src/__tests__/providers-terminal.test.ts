@@ -319,6 +319,48 @@ exit 1
     expect(await readFile(codeFile, "utf8")).toBe("paste-code-1\n");
   });
 
+  it("spawns a real TTY so isatty(1) succeeds", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "traycer-host-"));
+    started = await startHost({
+      argv: ["--host-data-dir", tempDir],
+      listenHost: "127.0.0.1",
+      listenPort: 0,
+    });
+    const script = join(tempDir, "tty-probe");
+    await writeFile(
+      script,
+      `#!/usr/bin/env bash
+if [ -t 1 ]; then printf 'HAS_TTY\\n'; else printf 'NO_TTY\\n'; fi
+sleep 30
+`,
+    );
+    await chmod(script, 0o755);
+    const created = await call(
+      started.rpcUrl,
+      "terminal.create",
+      { major: 2, minor: 1 },
+      {
+        scope: { kind: "independent" },
+        sessionKind: "terminal",
+        tuiHarnessId: null,
+        cwd: tempDir,
+        shellCommand: script,
+        shellArgs: [],
+        cols: 80,
+        rows: 24,
+        desiredSessionId: "term-tty",
+        worktreeBusyPaths: [],
+        themeHint: null,
+      },
+    );
+    expect(created).toMatchObject({
+      session: { sessionId: "term-tty", status: "running" },
+    });
+    await waitForScrollback(started, "term-tty", "HAS_TTY");
+    expect(started.runtime.pty.scrollback("term-tty")).toContain("HAS_TTY");
+    expect(started.runtime.pty.scrollback("term-tty")).not.toContain("NO_TTY");
+  });
+
   it("spawns a PTY and answers terminal.subscribe with a snapshot", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "traycer-host-"));
     started = await startHost({
