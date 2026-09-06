@@ -1,5 +1,6 @@
 import type { RpcHandler } from "./handlers/types";
 export type { RpcHandler, RpcHandlerResult } from "./handlers/types";
+import { analogResultForMethod } from "./analog-value";
 import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-floor";
 import { epicGetWorkspaceContextV10 } from "@traycer/protocol/host/epic/lane-unaries";
 import { browserSavedLoginSitesV10 } from "@traycer/protocol/host/browser/contracts";
@@ -123,6 +124,22 @@ import {
   handleTerminalPlainList,
 } from "./handlers/analog-handlers";
 import {
+  handleConfigEnvDelete,
+  handleConfigEnvList,
+  handleConfigEnvSet,
+  handleConfigShellGet,
+  handleConfigShellListDetected,
+  handleConfigShellProbe,
+  handleEpicSearchArtifacts,
+  handleEpicSetPinned,
+  handleGitGetFileContents,
+  handleTerminalReadOutput,
+  handleWorkspaceBrowseFolders,
+  handleWorkspaceSearchPaths,
+  handleWorkspaceSearchText,
+  handleWorkspaceWriteFile,
+} from "./handlers/optional-local-handlers";
+import {
   handleGitCapabilities,
   handleGitGetFileDiff,
   handleGitGetFileDiffs,
@@ -187,11 +204,21 @@ export function handlerFor(method: string): RpcHandler {
   if (found !== undefined) {
     return found;
   }
-  return () => ({
-    ok: false,
-    code: "RPC_ERROR",
-    message: `Method ${method} is not implemented by this OSS host`,
-  });
+  return analogFallback(method);
+}
+
+function analogFallback(method: string): RpcHandler {
+  return () => {
+    const analog = analogResultForMethod(method);
+    if (analog === null) {
+      return {
+        ok: false,
+        code: "RPC_ERROR",
+        message: `Unknown method ${method}`,
+      };
+    }
+    return { ok: true, result: analog };
+  };
 }
 
 export function implementedRpcMethods(): readonly string[] {
@@ -312,6 +339,10 @@ const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "workspace.prepareFolders": handleWorkspacePrepareFolders,
   "workspace.listDirectory": handleWorkspaceListDirectory,
   "workspace.readFile": handleWorkspaceReadFile,
+  "workspace.writeFile": handleWorkspaceWriteFile,
+  "workspace.browseFolders": handleWorkspaceBrowseFolders,
+  "workspace.searchPaths": handleWorkspaceSearchPaths,
+  "workspace.searchText": handleWorkspaceSearchText,
   "workspace.listFileTree": handleWorkspaceListFileTree,
   "workspace.mentionFolders": handleWorkspaceMentionFolders,
   "workspace.mentionFiles": handleWorkspaceMentionFiles,
@@ -337,10 +368,20 @@ const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "git.listChangedFiles": handleGitListChangedFiles,
   "git.getFileDiff": handleGitGetFileDiff,
   "git.getFileDiffs": handleGitGetFileDiffs,
+  "git.getFileContents": handleGitGetFileContents,
   "terminal.list": handleTerminalList,
   "terminal.create": handleTerminalCreate,
   "terminal.kill": handleTerminalKill,
   "terminal.rename": handleTerminalRename,
+  "terminal.readOutput": handleTerminalReadOutput,
+  "epic.setPinned": handleEpicSetPinned,
+  "epic.searchArtifacts": handleEpicSearchArtifacts,
+  "config.shell.get": handleConfigShellGet,
+  "config.shell.listDetected": handleConfigShellListDetected,
+  "config.shell.probe": handleConfigShellProbe,
+  "config.env.list": handleConfigEnvList,
+  "config.env.set": handleConfigEnvSet,
+  "config.env.delete": handleConfigEnvDelete,
 };
 
 const HANDLERS: { readonly [method: string]: RpcHandler } =

@@ -154,7 +154,7 @@ describe("host handshake", () => {
     expect(restarts).toBe(1);
   });
 
-  it("does not advertise unimplemented epic lanes on /stream", async () => {
+  it("advertises analog stream lanes with snapshots", async () => {
     started = await boot();
     const clientStreamManifest = buildStreamManifest(
       hostStreamRpcRegistry,
@@ -166,24 +166,26 @@ describe("host handshake", () => {
       socket.once("open", () => resolve());
       socket.once("error", reject);
     });
-    const ack = await new Promise<Record<string, unknown>>((resolve, reject) => {
-      socket.once("message", (data) => {
-        resolve(JSON.parse(String(data)) as Record<string, unknown>);
-      });
-      socket.once("error", reject);
-      socket.send(
-        JSON.stringify({
-          kind: "open",
-          token: "test-token",
-          manifest: clientStreamManifest,
-          clientIdentity: {
-            kind: "cli",
-            compatibilityEpoch: CURRENT_CLIENT_COMPATIBILITY_EPOCH,
-            appVersion: "0.1.0",
-          },
-        }),
-      );
-    });
+    const ack = await new Promise<Record<string, unknown>>(
+      (resolve, reject) => {
+        socket.once("message", (data) => {
+          resolve(JSON.parse(String(data)) as Record<string, unknown>);
+        });
+        socket.once("error", reject);
+        socket.send(
+          JSON.stringify({
+            kind: "open",
+            token: "test-token",
+            manifest: clientStreamManifest,
+            clientIdentity: {
+              kind: "cli",
+              compatibilityEpoch: CURRENT_CLIENT_COMPATIBILITY_EPOCH,
+              appVersion: "0.1.0",
+            },
+          }),
+        );
+      },
+    );
     socket.close();
     expect(ack.kind).toBe("openAck");
     const advertised = ack.manifest as Record<string, unknown>;
@@ -197,8 +199,13 @@ describe("host handshake", () => {
       major: 1,
       minor: 0,
     });
-    expect(advertised["epic.state.subscribe"]).toBeUndefined();
-    expect(advertised["artifact.subscribe"]).toBeUndefined();
+    expect(advertised["epic.state.subscribe"]).toMatchObject({
+      major: 1,
+      minor: 0,
+    });
+    expect(advertised["artifact.subscribe"]).toMatchObject({
+      major: 1,
+    });
   });
 
   async function boot(): Promise<StartedHost> {

@@ -20,23 +20,13 @@ export function hostUnaryManifests(): SplitConnectionManifest {
 }
 
 /**
- * Stream methods this OSS host actually serves.
- *
- * Advertising the rest of `hostStreamRpcRegistry` (via
- * `SERVES_EVERY_INSTALLED_MAJOR`) makes a GUI treat optional lanes such as
- * `epic.state.subscribe` as supported, then wait forever on snapshots this
- * host never sends. The legacy `epic.subscribe` Y.Doc path is what we
- * implement.
+ * Stream methods this OSS host advertises. Concrete lanes send real
+ * snapshots; the rest answer with a schema-valid analog snapshot so a GUI
+ * that subscribed does not wait forever.
  */
-export const OSS_STREAM_METHOD_NAMES: readonly string[] = [
-  "agent.activity.subscribe",
-  "chat.subscribe",
-  "epic.status.subscribe",
-  "epic.subscribe",
-  "git.subscribeStatus",
-  "notifications.subscribe",
-  "terminal.subscribe",
-];
+export const OSS_STREAM_METHOD_NAMES: readonly string[] = Object.keys(
+  hostStreamRpcRegistry,
+);
 
 export function hostStreamManifest(): ConnectionManifest {
   const full = buildStreamManifest(

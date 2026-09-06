@@ -18,6 +18,7 @@ import { sendChatSnapshot } from "./chat";
 import { attachGitStatusStream } from "./git-status";
 import {
   sendAgentActivitySnapshot,
+  sendAnalogStreamSnapshot,
   sendEpicSnapshot,
   sendEpicStatusSnapshot,
   sendNotificationsSnapshot,
@@ -274,7 +275,9 @@ export function attachStreamConnection(
           "missing-terminal",
         );
       }
+      return;
     }
+    sendAnalogStreamSnapshot(socket, subscribe.data.method);
   }
 
   function handleApplication(parsed: unknown): void {
