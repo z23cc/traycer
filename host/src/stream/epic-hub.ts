@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { WebSocket } from "ws";
 import * as Y from "yjs";
 import { artifactBodyFragmentName } from "@traycer/protocol/persistence/epic/artifacts";
+import type { EarlyMetaEpic } from "@traycer/protocol/host/epic/snapshot-meta";
 import { LOCAL_USER_ID } from "../local-user";
 import type { HostRuntime } from "../runtime";
 import type {
@@ -342,49 +343,41 @@ function sendRoomBootstrap(
   );
 }
 
-function snapshotMeta(
+export function earlyMetaForEpic(
   runtime: HostRuntime,
   epicId: string,
-  stateVector: Uint8Array,
-) {
+): EarlyMetaEpic | null {
   const epic = runtime.store.snapshot().epics.find((row) => row.id === epicId);
-  const light =
-    epic === undefined
-      ? null
-      : {
-          id: epic.id,
-          title: projectedEpicTitle(epic),
-          initialUserPrompt: epic.initialUserPrompt,
-          ticketCount: epic.ticketCount,
-          specCount: epic.specCount,
-          storyCount: epic.storyCount,
-          reviewCount: epic.reviewCount,
-          status: epic.status,
-          createdAt: epic.createdAt,
-          updatedAt: epic.updatedAt,
-          createdBy: epic.createdBy,
-          version: epic.version,
-        };
-  const workspaces =
-    epic === undefined
-      ? []
-      : epic.workspaces.map((workspacePath) => ({
-          task: { taskId: epic.id, taskType: "epic" as const },
-          hostId: runtime.hostId,
-          workspacePath,
-          createdAt: epic.createdAt,
-        }));
-  const repos =
-    epic === undefined
-      ? []
-      : epic.repos.map((repo) => ({
-          task: { taskId: epic.id, taskType: "epic" as const },
-          repoIdentifier: repo,
-          createdAt: epic.createdAt,
-          createdBy: epic.createdBy,
-        }));
+  if (epic === undefined) {
+    return null;
+  }
+  const light = {
+    id: epic.id,
+    title: projectedEpicTitle(epic),
+    initialUserPrompt: epic.initialUserPrompt,
+    ticketCount: epic.ticketCount,
+    specCount: epic.specCount,
+    storyCount: epic.storyCount,
+    reviewCount: epic.reviewCount,
+    status: epic.status,
+    createdAt: epic.createdAt,
+    updatedAt: epic.updatedAt,
+    createdBy: epic.createdBy,
+    version: epic.version,
+  };
+  const workspaces = epic.workspaces.map((workspacePath) => ({
+    task: { taskId: epic.id, taskType: "epic" as const },
+    hostId: runtime.hostId,
+    workspacePath,
+    createdAt: epic.createdAt,
+  }));
+  const repos = epic.repos.map((repo) => ({
+    task: { taskId: epic.id, taskType: "epic" as const },
+    repoIdentifier: repo,
+    createdAt: epic.createdAt,
+    createdBy: epic.createdBy,
+  }));
   return {
-    schemaVersion: epic?.version ?? "2.0.0",
     epicLight: light,
     permissionRole: "owner",
     repos,
@@ -396,6 +389,25 @@ function snapshotMeta(
       repoIdentifier: null,
       lastSyncedAt: null,
     })),
+    unresolvedRepos: [],
+  };
+}
+
+function snapshotMeta(
+  runtime: HostRuntime,
+  epicId: string,
+  stateVector: Uint8Array,
+) {
+  const epic = runtime.store.snapshot().epics.find((row) => row.id === epicId);
+  const meta = earlyMetaForEpic(runtime, epicId);
+  return {
+    schemaVersion: epic?.version ?? "2.0.0",
+    epicLight: meta === null ? null : meta.epicLight,
+    permissionRole: "owner",
+    repos: meta === null ? [] : meta.repos,
+    workspaces: meta === null ? [] : meta.workspaces,
+    repoMapping: [],
+    workspaceFolders: meta === null ? [] : meta.workspaceFolders,
     unresolvedRepos: [],
     hostStateVectorBase64: Buffer.from(stateVector).toString("base64"),
     roomId: `local:${epicId}`,

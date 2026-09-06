@@ -11,7 +11,7 @@ import { authenticateOpenToken } from "../auth";
 import { epochRejectionReason, evaluateClientEpoch } from "../epoch-gate";
 import { hostUnaryManifests } from "../manifest";
 import type { HostRuntime } from "../runtime";
-import { dispatchHostRpc } from "./dispatch";
+import { dispatchHostRpc, type DispatchOutcome } from "./dispatch";
 
 const POST_OPEN_TIMEOUT_MS = 30_000;
 const POLICY_VIOLATION = 1008;
@@ -26,7 +26,17 @@ export function attachRpcConnection(
   let postOpenTimer: NodeJS.Timeout | null = null;
 
   socket.on("message", (data, isBinary) => {
-    void onMessage(data, isBinary);
+    void onMessage(data, isBinary).catch((error: unknown) => {
+      reject(
+        {
+          code: "INTERNAL_ERROR",
+          reason: `Internal error processing message: ${errorMessage(error)}`,
+          incompatibleMethods: null,
+          upgradeGuidance: null,
+        },
+        "internal-error",
+      );
+    });
   });
   socket.on("close", () => {
     state = "closed";
@@ -111,12 +121,22 @@ export function attachRpcConnection(
     clearPostOpenTimer();
     const requestId = payload.requestId;
     const method = payload.method;
-    const outcome = await dispatchHostRpc(
-      method,
-      payload.schemaVersion,
-      payload.params,
-      runtime,
-    );
+    let outcome: DispatchOutcome;
+    try {
+      outcome = await dispatchHostRpc(
+        method,
+        payload.schemaVersion,
+        payload.params,
+        runtime,
+      );
+    } catch (error: unknown) {
+      outcome = {
+        ok: false,
+        code: "RPC_ERROR",
+        message: errorMessage(error),
+        schemaVersion: payload.schemaVersion,
+      };
+    }
     if (socket.readyState !== socket.OPEN) {
       return;
     }

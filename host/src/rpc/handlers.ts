@@ -1,6 +1,21 @@
 import type { RpcHandler } from "./handlers/types";
 export type { RpcHandler, RpcHandlerResult } from "./handlers/types";
 import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-floor";
+import { epicGetWorkspaceContextV10 } from "@traycer/protocol/host/epic/lane-unaries";
+import { browserSavedLoginSitesV10 } from "@traycer/protocol/host/browser/contracts";
+import {
+  configLogLevelsGetV10,
+  configLogLevelsSetV10,
+} from "@traycer/protocol/host/config/contracts";
+import {
+  hostIdentityGetV10,
+  hostIdentitySetV10,
+} from "@traycer/protocol/host/identity/contracts";
+import {
+  hostGetInstallationInfoV11,
+  hostServiceStatusV10,
+  hostUpdateCheckV11,
+} from "@traycer/protocol/host/maintenance/contracts";
 import {
   handleEditorOpenPaths,
   handleHostRestart,
@@ -88,14 +103,23 @@ import {
 } from "./handlers/tui-handlers";
 import { floorUnavailable } from "./handlers/floor-handlers";
 import {
+  handleBrowserSavedLoginSites,
+  handleConfigLogLevelsGet,
+  handleConfigLogLevelsSet,
   handleEpicChatBackupStatus,
+  handleEpicGetWorkspaceContext,
   handleEpicListChatPublicationTargets,
   handleEpicListCloudChats,
   handleHostChatForkGet,
-  handlePhaseMigrateToEpic,
+  handleHostGetInstallationInfo,
+  handleHostIdentityGet,
+  handleHostIdentitySet,
   handleHostNotificationsIndicatorState,
   handleHostNotificationsMarkRead,
+  handleHostServiceStatus,
+  handleHostUpdateCheck,
   handleHostUsageSummary,
+  handlePhaseMigrateToEpic,
   handleTerminalPlainList,
 } from "./handlers/analog-handlers";
 import {
@@ -244,6 +268,15 @@ const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "host.notifications.indicatorState": handleHostNotificationsIndicatorState,
   "host.notifications.markRead": handleHostNotificationsMarkRead,
   "terminal.plain.list": handleTerminalPlainList,
+  [epicGetWorkspaceContextV10.method]: handleEpicGetWorkspaceContext,
+  [browserSavedLoginSitesV10.method]: handleBrowserSavedLoginSites,
+  [configLogLevelsGetV10.method]: handleConfigLogLevelsGet,
+  [configLogLevelsSetV10.method]: handleConfigLogLevelsSet,
+  [hostIdentityGetV10.method]: handleHostIdentityGet,
+  [hostIdentitySetV10.method]: handleHostIdentitySet,
+  [hostUpdateCheckV11.method]: handleHostUpdateCheck,
+  [hostGetInstallationInfoV11.method]: handleHostGetInstallationInfo,
+  [hostServiceStatusV10.method]: handleHostServiceStatus,
   "epic.listCollaborators": handleEpicListCollaborators,
   "epic.grantAccess": handleEpicGrantAccess,
   "epic.batchUpdateRoles": handleEpicBatchUpdateRoles,
