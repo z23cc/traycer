@@ -97,7 +97,7 @@ export class PtyManager extends EventEmitter {
     if (found.kind === "node-pty") {
       found.pty.kill();
     } else {
-      found.child.kill();
+      killPosixSession(found);
       closePosixSession(found);
     }
     this.processes.delete(sessionId);
@@ -162,11 +162,30 @@ export class PtyManager extends EventEmitter {
     }
     let child: ChildProcess;
     try {
-      child = spawn(request.command, [...request.args], {
-        cwd: request.cwd,
-        env,
-        stdio: [opened.slaveFd, opened.slaveFd, opened.slaveFd],
-      });
+      // `detached` makes the child a session leader (`setsid`), and re-opening
+      // the slave from inside that session - without `O_NOCTTY` - is what
+      // makes the pty its CONTROLLING terminal. Node cannot run `TIOCSCTTY`
+      // between fork and exec (node-pty ships a C helper for exactly this), so
+      // the acquisition happens in one line of `sh` that then execs the real
+      // command. Without it the shell has a tty on its fds but no session:
+      // `tty` works while job control, `^C`, and `SIGWINCH` do not.
+      child = spawn(
+        "/bin/sh",
+        [
+          "-c",
+          'exec 0<>"$1" 1>&0 2>&0; shift; exec "$@"',
+          "sh",
+          opened.slavePath,
+          request.command,
+          ...request.args,
+        ],
+        {
+          cwd: request.cwd,
+          env,
+          stdio: [opened.slaveFd, opened.slaveFd, opened.slaveFd],
+          detached: true,
+        },
+      );
     } catch {
       closeSync(opened.slaveFd);
       closeSync(opened.masterFd);
@@ -270,7 +289,11 @@ function ensureNodePtyHelper(): void {
 function openPosixPty(
   cols: number,
   rows: number,
-): { readonly masterFd: number; readonly slaveFd: number } | null {
+): {
+  readonly masterFd: number;
+  readonly slaveFd: number;
+  readonly slavePath: string;
+} | null {
   const libc = loadLibc();
   if (libc === null) {
     return null;
@@ -296,7 +319,7 @@ function openPosixPty(
     return null;
   }
   ioctlWinsize(masterFd, cols, rows);
-  return { masterFd, slaveFd };
+  return { masterFd, slaveFd, slavePath };
 }
 
 type LibcPty = {
@@ -362,6 +385,25 @@ function ioctlWinsize(fd: number, cols: number, rows: number): boolean {
   buf.writeUInt16LE(0, 4);
   buf.writeUInt16LE(0, 6);
   return libc.ioctl(fd, TIOCSWINSZ, buf) === 0;
+}
+
+/**
+ * The child is its own session leader, so the whole job - the shell and
+ * anything it started - hangs up together. `SIGHUP` is what a terminal
+ * closing sends; a bare `child.kill()` would leave the shell's children
+ * running against a closed pty.
+ */
+function killPosixSession(session: PosixPtySession): void {
+  const pid = session.child.pid;
+  if (pid !== undefined) {
+    try {
+      process.kill(-pid, "SIGHUP");
+      return;
+    } catch {
+      // The group is already gone, or the child never made it to setsid.
+    }
+  }
+  session.child.kill();
 }
 
 function closePosixSession(session: PosixPtySession): void {
