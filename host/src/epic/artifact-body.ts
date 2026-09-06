@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import * as Y from "yjs";
+import { mediaTypeForExtension } from "./attachments";
 import type { HostRuntime } from "../runtime";
 import type { StoredArtifact } from "../store/host-store";
 
@@ -280,9 +281,7 @@ function parseBlocks(lines: readonly string[]): readonly Y.XmlElement[] {
     }
     const image = IMAGE_RE.exec(line.trim());
     if (image !== null) {
-      blocks.push(
-        element("image", { src: image[2] ?? "", alt: image[1] ?? "" }, []),
-      );
+      blocks.push(imageBlock(image[2] ?? "", image[1] ?? ""));
       index += 1;
       continue;
     }
@@ -310,6 +309,29 @@ function parseBlocks(lines: readonly string[]): readonly Y.XmlElement[] {
 function blockChildren(lines: readonly string[]): readonly Y.XmlElement[] {
   const blocks = parseBlocks(lines);
   return blocks.length > 0 ? blocks : [element("paragraph", {}, [])];
+}
+
+const ATTACHMENT_SRC_RE = /(?:^|\/)([0-9a-f]{64})\.([a-z]+)$/u;
+
+/**
+ * An image the GUI pasted is addressed by its content hash
+ * (`attachments/<sha256>.<ext>` - see `epic/attachments.ts`), so the hash the
+ * renderer fetches by is recoverable from the markdown link alone. Without
+ * this the node comes back from disk with no `attachmentHash` and renders as
+ * "Image is unavailable" - the body would survive the round trip and the
+ * picture would not.
+ */
+function imageBlock(src: string, alt: string): Y.XmlElement {
+  const attributes: Record<string, AttrValue> = { src, alt };
+  const addressed = ATTACHMENT_SRC_RE.exec(src);
+  if (addressed !== null) {
+    attributes.attachmentHash = addressed[1] ?? "";
+    const mediaType = mediaTypeForExtension(addressed[2] ?? "");
+    if (mediaType !== null) {
+      attributes.mediaType = mediaType;
+    }
+  }
+  return element("image", attributes, []);
 }
 
 function fencedBlock(language: string, code: string): Y.XmlElement {

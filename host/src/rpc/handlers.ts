@@ -34,6 +34,11 @@ import {
   handleSpeechModelStatus,
 } from "./handlers/misc-handlers";
 import {
+  handleFetchArtifactAttachment,
+  handleFinishArtifactImage,
+  handlePrepareArtifactImage,
+} from "./handlers/attachment-handlers";
+import {
   handlePlainTerminalClose,
   handlePlainTerminalCreate,
   handlePlainTerminalEnsureRunning,
@@ -405,6 +410,9 @@ const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "terminal.kill": handleTerminalKill,
   "terminal.rename": handleTerminalRename,
   "terminal.readOutput": handleTerminalReadOutput,
+  "epic.prepareArtifactImage": handlePrepareArtifactImage,
+  "epic.finishArtifactImage": handleFinishArtifactImage,
+  "epic.fetchArtifactAttachment": handleFetchArtifactAttachment,
   "epic.setPinned": handleEpicSetPinned,
   "epic.searchArtifacts": handleEpicSearchArtifacts,
   "config.shell.get": handleConfigShellGet,
