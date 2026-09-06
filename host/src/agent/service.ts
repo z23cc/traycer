@@ -136,7 +136,10 @@ export async function sendLocalAgentMessage(
         parentId: receiver.parentId,
         hostId: runtime.hostId,
         title: receiver.title ?? "",
-        createdAt: Date.now(),
+        // The chat exists to hold this turn, so it cannot be younger than it -
+        // a second clock read here would date the receiver after the delivery
+        // it was created for, and the communication graph reads that ordering.
+        createdAt: turn.timestamp,
         runSettings: null,
         providerSession: null,
         turns: [],

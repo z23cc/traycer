@@ -92,6 +92,28 @@ describe("epic.communicationGraph.subscribe", () => {
     expect(resumed.frames[0]).toMatchObject({ events: [], headId: 1 });
   });
 
+  it("keeps the delivery that created its own receiver", async () => {
+    const host = await boot();
+    // A2A to an agent with no chat yet: the host creates the chat to hold the
+    // turn, so the receiver must not be dated after the delivery it exists for.
+    await host.runtime.store.mutate((state) => {
+      const now = Date.now();
+      state.chats.push({
+        ...blankChat(host.runtime.hostId),
+        chatId: "chat-new",
+        createdAt: now,
+        turns: [turn("m-9", now, "chat-2", "thread-9", true)],
+      });
+    });
+    const events = graphEvents(host.runtime, "epic-1");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      id: 1,
+      senderAgentId: "chat-2",
+      receiverAgentId: "chat-new",
+    });
+  });
+
   it("ignores a transcript the chat inherited instead of received", async () => {
     const host = await boot();
     await seed(host);
@@ -144,27 +166,34 @@ describe("epic.communicationGraph.subscribe", () => {
   }
 });
 
-async function seed(host: StartedHost): Promise<void> {
-  const chat: StoredChat = {
+function blankChat(hostId: string): StoredChat {
+  return {
     epicId: "epic-1",
     chatId: "chat-1",
     parentId: null,
-    hostId: host.runtime.hostId,
+    hostId,
     title: "Root",
     createdAt: 1,
     runSettings: null,
     fastMode: false,
     providerSession: null,
-    turns: [
-      turn("m-1", 1, "chat-1", null, false),
-      turn("m-2", 2, "chat-2", "thread-1", true),
-    ],
+    turns: [],
     events: [],
     transcriptEpoch: 0,
     indexRevision: 0,
     fileChangeCount: 0,
     lastUsage: null,
     archivedAt: null,
+  };
+}
+
+async function seed(host: StartedHost): Promise<void> {
+  const chat: StoredChat = {
+    ...blankChat(host.runtime.hostId),
+    turns: [
+      turn("m-1", 1, "chat-1", null, false),
+      turn("m-2", 2, "chat-2", "thread-1", true),
+    ],
   };
   await host.runtime.store.mutate((state) => {
     state.chats.push(chat);
