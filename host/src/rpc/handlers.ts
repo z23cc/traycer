@@ -18,6 +18,11 @@ import {
   hostUpdateCheckV11,
 } from "@traycer/protocol/host/maintenance/contracts";
 import {
+  handleDiagnosticsLogsList,
+  handleDiagnosticsLogsTail,
+  handleHostDoctor,
+} from "./handlers/diagnostics-handlers";
+import {
   handleClaimShutdown,
   handleCommitShutdown,
   handleReleaseShutdown,
@@ -448,6 +453,9 @@ const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "host.update.install": handleHostUpdateInstall,
   "host.service.register": handleHostServiceRegister,
   "host.service.deregister": handleHostServiceDeregister,
+  "host.doctor": handleHostDoctor,
+  "diagnostics.logs.list": handleDiagnosticsLogsList,
+  "diagnostics.logs.tail": handleDiagnosticsLogsTail,
 };
 
 const HANDLERS: { readonly [method: string]: RpcHandler } =
