@@ -34,6 +34,14 @@ import {
   handleSpeechModelStatus,
 } from "./handlers/misc-handlers";
 import {
+  handlePlainTerminalClose,
+  handlePlainTerminalCreate,
+  handlePlainTerminalEnsureRunning,
+  handlePlainTerminalImportLegacy,
+  handlePlainTerminalList,
+  handlePlainTerminalRename,
+} from "./handlers/plain-terminal-handlers";
+import {
   handleNotificationsClearAll,
   handleNotificationsGetConfig,
   handleNotificationsIndicatorState,
@@ -129,7 +137,6 @@ import {
   handleHostUpdateCheck,
   handleHostUsageSummary,
   handlePhaseMigrateToEpic,
-  handleTerminalPlainList,
 } from "./handlers/analog-handlers";
 import {
   handleConfigEnvDelete,
@@ -314,7 +321,12 @@ const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "host.notifications.clearAll": handleNotificationsClearAll,
   "host.notifications.getConfig": handleNotificationsGetConfig,
   "host.notifications.setConfig": handleNotificationsSetConfig,
-  "terminal.plain.list": handleTerminalPlainList,
+  "terminal.plain.create": handlePlainTerminalCreate,
+  "terminal.plain.list": handlePlainTerminalList,
+  "terminal.plain.rename": handlePlainTerminalRename,
+  "terminal.plain.ensureRunning": handlePlainTerminalEnsureRunning,
+  "terminal.plain.close": handlePlainTerminalClose,
+  "terminal.plain.importLegacy": handlePlainTerminalImportLegacy,
   [epicGetWorkspaceContextV10.method]: handleEpicGetWorkspaceContext,
   [browserSavedLoginSitesV10.method]: handleBrowserSavedLoginSites,
   [configLogLevelsGetV10.method]: handleConfigLogLevelsGet,

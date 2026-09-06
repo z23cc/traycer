@@ -14,6 +14,7 @@ import { epochRejectionReason, evaluateClientEpoch } from "../epoch-gate";
 import { clientStreamManifestOverlap, hostStreamManifest } from "../manifest";
 import type { HostRuntime } from "../runtime";
 import { snapshotFrame } from "../gui/notifications";
+import { listState } from "../rpc/handlers/plain-terminal-handlers";
 import { handleChatClientFrame } from "./chat-actions";
 import { sendChatSnapshot } from "./chat";
 import { attachGitStatusStream } from "./git-status";
@@ -55,6 +56,7 @@ export function attachStreamConnection(
     clearSubscribeTimer();
     runtime.chats.remove(socket);
     runtime.notifications.remove(socket);
+    runtime.plainTerminals.remove(socket);
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
@@ -64,6 +66,7 @@ export function attachStreamConnection(
     clearSubscribeTimer();
     runtime.chats.remove(socket);
     runtime.notifications.remove(socket);
+    runtime.plainTerminals.remove(socket);
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
@@ -280,6 +283,16 @@ export function attachStreamConnection(
       }
       return;
     }
+    if (subscribe.data.method === "terminal.plain.subscribeList") {
+      const scope = readPlainScope(subscribe.data.params);
+      runtime.plainTerminals.add(socket, scope);
+      sendJson({
+        kind: "state",
+        hasBinaryPayload: false,
+        state: listState(runtime, scope),
+      });
+      return;
+    }
     if (subscribe.data.method === "host.notifications.feed.subscribe") {
       runtime.notifications.add(socket);
       sendJson(snapshotFrame(runtime));
@@ -403,4 +416,18 @@ function rawToString(data: RawData): string {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function readPlainScope(
+  params: unknown,
+): { kind: "epic"; epicId: string } | { kind: "independent" } {
+  const epicId = readEpicId(readScopeObject(params));
+  return epicId === null ? { kind: "independent" } : { kind: "epic", epicId };
+}
+
+function readScopeObject(params: unknown): unknown {
+  if (params === null || typeof params !== "object") {
+    return null;
+  }
+  return Reflect.get(params, "scope");
 }

@@ -102,62 +102,6 @@ export const handleEpicListChatPublicationTargets: RpcHandler = (params) => {
   return { ok: true, result: { redirected: [] } };
 };
 
-export const handleTerminalPlainList: RpcHandler = (params, runtime) => {
-  const scope = readScope(params);
-  if (scope === null) {
-    return {
-      ok: true,
-      result: {
-        coverage: "complete-local",
-        scope: { kind: "independent" },
-        terminals: [],
-      },
-    };
-  }
-  if (scope.kind === "epic") {
-    return {
-      ok: true,
-      result: {
-        coverage: "partial-serving-host",
-        scope,
-        servingHostId: runtime.hostId,
-        terminals: [],
-      },
-    };
-  }
-  return {
-    ok: true,
-    result: {
-      coverage: "complete-local",
-      scope,
-      terminals: [],
-    },
-  };
-};
-
-function readScope(
-  params: unknown,
-): { kind: "independent" } | { kind: "epic"; epicId: string } | null {
-  if (params === null || typeof params !== "object") {
-    return null;
-  }
-  const scope = Reflect.get(params, "scope");
-  if (scope === null || typeof scope !== "object") {
-    return null;
-  }
-  const kind = Reflect.get(scope, "kind");
-  if (kind === "independent") {
-    return { kind: "independent" };
-  }
-  if (kind === "epic") {
-    const epicId = Reflect.get(scope, "epicId");
-    if (typeof epicId === "string" && epicId.length > 0) {
-      return { kind: "epic", epicId };
-    }
-  }
-  return null;
-}
-
 export const handleEpicGetWorkspaceContext: RpcHandler = (params, runtime) => {
   const parsed = getWorkspaceContextRequestSchema.safeParse(params);
   if (!parsed.success) {

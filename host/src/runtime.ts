@@ -6,6 +6,7 @@ import type { ChatQueue } from "./gui/queue";
 import type { HostStore } from "./store/host-store";
 import type { ChatHub } from "./stream/chat-hub";
 import type { EpicHub } from "./stream/epic-hub";
+import type { PlainTerminalHub } from "./terminal/plain";
 import type { PtyManager } from "./terminal/pty";
 import type { TerminalRegistry } from "./terminal/sessions";
 
@@ -22,6 +23,7 @@ export type HostRuntime = {
   readonly queue: ChatQueue;
   readonly chats: ChatHub;
   readonly notifications: NotificationHub;
+  readonly plainTerminals: PlainTerminalHub;
   readonly epics: EpicHub;
   requestRestart: () => void;
   lastRestartTransitionId: string | null;

@@ -73,6 +73,24 @@ export type StoredTokenUsage = {
 };
 
 /**
+ * A durable plain terminal. The PTY is ephemeral - this record is what
+ * survives a host restart, and `revision` orders a close against a stale
+ * cached mutation result.
+ */
+export type StoredPlainTerminal = {
+  readonly terminalId: string;
+  readonly hostId: string;
+  readonly epicId: string | null;
+  readonly cwd: string;
+  readonly shellCommand: string;
+  readonly shellArgs: readonly string[];
+  readonly createdAt: number;
+  manualTitle: string | null;
+  revision: number;
+  updatedAt: number;
+};
+
+/**
  * One row of the local notification feed. Payload-bearing detail is kept as a
  * plain message so the row can be projected onto whichever entry arm the
  * caller's negotiated contract carries.
@@ -265,6 +283,7 @@ export type HostState = {
   usageFacts: StoredUsageFact[];
   collaborators: StoredCollaborator[];
   notifications: StoredNotification[];
+  plainTerminals: StoredPlainTerminal[];
 };
 
 const EMPTY_STATE: HostState = {
@@ -281,6 +300,7 @@ const EMPTY_STATE: HostState = {
   usageFacts: [],
   collaborators: [],
   notifications: [],
+  plainTerminals: [],
 };
 
 export class HostStore {
@@ -303,6 +323,7 @@ export class HostStore {
       usageFacts: [],
       collaborators: [],
       notifications: [],
+      plainTerminals: [],
     };
     this.writeTail = Promise.resolve();
     this.closed = false;
@@ -329,6 +350,7 @@ export class HostStore {
           usageFacts: normalizeUsageFacts(parsed.usageFacts),
           collaborators: normalizeCollaborators(parsed.collaborators),
           notifications: normalizeNotifications(parsed.notifications),
+          plainTerminals: normalizePlainTerminals(parsed.plainTerminals),
         };
       }
     } catch {
@@ -394,6 +416,7 @@ type PersistedHostState = Omit<
   | "usageFacts"
   | "collaborators"
   | "notifications"
+  | "plainTerminals"
 > & {
   readonly providers?: unknown;
   readonly agents?: unknown;
@@ -404,6 +427,7 @@ type PersistedHostState = Omit<
   readonly usageFacts?: unknown;
   readonly collaborators?: unknown;
   readonly notifications?: unknown;
+  readonly plainTerminals?: unknown;
 };
 
 function isPersistedHostState(value: unknown): value is PersistedHostState {
@@ -1068,4 +1092,45 @@ function normalizeNotifications(value: unknown): StoredNotification[] {
     });
   }
   return rows.slice(-NOTIFICATION_LIMIT);
+}
+
+function normalizePlainTerminals(value: unknown): StoredPlainTerminal[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const rows: StoredPlainTerminal[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    if (
+      typeof record.terminalId !== "string" ||
+      typeof record.hostId !== "string" ||
+      typeof record.cwd !== "string" ||
+      typeof record.shellCommand !== "string" ||
+      typeof record.createdAt !== "number"
+    ) {
+      continue;
+    }
+    rows.push({
+      terminalId: record.terminalId,
+      hostId: record.hostId,
+      epicId: typeof record.epicId === "string" ? record.epicId : null,
+      cwd: record.cwd,
+      shellCommand: record.shellCommand,
+      shellArgs: Array.isArray(record.shellArgs)
+        ? record.shellArgs.filter((arg) => typeof arg === "string")
+        : [],
+      createdAt: record.createdAt,
+      manualTitle:
+        typeof record.manualTitle === "string" ? record.manualTitle : null,
+      revision: countOf(record.revision),
+      updatedAt:
+        typeof record.updatedAt === "number"
+          ? record.updatedAt
+          : record.createdAt,
+    });
+  }
+  return rows;
 }

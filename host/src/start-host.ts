@@ -11,6 +11,7 @@ import { publishedRuntimeVersion } from "./install-record";
 import { buildPidMetadata, writePidMetadata } from "./pid-metadata";
 import type { HostRuntime } from "./runtime";
 import { HostStore } from "./store/host-store";
+import { PlainTerminalHub } from "./terminal/plain";
 import { ChatHub } from "./stream/chat-hub";
 import { EpicHub } from "./stream/epic-hub";
 import { PtyManager } from "./terminal/pty";
@@ -64,6 +65,7 @@ export async function startHost(
     queue: new ChatQueue(),
     chats: new ChatHub(),
     notifications: new NotificationHub(),
+    plainTerminals: new PlainTerminalHub(),
     epics: new EpicHub(),
     requestRestart: () => undefined,
     lastRestartTransitionId: null,
