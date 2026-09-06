@@ -1,5 +1,9 @@
 import { homedir } from "node:os";
 import {
+  listEnvOverrides,
+  loadEffectiveShellConfig,
+} from "@traycer/protocol/config/store";
+import {
   createTerminalRequestSchemaV21,
   killTerminalRequestSchema,
   listTerminalsRequestSchema,
@@ -21,7 +25,7 @@ export const handleTerminalList: RpcHandler = (params, runtime) => {
   };
 };
 
-export const handleTerminalCreate: RpcHandler = (params, runtime) => {
+export const handleTerminalCreate: RpcHandler = async (params, runtime) => {
   const parsed = createTerminalRequestSchemaV21.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
@@ -41,9 +45,11 @@ export const handleTerminalCreate: RpcHandler = (params, runtime) => {
     return { ok: true, result: { session: existing } };
   }
   const now = Date.now();
-  const shellCommand =
-    parsed.data.shellCommand ?? process.env.SHELL ?? "/bin/zsh";
-  const shellArgs = parsed.data.shellArgs ?? [];
+  // The configured shell, not `$SHELL`: `config.shell.*` writes the store this
+  // reads, so a shell picked in Settings is the one a new terminal spawns.
+  const configured = await loadEffectiveShellConfig();
+  const shellCommand = parsed.data.shellCommand ?? configured.path;
+  const shellArgs = parsed.data.shellArgs ?? [...configured.args];
   const session = {
     sessionId: parsed.data.desiredSessionId,
     scope: parsed.data.scope,
@@ -71,6 +77,7 @@ export const handleTerminalCreate: RpcHandler = (params, runtime) => {
     cols: parsed.data.cols,
     rows: parsed.data.rows,
     extraEnv: {},
+    envOverrides: await listEnvOverrides(),
   });
   return { ok: true, result: { session } };
 };

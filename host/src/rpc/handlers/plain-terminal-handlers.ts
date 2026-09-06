@@ -9,7 +9,7 @@ import {
   type PlainTerminalScope,
 } from "@traycer/protocol/host/terminal/plain-schemas";
 import {
-  defaultShell,
+  configuredShell,
   plainProjection,
   plainTerminalsInScope,
   startPlainPty,
@@ -28,15 +28,16 @@ export const handlePlainTerminalCreate: RpcHandler = async (
   }
   const request = parsed.data;
   const now = Date.now();
+  // Ownership, environment, and the resolved shell are host-derived: the
+  // request schema does not let a client supply them.
+  const shell = await configuredShell();
   const row: StoredPlainTerminal = {
     terminalId: request.terminalId,
     hostId: runtime.hostId,
     epicId: request.scope.kind === "epic" ? request.scope.epicId : null,
     cwd: request.cwd,
-    // Ownership, environment, and the resolved shell are host-derived: the
-    // request schema does not let a client supply them.
-    shellCommand: defaultShell(),
-    shellArgs: [],
+    shellCommand: shell.command,
+    shellArgs: [...shell.args],
     createdAt: now,
     manualTitle: null,
     revision: 1,
@@ -174,13 +175,14 @@ export const handlePlainTerminalImportLegacy: RpcHandler = async (
     };
   }
   const now = Date.now();
+  const shell = await configuredShell();
   const row: StoredPlainTerminal = {
     terminalId: request.terminalId,
     hostId: runtime.hostId,
     epicId: request.scope.kind === "epic" ? request.scope.epicId : null,
     cwd: request.cwd,
-    shellCommand: defaultShell(),
-    shellArgs: [],
+    shellCommand: shell.command,
+    shellArgs: [...shell.args],
     createdAt: now,
     manualTitle: request.titleSource === "manual" ? request.name : null,
     revision: 1,

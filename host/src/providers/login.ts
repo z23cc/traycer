@@ -250,6 +250,9 @@ export function startProviderTerminalLogin(
     cols,
     rows,
     extraEnv: extraEnvForTerminalLogin(runtime.store, providerId),
+    // A provider login runs the CLI the host resolved, not the user's shell:
+    // it takes the login env above and no config-file overrides.
+    envOverrides: {},
   });
   TERMINAL_LOGIN_SESSIONS.set(providerId, sessionId);
   return { ok: true, sessionId, replacedSessionId };

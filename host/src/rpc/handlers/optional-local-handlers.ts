@@ -1,14 +1,33 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { accessSync, constants } from "node:fs";
 import { basename, join } from "node:path";
 import {
   configEnvDeleteRequestSchema,
   configEnvListRequestSchema,
   configEnvSetRequestSchema,
+  configShellAddRequestSchema,
   configShellGetRequestSchema,
   configShellListDetectedRequestSchema,
   configShellProbeRequestSchema,
+  configShellRemoveRequestSchema,
+  configShellResetRequestSchema,
+  configShellRevertArgsRequestSchema,
+  configShellSetRequestSchema,
 } from "@traycer/protocol/host/config/schemas";
+// `~/.traycer/cli/config.json` is the one shell store the CLI, the host, and
+// every PTY spawn read - see `@traycer/protocol/config/store`.
+import {
+  addShell,
+  deleteEnvOverride,
+  listEnvOverrides,
+  listShells,
+  loadEffectiveShellConfig,
+  probeShellPath,
+  removeShell,
+  resetShell,
+  revertShellArgs,
+  setEnvOverride,
+  setShell,
+} from "@traycer/protocol/config/store";
 import {
   searchArtifactsRequestSchema,
   setEpicPinnedRequestSchema,
@@ -275,129 +294,137 @@ export const handleEpicSearchArtifacts: RpcHandler = async (
   };
 };
 
-export const handleConfigShellGet: RpcHandler = (params) => {
+export const handleConfigShellGet: RpcHandler = async (params) => {
   const parsed = configShellGetRequestSchema.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
-  const path = process.env.SHELL ?? "/bin/zsh";
-  return {
-    ok: true,
-    result: { path, args: [], synthesised: true },
-  };
-};
-
-export const handleConfigShellListDetected: RpcHandler = (params) => {
-  const parsed = configShellListDetectedRequestSchema.safeParse(params);
-  if (!parsed.success) {
-    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
-  }
-  const path = process.env.SHELL ?? "/bin/zsh";
+  const shell = await loadEffectiveShellConfig();
   return {
     ok: true,
     result: {
-      shells: [
-        {
-          name: basename(path),
-          path,
-          isDefault: true,
-          source: "detected",
-          missing: false,
-        },
-      ],
+      path: shell.path,
+      args: [...shell.args],
+      synthesised: shell.synthesised,
     },
   };
 };
 
-export const handleConfigShellProbe: RpcHandler = (params) => {
+export const handleConfigShellSet: RpcHandler = async (params) => {
+  const parsed = configShellSetRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const updated = await setShell(
+    parsed.data.path,
+    parsed.data.args === null ? null : [...parsed.data.args],
+  );
+  return {
+    ok: true,
+    result: {
+      path: updated.path,
+      args: updated.args === null ? null : [...updated.args],
+    },
+  };
+};
+
+export const handleConfigShellAdd: RpcHandler = async (params) => {
+  const parsed = configShellAddRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const added = await addShell(parsed.data.path);
+  return {
+    ok: true,
+    result: {
+      path: added.path,
+      entries: added.entries.map((entry) => ({
+        path: entry.path,
+        args: entry.args === null ? null : [...entry.args],
+      })),
+    },
+  };
+};
+
+export const handleConfigShellRemove: RpcHandler = async (params) => {
+  const parsed = configShellRemoveRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  return { ok: true, result: await removeShell(parsed.data.path) };
+};
+
+export const handleConfigShellRevertArgs: RpcHandler = async (params) => {
+  const parsed = configShellRevertArgsRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  return { ok: true, result: await revertShellArgs(parsed.data.path) };
+};
+
+export const handleConfigShellReset: RpcHandler = async (params) => {
+  const parsed = configShellResetRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  await resetShell();
+  return { ok: true, result: { reset: true } };
+};
+
+export const handleConfigShellListDetected: RpcHandler = async (params) => {
+  const parsed = configShellListDetectedRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const shells = await listShells();
+  return {
+    ok: true,
+    result: { shells: shells.map((shell) => ({ ...shell })) },
+  };
+};
+
+export const handleConfigShellProbe: RpcHandler = async (params) => {
   const parsed = configShellProbeRequestSchema.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
-  try {
-    accessSync(parsed.data.path, constants.X_OK);
-    return { ok: true, result: { exists: true, executable: true } };
-  } catch {
-    return { ok: true, result: { exists: false, executable: false } };
-  }
+  return { ok: true, result: await probeShellPath(parsed.data.path) };
 };
 
-export const handleConfigEnvList: RpcHandler = async (params, runtime) => {
+export const handleConfigEnvList: RpcHandler = async (params) => {
   const parsed = configEnvListRequestSchema.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
-  const entries = await readEnvEntries(runtime.dataDir);
-  return { ok: true, result: { entries } };
+  const overrides = await listEnvOverrides();
+  return {
+    ok: true,
+    result: {
+      entries: Object.entries(overrides).map(([key, value]) => ({
+        key,
+        value,
+      })),
+    },
+  };
 };
 
-export const handleConfigEnvSet: RpcHandler = async (params, runtime) => {
+export const handleConfigEnvSet: RpcHandler = async (params) => {
   const parsed = configEnvSetRequestSchema.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
-  const entries = await readEnvEntries(runtime.dataDir);
-  const next = [
-    ...entries.filter((row) => row.key !== parsed.data.key),
-    { key: parsed.data.key, value: parsed.data.value },
-  ];
-  await writeEnvEntries(runtime.dataDir, next);
+  await setEnvOverride(parsed.data.key, parsed.data.value);
   return {
     ok: true,
     result: { key: parsed.data.key, value: parsed.data.value },
   };
 };
 
-export const handleConfigEnvDelete: RpcHandler = async (params, runtime) => {
+export const handleConfigEnvDelete: RpcHandler = async (params) => {
   const parsed = configEnvDeleteRequestSchema.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
-  const entries = await readEnvEntries(runtime.dataDir);
-  await writeEnvEntries(
-    runtime.dataDir,
-    entries.filter((row) => row.key !== parsed.data.key),
-  );
-  return { ok: true, result: { key: parsed.data.key, deleted: true } };
+  const deleted = await deleteEnvOverride(parsed.data.key);
+  return { ok: true, result: { key: parsed.data.key, deleted } };
 };
-
-async function readEnvEntries(
-  dataDir: string,
-): Promise<readonly { readonly key: string; readonly value: string | null }[]> {
-  try {
-    const raw = await readFile(join(dataDir, "config-env.json"), "utf8");
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-    const rows: { key: string; value: string | null }[] = [];
-    for (const row of parsed) {
-      if (row === null || typeof row !== "object") {
-        continue;
-      }
-      const key = Reflect.get(row, "key");
-      const value = Reflect.get(row, "value");
-      if (typeof key === "string") {
-        rows.push({
-          key,
-          value: typeof value === "string" ? value : null,
-        });
-      }
-    }
-    return rows;
-  } catch {
-    return [];
-  }
-}
-
-async function writeEnvEntries(
-  dataDir: string,
-  entries: readonly { readonly key: string; readonly value: string | null }[],
-): Promise<void> {
-  await mkdir(dataDir, { recursive: true });
-  await writeFile(
-    join(dataDir, "config-env.json"),
-    `${JSON.stringify(entries, null, 2)}\n`,
-    "utf8",
-  );
-}

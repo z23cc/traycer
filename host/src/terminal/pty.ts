@@ -20,6 +20,12 @@ export type PtySpawnRequest = {
   readonly cols: number;
   readonly rows: number;
   readonly extraEnv: { readonly [key: string]: string };
+  /**
+   * `~/.traycer/cli/config.json` env overrides. A `null` value UNSETS the
+   * variable, which `extraEnv` cannot express - that is why these ride their
+   * own field instead of being folded in by the caller.
+   */
+  readonly envOverrides: { readonly [key: string]: string | null };
 };
 
 type NodePtySession = {
@@ -227,6 +233,13 @@ function buildEnv(request: PtySpawnRequest): {
   env.COLUMNS = String(request.cols);
   env.LINES = String(request.rows);
   for (const [key, value] of Object.entries(request.extraEnv)) {
+    env[key] = value;
+  }
+  for (const [key, value] of Object.entries(request.envOverrides)) {
+    if (value === null) {
+      delete env[key];
+      continue;
+    }
     env[key] = value;
   }
   return env;

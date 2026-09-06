@@ -1,5 +1,9 @@
 import { homedir } from "node:os";
 import type { WebSocket } from "ws";
+import {
+  listEnvOverrides,
+  loadEffectiveShellConfig,
+} from "@traycer/protocol/config/store";
 import type {
   PlainTerminalProjection,
   PlainTerminalScope,
@@ -67,12 +71,12 @@ export function plainTerminalsInScope(
 }
 
 /** Spawns the PTY and registers the session the terminal stream reads. */
-export function startPlainPty(
+export async function startPlainPty(
   runtime: HostRuntime,
   row: StoredPlainTerminal,
   cols: number,
   rows: number,
-): void {
+): Promise<void> {
   const existing = runtime.terminals.get(row.terminalId);
   if (existing !== null && existing.status === "running") {
     return;
@@ -103,12 +107,17 @@ export function startPlainPty(
     cols,
     rows,
     extraEnv: {},
+    envOverrides: await listEnvOverrides(),
   });
 }
 
-export function defaultShell(): string {
-  const shell = process.env.SHELL;
-  return shell !== undefined && shell.length > 0 ? shell : "/bin/zsh";
+/** The shell `config.shell.*` selected, with its resolved flags. */
+export async function configuredShell(): Promise<{
+  readonly command: string;
+  readonly args: readonly string[];
+}> {
+  const shell = await loadEffectiveShellConfig();
+  return { command: shell.path, args: [...shell.args] };
 }
 
 export function defaultCwd(): string {
