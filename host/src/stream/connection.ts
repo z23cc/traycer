@@ -13,6 +13,7 @@ import { authenticateOpenToken } from "../auth";
 import { epochRejectionReason, evaluateClientEpoch } from "../epoch-gate";
 import { clientStreamManifestOverlap, hostStreamManifest } from "../manifest";
 import type { HostRuntime } from "../runtime";
+import { snapshotFrame } from "../gui/notifications";
 import { handleChatClientFrame } from "./chat-actions";
 import { sendChatSnapshot } from "./chat";
 import { attachGitStatusStream } from "./git-status";
@@ -53,6 +54,7 @@ export function attachStreamConnection(
     state = "closed";
     clearSubscribeTimer();
     runtime.chats.remove(socket);
+    runtime.notifications.remove(socket);
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
@@ -61,6 +63,7 @@ export function attachStreamConnection(
     state = "closed";
     clearSubscribeTimer();
     runtime.chats.remove(socket);
+    runtime.notifications.remove(socket);
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
@@ -275,6 +278,11 @@ export function attachStreamConnection(
           "missing-terminal",
         );
       }
+      return;
+    }
+    if (subscribe.data.method === "host.notifications.feed.subscribe") {
+      runtime.notifications.add(socket);
+      sendJson(snapshotFrame(runtime));
       return;
     }
     sendAnalogStreamSnapshot(socket, subscribe.data.method);

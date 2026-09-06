@@ -10,6 +10,7 @@ import type {
   ProviderStreamEvent,
   ProviderTokenUsage,
 } from "../gui/provider-stream";
+import { notify } from "../gui/notifications";
 import { recordUsageFact } from "../gui/usage";
 import {
   assistantReasoningBlockId,
@@ -607,6 +608,16 @@ async function runAndPersistAssistant(
       outcome: "completed",
       toolCallCount,
     });
+    await notify(runtime, {
+      id: `agent.stopped:${input.turnId}`,
+      kind: "agent.stopped",
+      epicId: input.epicId,
+      chatId: input.chatId,
+      severity: "done",
+      outcome: "completed",
+      sourceRef: input.turnId,
+      message: "",
+    });
   } catch (error) {
     await recordUsageFact(runtime, {
       epicId: input.epicId,
@@ -623,6 +634,16 @@ async function runAndPersistAssistant(
       sessionId: null,
     });
     const message = error instanceof Error ? error.message : String(error);
+    await notify(runtime, {
+      id: `agent.stopped:${input.turnId}`,
+      kind: "agent.stopped",
+      epicId: input.epicId,
+      chatId: input.chatId,
+      severity: "failure",
+      outcome: "errored",
+      sourceRef: input.turnId,
+      message,
+    });
     broadcastBlockDelta(runtime, input.epicId, input.chatId, {
       type: "error",
       blockId: input.turnId,

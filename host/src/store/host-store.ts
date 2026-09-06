@@ -73,6 +73,30 @@ export type StoredTokenUsage = {
 };
 
 /**
+ * One row of the local notification feed. Payload-bearing detail is kept as a
+ * plain message so the row can be projected onto whichever entry arm the
+ * caller's negotiated contract carries.
+ */
+export type StoredNotification = {
+  readonly id: string;
+  readonly kind:
+    | "agent.stopped"
+    | "agent.stalled"
+    | "workspace.operation.failed"
+    | "approval.requested"
+    | "interview.requested";
+  readonly epicId: string | null;
+  readonly chatId: string | null;
+  readonly severity: "info" | "needs_action" | "failure" | "done";
+  readonly outcome: "completed" | "stopped" | "errored" | null;
+  readonly sourceRef: string | null;
+  readonly message: string;
+  updatedAt: number;
+  readAt: number | null;
+  resolvedAt: number | null;
+};
+
+/**
  * A local access grant. The signed-in owner is never stored - it is
  * synthesized per epic, so an epic always has exactly one owner and no grant
  * can delete it.
@@ -240,6 +264,7 @@ export type HostState = {
   commentThreads: StoredCommentThread[];
   usageFacts: StoredUsageFact[];
   collaborators: StoredCollaborator[];
+  notifications: StoredNotification[];
 };
 
 const EMPTY_STATE: HostState = {
@@ -255,6 +280,7 @@ const EMPTY_STATE: HostState = {
   commentThreads: [],
   usageFacts: [],
   collaborators: [],
+  notifications: [],
 };
 
 export class HostStore {
@@ -276,6 +302,7 @@ export class HostStore {
       commentThreads: [],
       usageFacts: [],
       collaborators: [],
+      notifications: [],
     };
     this.writeTail = Promise.resolve();
     this.closed = false;
@@ -301,6 +328,7 @@ export class HostStore {
           commentThreads: normalizeCommentThreads(parsed.commentThreads),
           usageFacts: normalizeUsageFacts(parsed.usageFacts),
           collaborators: normalizeCollaborators(parsed.collaborators),
+          notifications: normalizeNotifications(parsed.notifications),
         };
       }
     } catch {
@@ -365,6 +393,7 @@ type PersistedHostState = Omit<
   | "commentThreads"
   | "usageFacts"
   | "collaborators"
+  | "notifications"
 > & {
   readonly providers?: unknown;
   readonly agents?: unknown;
@@ -374,6 +403,7 @@ type PersistedHostState = Omit<
   readonly commentThreads?: unknown;
   readonly usageFacts?: unknown;
   readonly collaborators?: unknown;
+  readonly notifications?: unknown;
 };
 
 function isPersistedHostState(value: unknown): value is PersistedHostState {
@@ -976,4 +1006,66 @@ function normalizeCollaborators(value: unknown): StoredCollaborator[] {
     });
   }
   return rows;
+}
+
+// ponytail: newest NOTIFICATION_LIMIT rows only, same reason the usage ledger
+// is capped - `state.json` is rewritten whole on every mutation.
+export const NOTIFICATION_LIMIT = 500;
+
+const NOTIFICATION_KINDS = [
+  "agent.stopped",
+  "agent.stalled",
+  "workspace.operation.failed",
+  "approval.requested",
+  "interview.requested",
+] as const;
+
+const NOTIFICATION_SEVERITIES = [
+  "info",
+  "needs_action",
+  "failure",
+  "done",
+] as const;
+
+const NOTIFICATION_OUTCOMES = ["completed", "stopped", "errored"] as const;
+
+function normalizeNotifications(value: unknown): StoredNotification[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const rows: StoredNotification[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    const kind = NOTIFICATION_KINDS.find((row) => row === record.kind);
+    const severity = NOTIFICATION_SEVERITIES.find(
+      (row) => row === record.severity,
+    );
+    if (
+      typeof record.id !== "string" ||
+      typeof record.updatedAt !== "number" ||
+      kind === undefined ||
+      severity === undefined
+    ) {
+      continue;
+    }
+    rows.push({
+      id: record.id,
+      kind,
+      epicId: typeof record.epicId === "string" ? record.epicId : null,
+      chatId: typeof record.chatId === "string" ? record.chatId : null,
+      severity,
+      outcome:
+        NOTIFICATION_OUTCOMES.find((row) => row === record.outcome) ?? null,
+      sourceRef: typeof record.sourceRef === "string" ? record.sourceRef : null,
+      message: typeof record.message === "string" ? record.message : "",
+      updatedAt: record.updatedAt,
+      readAt: typeof record.readAt === "number" ? record.readAt : null,
+      resolvedAt:
+        typeof record.resolvedAt === "number" ? record.resolvedAt : null,
+    });
+  }
+  return rows.slice(-NOTIFICATION_LIMIT);
 }

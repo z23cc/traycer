@@ -1,6 +1,7 @@
 import type { TuiActivityOracle } from "./agent/activity";
 import type { AgentInbox } from "./agent/inbox";
 import type { GuiRunRegistry } from "./gui/deliver";
+import type { NotificationHub } from "./gui/notifications";
 import type { ChatQueue } from "./gui/queue";
 import type { HostStore } from "./store/host-store";
 import type { ChatHub } from "./stream/chat-hub";
@@ -20,6 +21,7 @@ export type HostRuntime = {
   readonly guiRuns: GuiRunRegistry;
   readonly queue: ChatQueue;
   readonly chats: ChatHub;
+  readonly notifications: NotificationHub;
   readonly epics: EpicHub;
   requestRestart: () => void;
   lastRestartTransitionId: string | null;

@@ -3,6 +3,7 @@ import { TuiActivityOracle } from "./agent/activity";
 import { AgentInbox } from "./agent/inbox";
 import { resolveHostDataDir } from "./data-dir";
 import { GuiRunRegistry } from "./gui/deliver";
+import { NotificationHub } from "./gui/notifications";
 import { ChatQueue } from "./gui/queue";
 import { loadOrCreateHostIdentity } from "./identity";
 import { listenHostHttp, type HostHttpServer } from "./http-server";
@@ -62,6 +63,7 @@ export async function startHost(
     guiRuns: new GuiRunRegistry(),
     queue: new ChatQueue(),
     chats: new ChatHub(),
+    notifications: new NotificationHub(),
     epics: new EpicHub(),
     requestRestart: () => undefined,
     lastRestartTransitionId: null,

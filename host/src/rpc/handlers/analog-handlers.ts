@@ -8,10 +8,6 @@ import { hostUsageSummaryRequestSchemaV10 } from "@traycer/protocol/host/usage-a
 import { chatBackupStatusRequestSchema } from "@traycer/protocol/host/epic/chat-backup-status";
 import { listChatPublicationTargetsRequestSchema } from "@traycer/protocol/host/epic/chat-publication-identity";
 import { listCloudChatsRequestSchema } from "@traycer/protocol/host/epic/cloud-chat";
-import {
-  hostNotificationsIndicatorStateRequestSchema,
-  hostNotificationsMarkReadRequestSchema,
-} from "@traycer/protocol/host/notifications/host-notifications";
 import { getWorkspaceContextRequestSchema } from "@traycer/protocol/host/epic/lane-unaries";
 import { browserSavedLoginSitesRequestSchema } from "@traycer/protocol/host/browser/contracts";
 import {
@@ -34,14 +30,6 @@ import { hostInstallRecordSchema } from "@traycer/protocol/config/installation-r
 import { summarizeUsage } from "../../gui/usage";
 import { earlyMetaForEpic } from "../../stream/epic-hub";
 import type { RpcHandler } from "./types";
-
-const QUIET_INDICATOR = {
-  pendingApproval: false,
-  pendingInterview: false,
-  unreadFailure: false,
-  unreadDone: false,
-  pendingFork: false,
-} as const;
 
 export const handlePhaseMigrateToEpic: RpcHandler = async (params, runtime) => {
   const parsed = migratePhaseToEpicRequestSchema.safeParse(params);
@@ -90,22 +78,6 @@ export const handleHostChatForkGet: RpcHandler = () => {
   return { ok: true, result: { event: null } };
 };
 
-export const handleHostNotificationsIndicatorState: RpcHandler = (params) => {
-  const parsed = hostNotificationsIndicatorStateRequestSchema.safeParse(params);
-  if (!parsed.success) {
-    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
-  }
-  const epics: { [epicId: string]: typeof QUIET_INDICATOR } = {};
-  for (const epicId of parsed.data.epicIds) {
-    epics[epicId] = QUIET_INDICATOR;
-  }
-  const chats: { [chatId: string]: typeof QUIET_INDICATOR } = {};
-  for (const chatId of parsed.data.chatIds) {
-    chats[chatId] = QUIET_INDICATOR;
-  }
-  return { ok: true, result: { epics, chats } };
-};
-
 export const handleEpicListCloudChats: RpcHandler = (params) => {
   const parsed = listCloudChatsRequestSchema.safeParse(params);
   if (!parsed.success) {
@@ -128,14 +100,6 @@ export const handleEpicListChatPublicationTargets: RpcHandler = (params) => {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
   return { ok: true, result: { redirected: [] } };
-};
-
-export const handleHostNotificationsMarkRead: RpcHandler = (params) => {
-  const parsed = hostNotificationsMarkReadRequestSchema.safeParse(params);
-  if (!parsed.success) {
-    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
-  }
-  return { ok: true, result: {} };
 };
 
 export const handleTerminalPlainList: RpcHandler = (params, runtime) => {
