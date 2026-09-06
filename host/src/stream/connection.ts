@@ -30,6 +30,7 @@ import { workspaceSubscribeFileListOpenRequestSchema } from "@traycer/protocol/h
 import { WorkspaceFileListSession } from "../workspace/file-list-stream";
 import { agentInboxSubscribeOpenRequestSchema } from "@traycer/protocol/host/agent/inbox";
 import { InboxMonitor } from "./inbox";
+import { ChatRecordsSubscriber } from "./chat-records";
 
 const SUBSCRIBE_TIMEOUT_MS = 30_000;
 const POLICY_VIOLATION = 1008;
@@ -63,6 +64,7 @@ export function attachStreamConnection(
     runtime.notifications.remove(socket);
     runtime.plainTerminals.remove(socket);
     runtime.inboxMonitors.remove(socket);
+    runtime.chatRecords.remove(socket);
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
@@ -76,6 +78,7 @@ export function attachStreamConnection(
     runtime.notifications.remove(socket);
     runtime.plainTerminals.remove(socket);
     runtime.inboxMonitors.remove(socket);
+    runtime.chatRecords.remove(socket);
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
@@ -309,6 +312,12 @@ export function attachStreamConnection(
       sendJson(snapshotFrame(runtime));
       return;
     }
+    if (subscribe.data.method === "host.chatRecords.subscribe") {
+      const subscriber = new ChatRecordsSubscriber(socket, runtime);
+      runtime.chatRecords.add(socket, subscriber);
+      subscriber.seed();
+      return;
+    }
     if (subscribe.data.method === "agent.inbox.subscribe") {
       const opened = agentInboxSubscribeOpenRequestSchema.safeParse(
         subscribe.data.params,
@@ -358,6 +367,9 @@ export function attachStreamConnection(
       return;
     }
     if (runtime.inboxMonitors.handleFrame(socket, parsed)) {
+      return;
+    }
+    if (runtime.chatRecords.handleFrame(socket, parsed)) {
       return;
     }
     if (parsed === null || typeof parsed !== "object" || !("kind" in parsed)) {

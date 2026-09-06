@@ -6,6 +6,7 @@ import type { NotificationHub } from "./gui/notifications";
 import type { ChatQueue } from "./gui/queue";
 import type { HostStore } from "./store/host-store";
 import type { ChatHub } from "./stream/chat-hub";
+import type { ChatRecordsHub } from "./stream/chat-records";
 import type { ShutdownCoordinator } from "./lifecycle/shutdown";
 import type { EpicHub } from "./stream/epic-hub";
 import type { PlainTerminalHub } from "./terminal/plain";
@@ -25,6 +26,7 @@ export type HostRuntime = {
   readonly guiRuns: GuiRunRegistry;
   readonly queue: ChatQueue;
   readonly chats: ChatHub;
+  readonly chatRecords: ChatRecordsHub;
   readonly notifications: NotificationHub;
   readonly plainTerminals: PlainTerminalHub;
   readonly epics: EpicHub;

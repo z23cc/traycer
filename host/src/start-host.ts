@@ -14,6 +14,7 @@ import type { HostRuntime } from "./runtime";
 import { HostStore } from "./store/host-store";
 import { PlainTerminalHub } from "./terminal/plain";
 import { ChatHub } from "./stream/chat-hub";
+import { ChatRecordsHub } from "./stream/chat-records";
 import { ShutdownCoordinator } from "./lifecycle/shutdown";
 import { EpicHub } from "./stream/epic-hub";
 import { PtyManager } from "./terminal/pty";
@@ -67,6 +68,7 @@ export async function startHost(
     guiRuns: new GuiRunRegistry(),
     queue: new ChatQueue(),
     chats: new ChatHub(),
+    chatRecords: new ChatRecordsHub(),
     notifications: new NotificationHub(),
     plainTerminals: new PlainTerminalHub(),
     epics: new EpicHub(),

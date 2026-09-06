@@ -53,6 +53,7 @@ import type {
   StoredEpic,
 } from "../../store/host-store";
 import { isReservedAgentId } from "@traycer/protocol/host/agent/roles";
+import { chatRecordSummaryOf } from "../../stream/chat-records";
 import type { RpcHandler } from "./types";
 
 const EPIC_VERSION = "2.0.0";
@@ -456,31 +457,10 @@ export const handleEpicListChatRecords: RpcHandler = (params, runtime) => {
   } else {
     return { ok: false, code: "RPC_ERROR", message: parsedV10.error.message };
   }
-  const snapshot = runtime.store.snapshot();
-  const chats = snapshot.chats
-    .filter((chat) => chat.epicId === epicId)
-    .map((chat) => {
-      const harnessId =
-        snapshot.agents.find((agent) => agent.id === chat.chatId)?.harnessId ??
-        null;
-      return {
-        chatId: chat.chatId,
-        ownerUserId: chatOwnerUserId(chat),
-        originHostId: chat.hostId,
-        title: derivedChatTitle(chat),
-        isTitleEditedByUser: chat.title.length > 0,
-        parentChatId: chat.parentId,
-        createdAt: chat.createdAt,
-        updatedAt: latestTurnTime(chat),
-        archived: false,
-        archivedAt: null,
-        runSettingsSummary: harnessId,
-        revision: latestTurnTime(chat),
-        visibility: "private" as const,
-        origin: "own" as const,
-        docResident: false,
-      };
-    });
+  const chats = runtime.store
+    .snapshot()
+    .chats.filter((chat) => chat.epicId === epicId)
+    .map((chat) => chatRecordSummaryOf(runtime, chat));
   return { ok: true, result: { chats } };
 };
 
@@ -725,6 +705,11 @@ export const handleEpicSetChatArchived: RpcHandler = async (
   });
   if (updated) {
     await publishEpic(runtime, parsed.data.epicId);
+    runtime.chatRecords.publish(
+      runtime,
+      parsed.data.epicId,
+      parsed.data.chatId,
+    );
   }
   return { ok: true, result: { updated } };
 };
@@ -760,6 +745,13 @@ export const handleEpicUpdateChatProfile: RpcHandler = async (
     };
     return true;
   });
+  if (updated) {
+    runtime.chatRecords.publish(
+      runtime,
+      parsed.data.epicId,
+      parsed.data.chatId,
+    );
+  }
   return { ok: true, result: { updated } };
 };
 

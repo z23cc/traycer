@@ -79,6 +79,10 @@ export function broadcastChatSnapshot(
     sendJson(socket, transcript.snapshot);
     sendJson(socket, transcript.skeletonChunk);
   }
+  // The chat-records table is the same fact at list granularity, so it moves
+  // from the one place that already knows this chat changed rather than from
+  // every caller that changes one.
+  runtime.chatRecords.publish(runtime, epicId, chatId);
 }
 
 export function sendChatRange(
@@ -507,7 +511,7 @@ function activeTurnFrame(print: GuiPrintTurnState | null, chatId: string) {
   };
 }
 
-function chatOwnerUserId(chat: StoredChat): string {
+export function chatOwnerUserId(chat: StoredChat): string {
   for (const turn of chat.turns) {
     if (turn.userId !== null && turn.userId.length > 0) {
       return turn.userId;
@@ -546,7 +550,7 @@ function emptyChat(hostId: string, epicId: string, chatId: string): StoredChat {
   };
 }
 
-function latestTurnTime(chat: StoredChat): number {
+export function latestTurnTime(chat: StoredChat): number {
   const last = chat.turns[chat.turns.length - 1];
   return last === undefined ? chat.createdAt : last.timestamp;
 }
