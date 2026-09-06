@@ -192,6 +192,7 @@ async function seedChat(host: StartedHost, epoch: number): Promise<void> {
     fileChangeCount: 0,
     lastUsage: null,
     archivedAt: null,
+    fastMode: false,
   };
   await host.runtime.store.mutate((state) => {
     state.chats.push(chat);

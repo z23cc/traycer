@@ -542,6 +542,7 @@ function emptyChat(hostId: string, epicId: string, chatId: string): StoredChat {
     fileChangeCount: 0,
     lastUsage: null,
     archivedAt: null,
+    fastMode: false,
   };
 }
 

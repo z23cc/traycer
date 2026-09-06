@@ -67,6 +67,7 @@ export async function createLocalAgent(
         fileChangeCount: 0,
         lastUsage: null,
         archivedAt: null,
+        fastMode: false,
       };
       state.chats = state.chats.filter((row) => row.chatId !== agentId);
       state.chats.push(chat);
@@ -145,6 +146,7 @@ export async function sendLocalAgentMessage(
         fileChangeCount: 0,
         lastUsage: null,
         archivedAt: null,
+        fastMode: false,
       };
       state.chats.push(chat);
     }

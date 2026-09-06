@@ -124,6 +124,7 @@ export const handleEpicCreate: RpcHandler = async (params, runtime) => {
           fileChangeCount: 0,
           lastUsage: null,
           archivedAt: null,
+          fastMode: false,
         },
         seedHarness,
       );
@@ -285,6 +286,7 @@ export const handleEpicCreateChat: RpcHandler = async (params, runtime) => {
         fileChangeCount: 0,
         lastUsage: null,
         archivedAt: null,
+        fastMode: false,
       },
       harnessId,
     );

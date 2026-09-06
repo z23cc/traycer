@@ -18,6 +18,11 @@ import {
   hostUpdateCheckV11,
 } from "@traycer/protocol/host/maintenance/contracts";
 import {
+  handleAgentConfigure,
+  handleAgentFork,
+  handleValidateTuiForkProfile,
+} from "./handlers/agent-config-handlers";
+import {
   handleNotificationHooksSave,
   handleNotificationHooksStatus,
   handleNotificationHooksTest,
@@ -480,6 +485,9 @@ const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "host.notificationHooks.status": handleNotificationHooksStatus,
   "host.notificationHooks.save": handleNotificationHooksSave,
   "host.notificationHooks.test": handleNotificationHooksTest,
+  "agent.configure": handleAgentConfigure,
+  "agent.fork": handleAgentFork,
+  "agent.tui.validateForkProfile": handleValidateTuiForkProfile,
 };
 
 const HANDLERS: { readonly [method: string]: RpcHandler } =

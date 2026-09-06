@@ -170,6 +170,8 @@ export type StoredChat = {
   fileChangeCount: number;
   lastUsage: StoredTokenUsage | null;
   archivedAt: number | null;
+  /** `agent.configure`'s fast-mode flag; no run-settings field carries it. */
+  fastMode: boolean;
 };
 
 /**
@@ -675,6 +677,7 @@ function normalizeChats(value: unknown): StoredChat[] {
       title: record.title,
       createdAt: record.createdAt,
       runSettings: record.runSettings === undefined ? null : record.runSettings,
+      fastMode: record.fastMode === true,
       providerSession: normalizeProviderSession(record.providerSession),
       turns: normalizeTurns(record.turns),
       events: normalizeChatEvents(record.events),
