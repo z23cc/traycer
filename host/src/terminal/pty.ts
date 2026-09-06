@@ -40,6 +40,7 @@ type PosixPtySession = {
   readonly masterFd: number;
   readonly reader: ReadStream;
   scrollback: string;
+  closed: boolean;
 };
 
 type PtySession = NodePtySession | PosixPtySession;
@@ -193,9 +194,17 @@ export class PtyManager extends EventEmitter {
       return;
     }
     closeSync(opened.slaveFd);
+    // `autoClose: false` because the master fd is owned by the session, not by
+    // the stream: letting both close it double-closes on kill, and the second
+    // close arrives as an unhandled `EBADF` stream error that takes the host
+    // down with it.
     const reader = createReadStream("", {
       fd: opened.masterFd,
       encoding: "utf8",
+      autoClose: false,
+    });
+    reader.on("error", () => {
+      // The pty is gone; the exit path below is what cleans the session up.
     });
     const entry: PosixPtySession = {
       kind: "posix",
@@ -203,6 +212,7 @@ export class PtyManager extends EventEmitter {
       masterFd: opened.masterFd,
       reader,
       scrollback: "",
+      closed: false,
     };
     this.processes.set(request.sessionId, entry);
     reader.on("data", (chunk: string | Buffer) => {
@@ -407,15 +417,19 @@ function killPosixSession(session: PosixPtySession): void {
 }
 
 function closePosixSession(session: PosixPtySession): void {
+  if (session.closed) {
+    return;
+  }
+  session.closed = true;
   try {
     session.reader.destroy();
   } catch {
-    return;
+    // Already torn down.
   }
   try {
     closeSync(session.masterFd);
   } catch {
-    return;
+    // Already closed.
   }
 }
 
