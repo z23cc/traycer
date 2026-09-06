@@ -61,6 +61,21 @@ export class PtyManager extends EventEmitter {
     this.spawnNodePty(request, env);
   }
 
+  /**
+   * The pid of the process this session's PTY spawned, or `null` when the
+   * session is unknown or already gone. The one honest way to say "this host
+   * started that process", which is what scopes `resources.*` to processes it
+   * is answerable for.
+   */
+  pidOf(sessionId: string): number | null {
+    const found = this.processes.get(sessionId);
+    if (found === undefined) {
+      return null;
+    }
+    const pid = found.kind === "node-pty" ? found.pty.pid : found.child.pid;
+    return pid === undefined ? null : pid;
+  }
+
   write(sessionId: string, data: string): boolean {
     const found = this.processes.get(sessionId);
     if (found === undefined) {

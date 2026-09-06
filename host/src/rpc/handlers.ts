@@ -18,6 +18,19 @@ import {
   hostUpdateCheckV11,
 } from "@traycer/protocol/host/maintenance/contracts";
 import {
+  handleResourcesKill,
+  handleResourcesListLocalServers,
+  handleWorktreeListHolders,
+  handleWorktreeSetRepoBranchPrefix,
+} from "./handlers/resources-handlers";
+import {
+  handleManagedCommandConfigure,
+  handleManagedCommandDelete,
+  handleManagedCommandDeliverHeld,
+  handleManagedCommandStart,
+  handleManagedCommandStop,
+} from "./handlers/managed-command-handlers";
+import {
   handleAgentConfigure,
   handleAgentFork,
   handleValidateTuiForkProfile,
@@ -488,6 +501,15 @@ const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "agent.configure": handleAgentConfigure,
   "agent.fork": handleAgentFork,
   "agent.tui.validateForkProfile": handleValidateTuiForkProfile,
+  "managedCommand.start": handleManagedCommandStart,
+  "managedCommand.stop": handleManagedCommandStop,
+  "managedCommand.configure": handleManagedCommandConfigure,
+  "managedCommand.delete": handleManagedCommandDelete,
+  "managedCommand.deliverHeld": handleManagedCommandDeliverHeld,
+  "resources.listLocalServers": handleResourcesListLocalServers,
+  "resources.kill": handleResourcesKill,
+  "worktree.listHolders": handleWorktreeListHolders,
+  "worktree.setRepoBranchPrefix": handleWorktreeSetRepoBranchPrefix,
 };
 
 const HANDLERS: { readonly [method: string]: RpcHandler } =

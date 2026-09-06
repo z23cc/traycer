@@ -5,6 +5,7 @@ import type {
   OsScript,
   WorktreeBinding,
   WorktreeBindingEntry,
+  RepoBranchPrefixState,
   WorktreeBindingOwnerKind,
   WorktreeBranchSelection,
   WorktreeFolderIntent,
@@ -59,13 +60,10 @@ export async function listAllWorktrees(
   selected.sort((left, right) => left.localeCompare(right));
   const cursor = request.cursor;
   const afterCursor =
-    cursor === null
-      ? selected
-      : selected.filter((path) => path > cursor);
+    cursor === null ? selected : selected.filter((path) => path > cursor);
   const page =
     request.limit === null ? afterCursor : afterCursor.slice(0, request.limit);
-  const probe =
-    request.includeActivity || request.activityPaths !== null;
+  const probe = request.includeActivity || request.activityPaths !== null;
   const worktrees = [];
   for (const path of page) {
     worktrees.push(await describeWorktree(runtime, path, probe));
@@ -282,7 +280,7 @@ export async function summarizeWorkspaces(
     }[];
     readonly scripts: WorkspaceScripts | null;
     readonly resolvedAt: number;
-    readonly repoBranchPrefix: { readonly status: "absent" };
+    readonly repoBranchPrefix: RepoBranchPrefixState;
     readonly presence: "present" | "absent";
   }[]
 > {
@@ -313,7 +311,7 @@ export async function summarizeWorkspaces(
       worktrees: listDiskWorktrees(validation.resolvedPath),
       scripts: await readWorkspaceScripts(validation.resolvedPath),
       resolvedAt: now,
-      repoBranchPrefix: { status: "absent" as const },
+      repoBranchPrefix: await readRepoBranchPrefix(validation.resolvedPath),
       presence: "present" as const,
     });
   }
@@ -328,7 +326,10 @@ export async function scriptsAtRef(
   if (facts === null) {
     return null;
   }
-  const raw = runGit(["show", `${ref}:.traycer/environment.json`], facts.toplevel);
+  const raw = runGit(
+    ["show", `${ref}:.traycer/environment.json`],
+    facts.toplevel,
+  );
   if (raw === null) {
     return null;
   }
@@ -344,19 +345,103 @@ export async function writeRepoScripts(
   if (!validation.ok) {
     return false;
   }
-  const dir = join(validation.resolvedPath, ".traycer");
-  await mkdir(dir, { recursive: true });
-  const payload: WorkspaceScripts = {
+  await writeEnvironmentFile(validation.resolvedPath, (existing) => ({
+    ...existing,
     setup,
     teardown,
     updatedAt: Date.now(),
-  };
+  }));
+  return true;
+}
+
+/**
+ * `worktree.setRepoBranchPrefix`. `null` CLEARS the override - the key goes
+ * away, which is what makes the read report `absent` and the client inherit
+ * the global default; `""` is an explicit "no prefix" and is stored verbatim.
+ * The host never judges git-ref validity: that rule lives once, client-side,
+ * and re-running it here would fork it across the wire boundary.
+ */
+export async function writeRepoBranchPrefix(
+  workspacePath: string,
+  branchPrefix: string | null,
+): Promise<boolean> {
+  const validation = await validateWorkspacePath(workspacePath);
+  if (!validation.ok) {
+    return false;
+  }
+  await writeEnvironmentFile(validation.resolvedPath, (existing) => {
+    const { branchPrefix: _dropped, ...rest } = existing;
+    return branchPrefix === null ? rest : { ...rest, branchPrefix };
+  });
+  return true;
+}
+
+/**
+ * Read-modify-write of `.traycer/environment.json`. Scripts and the branch
+ * prefix are two independent settings in ONE file, so each writer has to
+ * preserve what it does not own - a whole-file rewrite silently dropped the
+ * other one.
+ */
+async function writeEnvironmentFile(
+  root: string,
+  update: (existing: { readonly [key: string]: unknown }) => {
+    readonly [key: string]: unknown;
+  },
+): Promise<void> {
+  const dir = join(root, ".traycer");
+  await mkdir(dir, { recursive: true });
+  const path = join(dir, "environment.json");
+  let existing: { readonly [key: string]: unknown } = {};
+  try {
+    const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+    if (
+      parsed !== null &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed)
+    ) {
+      existing = parsed as { readonly [key: string]: unknown };
+    }
+  } catch {
+    // An absent or unreadable file is replaced rather than merged into.
+  }
   await writeFile(
-    join(dir, "environment.json"),
-    `${JSON.stringify(payload, null, 2)}\n`,
+    path,
+    `${JSON.stringify(update(existing), null, 2)}\n`,
     "utf8",
   );
-  return true;
+}
+
+/**
+ * The stored branch-prefix override. `malformed` is a real answer: the file
+ * exists but is not a readable JSON object, or its `branchPrefix` is not a
+ * string - the client falls back to the global default AND warns, which it
+ * cannot do if a broken file reads as `absent`.
+ */
+export async function readRepoBranchPrefix(
+  root: string,
+): Promise<RepoBranchPrefixState> {
+  let raw: string;
+  try {
+    raw = await readFile(join(root, ".traycer", "environment.json"), "utf8");
+  } catch {
+    return { status: "absent" };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { status: "malformed" };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { status: "malformed" };
+  }
+  const value = (parsed as { readonly [key: string]: unknown }).branchPrefix;
+  if (value === undefined) {
+    return { status: "absent" };
+  }
+  return typeof value === "string"
+    ? { status: "present", value }
+    : { status: "malformed" };
 }
 
 export function findBinding(
@@ -445,7 +530,9 @@ async function describeWorktree(
   } catch {
     createdAt = null;
   }
-  const status = includeActivity ? branchStatus(worktreePath, facts?.branch ?? null) : null;
+  const status = includeActivity
+    ? branchStatus(worktreePath, facts?.branch ?? null)
+    : null;
   const dirty = facts === null ? 0 : uncommittedCount(facts.toplevel);
   const repoIdentifier = facts === null ? null : facts.repoIdentifier;
   return {
@@ -470,7 +557,10 @@ async function describeWorktree(
     mergedHeadShaMatches: false,
     submodules: [],
     atBaseCommit:
-      includeActivity && dirty === 0 && status !== null && status.mergedIntoDefault,
+      includeActivity &&
+      dirty === 0 &&
+      status !== null &&
+      status.mergedIntoDefault,
     resolvedAt: Date.now(),
     presence: "present",
     gitUnreadable,
@@ -600,7 +690,11 @@ async function materializeIntent(
     };
   }
   if (intent.scripts !== null) {
-    await writeRepoScripts(created.path, intent.scripts.setup, intent.scripts.teardown);
+    await writeRepoScripts(
+      created.path,
+      intent.scripts.setup,
+      intent.scripts.teardown,
+    );
   }
   const entry: WorktreeBindingEntry = {
     workspacePath: validation.resolvedPath,
@@ -659,7 +753,10 @@ async function addGitWorktree(
   if (added.status !== 0 && !existsSync(dest)) {
     return {
       ok: false,
-      error: added.stderr.trim().length > 0 ? added.stderr.trim() : "git worktree add failed",
+      error:
+        added.stderr.trim().length > 0
+          ? added.stderr.trim()
+          : "git worktree add failed",
     };
   }
   if (branch.type === "new" && branch.carryUncommittedChanges) {
@@ -713,7 +810,10 @@ async function readWorkspaceScripts(
   root: string,
 ): Promise<WorkspaceScripts | null> {
   try {
-    const raw = await readFile(join(root, ".traycer", "environment.json"), "utf8");
+    const raw = await readFile(
+      join(root, ".traycer", "environment.json"),
+      "utf8",
+    );
     return parseWorkspaceScripts(raw);
   } catch {
     return null;
