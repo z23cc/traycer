@@ -8,6 +8,8 @@ import {
   hostNotificationsMarkReadRequestSchema,
   hostNotificationsResolveRequestSchema,
   hostNotificationsSetConfigRequestSchema,
+  notificationHooksSaveRequestSchema,
+  notificationHooksTestRequestSchema,
   type HostNotificationsConfigResponse,
 } from "@traycer/protocol/host/notifications/host-notifications";
 import { z } from "zod";
@@ -20,6 +22,14 @@ import {
   summaryOf,
 } from "../../gui/notifications";
 import type { StoredNotification } from "../../store/host-store";
+import {
+  hasLastResult,
+  hooksConfigPath,
+  lastResultFor,
+  readHooks,
+  runHook,
+  writeHooks,
+} from "../../gui/notification-hooks";
 import type { RpcHandler } from "./types";
 
 /**
@@ -311,3 +321,77 @@ function addressesEntity(
   }
   return entity.chatId !== undefined && row.chatId === entity.chatId;
 }
+
+/**
+ * Hook identity, filters, and a redacted last-result summary - never a header
+ * value. `configPath` is the one deliberate path disclosure here: it is the
+ * user's own hand-editable file, which is the point of showing it.
+ */
+export const handleNotificationHooksStatus: RpcHandler = async (
+  _params,
+  runtime,
+) => {
+  const file = await readHooks(runtime);
+  return {
+    ok: true,
+    result: {
+      configPath: hooksConfigPath(runtime),
+      configError: file.configError,
+      hooks: file.hooks.map((hook) => ({
+        ...hook,
+        lastResult: hasLastResult(hook.id) ? lastResultFor(hook.id) : null,
+      })),
+    },
+  };
+};
+
+/** Whole-file rewrite: the form and a hand-edit are two editors over one file. */
+export const handleNotificationHooksSave: RpcHandler = async (
+  params,
+  runtime,
+) => {
+  const parsed = notificationHooksSaveRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  await writeHooks(runtime, parsed.data.hooks);
+  return handleNotificationHooksStatus({}, runtime);
+};
+
+export const handleNotificationHooksTest: RpcHandler = async (
+  params,
+  runtime,
+) => {
+  const parsed = notificationHooksTestRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const file = await readHooks(runtime);
+  const hook = file.hooks.find((row) => row.id === parsed.data.hookId);
+  if (hook === undefined) {
+    return {
+      ok: true,
+      result: { outcome: "not-found", detail: "No hook with that id." },
+    };
+  }
+  if (!hook.enabled) {
+    return {
+      ok: true,
+      result: { outcome: "disabled", detail: "This hook is disabled." },
+    };
+  }
+  const result = await runHook(runtime, hook, {
+    event: "hook.test",
+    severity: "info",
+    message: "Test delivery from the Traycer host.",
+    epicId: null,
+    chatId: null,
+  });
+  return {
+    ok: true,
+    result: {
+      outcome: result.ok ? "ok" : "failed",
+      detail: result.detail,
+    },
+  };
+};

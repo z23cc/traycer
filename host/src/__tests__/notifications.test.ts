@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,6 +15,11 @@ import {
   hostNotificationsListResponseSchemaV22,
 } from "@traycer/protocol/host/notifications/host-notifications";
 import { notify } from "../gui/notifications";
+import {
+  handleNotificationHooksSave,
+  handleNotificationHooksStatus,
+  handleNotificationHooksTest,
+} from "../rpc/handlers/notification-handlers";
 import { startHost, type StartedHost } from "../start-host";
 
 describe("host.notifications", () => {
@@ -316,4 +321,142 @@ async function call(
     throw new Error(`RPC error: ${JSON.stringify(record.error)}`);
   }
   return record.result;
+}
+
+describe("notification hooks", () => {
+  let started: StartedHost | null = null;
+  let tempDir: string | null = null;
+
+  afterEach(async () => {
+    if (started !== null) {
+      await started.close();
+      started = null;
+    }
+    if (tempDir !== null) {
+      await rm(tempDir, { recursive: true, force: true });
+      tempDir = null;
+    }
+  });
+
+  it("round-trips the hand-editable file and reports its real path", async () => {
+    const host = await bootHooks();
+    const empty = await status(host);
+    expect(empty).toMatchObject({
+      configPath: join(host.runtime.dataDir, "notification-hooks.json"),
+      configError: null,
+      hooks: [],
+    });
+
+    const hook = {
+      id: "h1",
+      name: "Log it",
+      enabled: true,
+      severities: ["failure"],
+      action: { type: "command", command: "/bin/true", args: [] },
+    };
+    const saved = await handleNotificationHooksSave(
+      { hooks: [hook] },
+      host.runtime,
+    );
+    if (!saved.ok) {
+      throw new Error(saved.message);
+    }
+    expect(saved.result).toMatchObject({
+      hooks: [{ ...hook, lastResult: null }],
+    });
+    // Hand-edits and the form are two editors over one file.
+    const onDisk: unknown = JSON.parse(
+      await readFile(
+        join(host.runtime.dataDir, "notification-hooks.json"),
+        "utf8",
+      ),
+    );
+    expect(onDisk).toEqual({ hooks: [hook] });
+  });
+
+  it("surfaces a malformed file as a config error, not as no hooks", async () => {
+    const host = await bootHooks();
+    await writeFile(
+      join(host.runtime.dataDir, "notification-hooks.json"),
+      "{ not json",
+    );
+    const answer = await status(host);
+    expect(answer.hooks).toEqual([]);
+    expect(answer.configError).not.toBeNull();
+  });
+
+  it("tests a hook by running it, and names the two refusals apart", async () => {
+    const host = await bootHooks();
+    await handleNotificationHooksSave(
+      {
+        hooks: [
+          {
+            id: "ok",
+            name: null,
+            enabled: true,
+            severities: null,
+            action: { type: "command", command: "/bin/cat", args: [] },
+          },
+          {
+            id: "off",
+            name: null,
+            enabled: false,
+            severities: null,
+            action: { type: "command", command: "/bin/true", args: [] },
+          },
+          {
+            id: "bad",
+            name: null,
+            enabled: true,
+            severities: null,
+            action: { type: "command", command: "/bin/false", args: [] },
+          },
+        ],
+      },
+      host.runtime,
+    );
+    expect(await test(host, "ok")).toMatchObject({ outcome: "ok" });
+    expect(await test(host, "off")).toMatchObject({ outcome: "disabled" });
+    expect(await test(host, "bad")).toMatchObject({ outcome: "failed" });
+    expect(await test(host, "nope")).toMatchObject({ outcome: "not-found" });
+    // A run leaves a redacted result behind for the settings panel.
+    const after = await status(host);
+    expect(
+      after.hooks.find((row) => row.id === "ok")?.lastResult,
+    ).toMatchObject({ ok: true, detail: "exit 0" });
+  });
+
+  async function bootHooks(): Promise<StartedHost> {
+    tempDir = await mkdtemp(join(tmpdir(), "traycer-host-"));
+    started = await startHost({
+      argv: ["--host-data-dir", tempDir],
+      listenHost: "127.0.0.1",
+      listenPort: 0,
+    });
+    return started;
+  }
+});
+
+async function status(host: StartedHost): Promise<{
+  readonly configPath: string;
+  readonly configError: string | null;
+  readonly hooks: { readonly id: string; readonly lastResult: unknown }[];
+}> {
+  const answer = await handleNotificationHooksStatus({}, host.runtime);
+  if (!answer.ok) {
+    throw new Error(answer.message);
+  }
+  return answer.result as {
+    configPath: string;
+    configError: string | null;
+    hooks: { id: string; lastResult: unknown }[];
+  };
+}
+
+async function test(host: StartedHost, hookId: string): Promise<unknown> {
+  const answer = await handleNotificationHooksTest({ hookId }, host.runtime);
+  if (!answer.ok) {
+    throw new Error(answer.message);
+  }
+  return answer.result;
 }

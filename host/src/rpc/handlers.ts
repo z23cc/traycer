@@ -18,6 +18,11 @@ import {
   hostUpdateCheckV11,
 } from "@traycer/protocol/host/maintenance/contracts";
 import {
+  handleNotificationHooksSave,
+  handleNotificationHooksStatus,
+  handleNotificationHooksTest,
+} from "./handlers/notification-handlers";
+import {
   handleAgentRolesClaim,
   handleAgentRolesList,
   handleAgentRolesRelinquish,
@@ -472,6 +477,9 @@ const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "agent.roles.claim": handleAgentRolesClaim,
   "agent.roles.list": handleAgentRolesList,
   "agent.roles.relinquish": handleAgentRolesRelinquish,
+  "host.notificationHooks.status": handleNotificationHooksStatus,
+  "host.notificationHooks.save": handleNotificationHooksSave,
+  "host.notificationHooks.test": handleNotificationHooksTest,
 };
 
 const HANDLERS: { readonly [method: string]: RpcHandler } =

@@ -5,6 +5,7 @@ import type {
   HostNotificationsIndicatorState,
   HostNotificationsSummary,
 } from "@traycer/protocol/host/notifications/host-notifications";
+import { deliverHooks } from "./notification-hooks";
 import type { HostRuntime } from "../runtime";
 import {
   NOTIFICATION_LIMIT,
@@ -80,6 +81,15 @@ export async function notify(
     removedIds: [],
     summary: summaryOf(runtime),
   });
+  // Hooks are a side channel, not a gate: a webhook that hangs or 500s must
+  // not hold up the notification it is reporting on.
+  void deliverHooks(runtime, {
+    event: row.kind,
+    severity: row.severity,
+    message: row.message,
+    epicId: row.epicId,
+    chatId: row.chatId,
+  }).catch(() => undefined);
 }
 
 export function notificationRows(
