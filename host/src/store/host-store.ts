@@ -22,7 +22,7 @@ export type StoredEpic = {
   reviewCount: number;
   readonly repos: readonly TaskRepoIdentifier[];
   readonly workspaces: readonly string[];
-  readonly pinned: boolean;
+  pinned: boolean;
   readonly lastViewedAt: number | null;
 };
 
