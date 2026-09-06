@@ -26,6 +26,8 @@ import {
   sendNotificationsSnapshot,
 } from "./snapshots";
 import { attachTerminalStream, type TerminalStreamSession } from "./terminal";
+import { workspaceSubscribeFileListOpenRequestSchema } from "@traycer/protocol/host/workspace/subscribe";
+import { WorkspaceFileListSession } from "../workspace/file-list-stream";
 
 const SUBSCRIBE_TIMEOUT_MS = 30_000;
 const POLICY_VIOLATION = 1008;
@@ -45,6 +47,7 @@ export function attachStreamConnection(
   let state: StreamState = "pending";
   let subscribeTimer: NodeJS.Timeout | null = null;
   let terminalStream: TerminalStreamSession | null = null;
+  let fileListStream: WorkspaceFileListSession | null = null;
   let pendingBinary: PendingBinary | null = null;
   const hostManifest = hostStreamManifest();
 
@@ -60,6 +63,8 @@ export function attachStreamConnection(
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
+    fileListStream?.close();
+    fileListStream = null;
   });
   socket.on("error", () => {
     state = "closed";
@@ -70,6 +75,8 @@ export function attachStreamConnection(
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
+    fileListStream?.close();
+    fileListStream = null;
   });
 
   function clearSubscribeTimer(): void {
@@ -298,11 +305,30 @@ export function attachStreamConnection(
       sendJson(snapshotFrame(runtime));
       return;
     }
+    if (subscribe.data.method === "workspace.subscribeFileList") {
+      const opened = workspaceSubscribeFileListOpenRequestSchema.safeParse(
+        subscribe.data.params,
+      );
+      if (!opened.success) {
+        reject(
+          unauthorized("workspace.subscribeFileList requires a workspacePath"),
+          "missing-workspace",
+        );
+        return;
+      }
+      fileListStream = new WorkspaceFileListSession(socket);
+      void fileListStream.open(opened.data.workspacePath);
+      return;
+    }
     sendAnalogStreamSnapshot(socket, subscribe.data.method);
   }
 
   function handleApplication(parsed: unknown): void {
     if (terminalStream !== null && terminalStream.handleFrame(parsed)) {
+      return;
+    }
+    if (fileListStream !== null) {
+      void fileListStream.handleFrame(parsed);
       return;
     }
     if (parsed === null || typeof parsed !== "object" || !("kind" in parsed)) {
