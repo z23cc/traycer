@@ -1,10 +1,13 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ProviderId } from "@traycer/protocol/host/provider-ids";
+import type { ProviderApiKeyState } from "@traycer/protocol/host/provider-schemas";
 import { rateLimitCapableProviderIdSchema } from "@traycer/protocol/host/rate-limit/schemas";
 import type { HostRuntime } from "../runtime";
+import type { StoredProviderOverride } from "../store/host-store";
 import { HOST_VERSION } from "../version";
 import { providerCliIdentity } from "../providers/service";
 
@@ -30,6 +33,25 @@ const CURSOR_EXCHANGE_URL = `${CURSOR_API_ORIGIN}/auth/exchange_user_api_key`;
 const CURSOR_USAGE_URL = `${CURSOR_API_ORIGIN}/aiserver.v1.DashboardService/GetCurrentPeriodUsage`;
 const CURSOR_CENTS_PER_USD = 100;
 const CURSOR_KEYCHAIN_SERVICE = "cursor-access-token";
+const OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key";
+const OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits";
+const HUGGINGFACE_USAGE_URL =
+  "https://huggingface.co/api/settings/billing/usage-v2";
+const HUGGINGFACE_USAGE_DAYS = 35;
+const HUGGINGFACE_NANO_USD = 1_000_000_000;
+const KILO_API_ORIGIN = "https://api.kilo.ai";
+const KILO_PROFILE_URL = `${KILO_API_ORIGIN}/api/profile`;
+const OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage";
+const OPENCODE_FIVE_HOUR_MINUTES = 300;
+const API_KEY_ENV: { readonly [id in ProviderId]?: readonly string[] } = {
+  cursor: ["CURSOR_API_KEY"],
+  openrouter: ["OPENROUTER_API_KEY"],
+  huggingface: ["HF_TOKEN", "HUGGINGFACE_API_KEY"],
+  kiro: ["KIRO_API_KEY"],
+  droid: ["FACTORY_API_KEY"],
+  amp: ["AMP_API_KEY"],
+  kilocode: ["KILO_API_KEY"],
+};
 
 export type ProviderRateLimitSnapshot = {
   readonly provider: string;
@@ -53,8 +75,21 @@ export async function readProviderRateLimits(
   if (!capable.success) {
     return unavailableRateLimits(providerId, "unsupported_provider");
   }
+  const storedApiKey = storedApiKeyFor(runtime, capable.data);
   if (capable.data === "cursor") {
-    return readCursorRateLimits();
+    return readCursorRateLimits(storedApiKey);
+  }
+  if (capable.data === "openrouter") {
+    return readOpenRouterRateLimits(storedApiKey);
+  }
+  if (capable.data === "huggingface") {
+    return readHuggingFaceRateLimits(storedApiKey);
+  }
+  if (capable.data === "kilocode") {
+    return readKiloCodeRateLimits(storedApiKey);
+  }
+  if (capable.data === "opencode") {
+    return readOpenCodeGoRateLimits();
   }
   if (capable.data === "grok") {
     const identity = providerCliIdentity(runtime.store, "grok");
@@ -311,42 +346,189 @@ export function parseCursorUsagePayload(
   };
 }
 
-export function credentialPresent(providerId: ProviderId): boolean {
-  const home = homedir();
+export function storedApiKeyFromOverride(
+  override: StoredProviderOverride | null,
+): string | null {
+  if (override === null || override.apiKey === null) {
+    return null;
+  }
+  const trimmed = override.apiKey.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+export function apiKeyStateForProvider(
+  providerId: ProviderId,
+  storedApiKey: string | null,
+): ProviderApiKeyState {
+  if (API_KEY_ENV[providerId] === undefined) {
+    return { supported: false, configured: false, source: null };
+  }
+  const resolved = resolveStoredOrEnvApiKey(providerId, storedApiKey);
+  if (resolved === null) {
+    return { supported: true, configured: false, source: null };
+  }
+  return { supported: true, configured: true, source: resolved.source };
+}
+
+export function credentialPresent(
+  providerId: ProviderId,
+  storedApiKey: string | null,
+): boolean {
+  if (resolveStoredOrEnvApiKey(providerId, storedApiKey) !== null) {
+    return true;
+  }
   if (providerId === "codex") {
-    return existsSync(join(home, ".codex", "auth.json"));
+    return existsSync(join(homedir(), ".codex", "auth.json"));
   }
   if (providerId === "claude-code") {
     return (
-      existsSync(join(home, ".claude", ".credentials.json")) ||
-      existsSync(join(home, ".claude.json"))
+      existsSync(join(homedir(), ".claude", ".credentials.json")) ||
+      existsSync(join(homedir(), ".claude.json"))
     );
   }
   if (providerId === "grok") {
     const mode = classifyGrokAuthMode();
     return mode === "oauth" || mode === "api-key";
   }
-  if (providerId === "openrouter") {
-    return typeof process.env.OPENROUTER_API_KEY === "string";
-  }
   if (providerId === "cursor") {
-    return cursorApiKeyFromEnv() !== null || cursorKeychainItemPresent();
+    return cursorKeychainItemPresent();
   }
-  if (providerId === "huggingface") {
-    return (
-      typeof process.env.HF_TOKEN === "string" ||
-      typeof process.env.HUGGINGFACE_API_KEY === "string"
-    );
+  if (providerId === "kilocode") {
+    return kiloCodeBearerToken() !== null;
+  }
+  if (providerId === "opencode") {
+    return openCodeGoApiKey() !== null;
   }
   return false;
 }
 
-function readCursorRateLimits(): Promise<ProviderRateLimitSnapshot> {
+export function parseOpenRouterRateLimitsPayload(
+  keyBody: unknown,
+  creditsBody: unknown,
+): ProviderRateLimitSnapshot | null {
+  const key = readOpenRouterKeyData(keyBody);
+  const credits = readOpenRouterCreditsData(creditsBody);
+  if (key === null || credits === null) {
+    return null;
+  }
+  const totalCredits = credits.totalCredits;
+  const totalUsage = credits.totalUsage;
+  return {
+    provider: "openrouter",
+    available: true,
+    limit: key.limit,
+    limitRemaining: key.limitRemaining,
+    dailySpend: key.dailySpend,
+    weeklySpend: key.weeklySpend,
+    monthlySpend: key.monthlySpend,
+    totalCredits,
+    totalUsage,
+    balance:
+      totalCredits === null || totalUsage === null
+        ? null
+        : totalCredits - totalUsage,
+  };
+}
+
+export function parseHuggingFaceUsagePayload(
+  payload: unknown,
+): ProviderRateLimitSnapshot | null {
+  if (
+    payload === null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload)
+  ) {
+    return null;
+  }
+  const usage = Reflect.get(payload, "usage");
+  if (usage === null || typeof usage !== "object" || Array.isArray(usage)) {
+    return null;
+  }
+  const inference = Reflect.get(usage, "inferenceProviders");
+  if (
+    inference === null ||
+    typeof inference !== "object" ||
+    Array.isArray(inference)
+  ) {
+    return null;
+  }
+  const usedUsd = nanoUsdToUsd(inference, "usedNanoUsd");
+  if (usedUsd === null) {
+    return null;
+  }
+  const includedUsd = nanoUsdToUsd(inference, "includedNanoUsd");
+  const limitUsd = nanoUsdToUsd(inference, "limitNanoUsd");
+  return {
+    provider: "huggingface",
+    available: true,
+    includedUsd,
+    usedUsd,
+    remainingIncludedUsd: remainingUsd(includedUsd, usedUsd),
+    limitUsd,
+    remainingLimitUsd: remainingUsd(limitUsd, usedUsd),
+    numRequests: readNumber(inference, "numRequests"),
+    periodStart: readString(inference, "periodStart"),
+    periodEnd: readString(inference, "periodEnd"),
+  };
+}
+
+export function parseOpenCodeGoUsagePayload(
+  payload: unknown,
+  credentialGeneration: string,
+): ProviderRateLimitSnapshot | null {
+  if (
+    payload === null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload)
+  ) {
+    return null;
+  }
+  const usage = Reflect.get(payload, "usage");
+  if (usage === null || typeof usage !== "object" || Array.isArray(usage)) {
+    return null;
+  }
+  const fiveHour = parseOpenCodeGoWindow(
+    Reflect.get(usage, "rolling"),
+    OPENCODE_FIVE_HOUR_MINUTES,
+  );
+  const weekly = parseOpenCodeGoWindow(
+    Reflect.get(usage, "weekly"),
+    CLAUDE_SEVEN_DAY_MINUTES,
+  );
+  const monthly = parseOpenCodeGoWindow(Reflect.get(usage, "monthly"), null);
+  if (fiveHour === null || weekly === null || monthly === null) {
+    return null;
+  }
+  return {
+    provider: "opencode",
+    available: true,
+    credentialGeneration,
+    fiveHour,
+    weekly,
+    monthly,
+  };
+}
+
+export function parseKiloCodeUsagePayload(
+  creditBalance: number | null,
+  passState: string | null,
+): ProviderRateLimitSnapshot {
+  return {
+    provider: "kilocode",
+    available: true,
+    creditBalance,
+    passState,
+  };
+}
+
+function readCursorRateLimits(
+  storedApiKey: string | null,
+): Promise<ProviderRateLimitSnapshot> {
   const controller = new AbortController();
   const timer: NodeJS.Timeout = setTimeout(() => {
     controller.abort();
   }, RATE_LIMIT_TIMEOUT_MS);
-  return fetchCursorUsage(controller.signal).then(
+  return fetchCursorUsage(storedApiKey, controller.signal).then(
     (snapshot) => {
       clearTimeout(timer);
       return snapshot;
@@ -362,9 +544,11 @@ function readCursorRateLimits(): Promise<ProviderRateLimitSnapshot> {
 }
 
 async function fetchCursorUsage(
+  storedApiKey: string | null,
   signal: AbortSignal,
 ): Promise<ProviderRateLimitSnapshot> {
-  const apiKey = cursorApiKeyFromEnv();
+  const apiKey =
+    resolveStoredOrEnvApiKey("cursor", storedApiKey)?.value ?? null;
   if (apiKey !== null) {
     const exchanged = await cursorPostJson(CURSOR_EXCHANGE_URL, apiKey, signal);
     if (exchanged.kind === "auth-error") {
@@ -448,13 +632,543 @@ function readCursorAccessToken(payload: unknown): string | null {
   return readString(payload, "accessToken");
 }
 
-function cursorApiKeyFromEnv(): string | null {
-  const value = process.env.CURSOR_API_KEY;
-  if (typeof value !== "string") {
+function storedApiKeyFor(
+  runtime: HostRuntime,
+  providerId: string,
+): string | null {
+  const row = runtime.store
+    .snapshot()
+    .providers.find((entry) => entry.providerId === providerId);
+  return storedApiKeyFromOverride(row === undefined ? null : row);
+}
+
+function resolveStoredOrEnvApiKey(
+  providerId: ProviderId,
+  storedApiKey: string | null,
+): { readonly value: string; readonly source: "stored" | "env" } | null {
+  if (storedApiKey !== null) {
+    return { value: storedApiKey, source: "stored" };
+  }
+  const names = API_KEY_ENV[providerId];
+  if (names === undefined) {
     return null;
   }
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
+  for (const name of names) {
+    const value = process.env[name];
+    if (typeof value !== "string") {
+      continue;
+    }
+    const trimmed = value.trim();
+    if (trimmed.length > 0) {
+      return { value: trimmed, source: "env" };
+    }
+  }
+  return null;
+}
+
+function readOpenRouterRateLimits(
+  storedApiKey: string | null,
+): Promise<ProviderRateLimitSnapshot> {
+  const resolved = resolveStoredOrEnvApiKey("openrouter", storedApiKey);
+  if (resolved === null) {
+    return Promise.resolve(
+      unavailableRateLimits("openrouter", "rate_limits_not_available"),
+    );
+  }
+  return withHttpTimeout(
+    "openrouter",
+    (signal) => fetchOpenRouterUsage(resolved.value, signal),
+    null,
+  );
+}
+
+async function fetchOpenRouterUsage(
+  apiKey: string,
+  signal: AbortSignal,
+): Promise<ProviderRateLimitSnapshot> {
+  const [keyResult, creditsResult] = await Promise.all([
+    httpGetJson(OPENROUTER_KEY_URL, apiKey, signal),
+    httpGetJson(OPENROUTER_CREDITS_URL, apiKey, signal),
+  ]);
+  if (
+    keyResult.kind === "auth-error" ||
+    keyResult.kind === "forbidden" ||
+    creditsResult.kind === "auth-error" ||
+    creditsResult.kind === "forbidden"
+  ) {
+    return unavailableRateLimits("openrouter", "rate_limits_not_available");
+  }
+  if (keyResult.kind !== "ok" || creditsResult.kind !== "ok") {
+    return unavailableRateLimits("openrouter", "invalid_response");
+  }
+  return (
+    parseOpenRouterRateLimitsPayload(keyResult.body, creditsResult.body) ??
+    unavailableRateLimits("openrouter", "invalid_response")
+  );
+}
+
+function readHuggingFaceRateLimits(
+  storedApiKey: string | null,
+): Promise<ProviderRateLimitSnapshot> {
+  const resolved = resolveStoredOrEnvApiKey("huggingface", storedApiKey);
+  if (resolved === null) {
+    return Promise.resolve(
+      unavailableRateLimits("huggingface", "rate_limits_not_available"),
+    );
+  }
+  return withHttpTimeout(
+    "huggingface",
+    (signal) => fetchHuggingFaceUsage(resolved.value, signal),
+    null,
+  );
+}
+
+async function fetchHuggingFaceUsage(
+  apiKey: string,
+  signal: AbortSignal,
+): Promise<ProviderRateLimitSnapshot> {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const startDate = nowSeconds - HUGGINGFACE_USAGE_DAYS * 24 * 60 * 60;
+  const url = `${HUGGINGFACE_USAGE_URL}?startDate=${String(startDate)}&endDate=${String(nowSeconds)}`;
+  const result = await httpGetJson(url, apiKey, signal);
+  if (result.kind === "auth-error" || result.kind === "forbidden") {
+    return unavailableRateLimits("huggingface", "rate_limits_not_available");
+  }
+  if (result.kind !== "ok") {
+    return unavailableRateLimits("huggingface", "invalid_response");
+  }
+  return (
+    parseHuggingFaceUsagePayload(result.body) ??
+    unavailableRateLimits("huggingface", "invalid_response")
+  );
+}
+
+function readKiloCodeRateLimits(
+  storedApiKey: string | null,
+): Promise<ProviderRateLimitSnapshot> {
+  const bearer =
+    resolveStoredOrEnvApiKey("kilocode", storedApiKey)?.value ??
+    kiloCodeBearerToken();
+  if (bearer === null) {
+    return Promise.resolve(
+      unavailableRateLimits("kilocode", "rate_limits_not_available"),
+    );
+  }
+  return withHttpTimeout(
+    "kilocode",
+    (signal) => fetchKiloCodeUsage(bearer, signal),
+    null,
+  );
+}
+
+async function fetchKiloCodeUsage(
+  bearer: string,
+  signal: AbortSignal,
+): Promise<ProviderRateLimitSnapshot> {
+  const profile = await httpGetJson(KILO_PROFILE_URL, bearer, signal);
+  if (profile.kind === "auth-error" || profile.kind === "forbidden") {
+    return unavailableRateLimits("kilocode", "rate_limits_not_available");
+  }
+  const results: HttpGetResult[] = [profile];
+  let creditBalance =
+    profile.kind === "ok" ? readKiloCreditBalance(profile.body) : null;
+  let passState =
+    profile.kind === "ok" ? readKiloPassState(profile.body) : null;
+  if (creditBalance === null) {
+    const credits = await httpGetJson(
+      kiloTrpcUrl("user.getCreditBlocks"),
+      bearer,
+      signal,
+    );
+    results.push(credits);
+    if (credits.kind === "ok") {
+      creditBalance = readKiloCreditBalance(unwrapTrpc(credits.body));
+    }
+  }
+  if (passState === null) {
+    const pass = await httpGetJson(
+      kiloTrpcUrl("kiloPass.getState"),
+      bearer,
+      signal,
+    );
+    results.push(pass);
+    if (pass.kind === "ok") {
+      passState = readKiloPassState(unwrapTrpc(pass.body));
+    }
+  }
+  if (results.some((row) => row.kind === "ok")) {
+    return parseKiloCodeUsagePayload(creditBalance, passState);
+  }
+  return unavailableRateLimits(
+    "kilocode",
+    results.some((row) => row.kind === "auth-error" || row.kind === "forbidden")
+      ? "rate_limits_not_available"
+      : "invalid_response",
+  );
+}
+
+function readOpenCodeGoRateLimits(): Promise<ProviderRateLimitSnapshot> {
+  const apiKey = openCodeGoApiKey();
+  if (apiKey === null) {
+    return Promise.resolve(
+      unavailableOpenCode("rate_limits_not_available", "none"),
+    );
+  }
+  const generation = createHash("sha256").update(apiKey).digest("hex");
+  return withHttpTimeout(
+    "opencode",
+    async (signal) => {
+      const result = await httpGetJson(OPENCODE_GO_USAGE_URL, apiKey, signal);
+      if (result.kind === "auth-error") {
+        return unavailableOpenCode("insufficient_permissions", generation);
+      }
+      if (result.kind === "forbidden") {
+        return unavailableOpenCode("rate_limits_not_available", generation);
+      }
+      if (result.kind !== "ok") {
+        return unavailableOpenCode("usage_fetch_failed", generation);
+      }
+      return (
+        parseOpenCodeGoUsagePayload(result.body, generation) ??
+        unavailableOpenCode("usage_fetch_failed", generation)
+      );
+    },
+    generation,
+  );
+}
+
+function withHttpTimeout(
+  providerId: string,
+  run: (signal: AbortSignal) => Promise<ProviderRateLimitSnapshot>,
+  credentialGeneration: string | null,
+): Promise<ProviderRateLimitSnapshot> {
+  const controller = new AbortController();
+  const timer: NodeJS.Timeout = setTimeout(() => {
+    controller.abort();
+  }, RATE_LIMIT_TIMEOUT_MS);
+  return run(controller.signal).then(
+    (snapshot) => {
+      clearTimeout(timer);
+      return snapshot;
+    },
+    () => {
+      clearTimeout(timer);
+      const reason = controller.signal.aborted
+        ? "timeout"
+        : "connection_failed";
+      if (providerId === "opencode" && credentialGeneration !== null) {
+        return unavailableOpenCode(reason, credentialGeneration);
+      }
+      return unavailableRateLimits(providerId, reason);
+    },
+  );
+}
+
+function unavailableOpenCode(
+  reason: string,
+  credentialGeneration: string,
+): ProviderRateLimitSnapshot {
+  return {
+    provider: "opencode",
+    available: false,
+    reason,
+    credentialGeneration,
+  };
+}
+
+type HttpGetResult =
+  | { readonly kind: "ok"; readonly body: unknown }
+  | { readonly kind: "auth-error" }
+  | { readonly kind: "forbidden" }
+  | { readonly kind: "http-error" }
+  | { readonly kind: "invalid" };
+
+async function httpGetJson(
+  url: string,
+  bearer: string,
+  signal: AbortSignal,
+): Promise<HttpGetResult> {
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${bearer}`,
+      Accept: "application/json",
+    },
+    redirect: "error",
+    signal,
+  });
+  if (response.status === 401) {
+    return { kind: "auth-error" };
+  }
+  if (response.status === 403) {
+    return { kind: "forbidden" };
+  }
+  if (!response.ok) {
+    return { kind: "http-error" };
+  }
+  try {
+    return { kind: "ok", body: await response.json() };
+  } catch {
+    return { kind: "invalid" };
+  }
+}
+
+function kiloTrpcUrl(method: string): string {
+  return `${KILO_API_ORIGIN}/api/trpc/${method}?input=${encodeURIComponent(JSON.stringify({}))}`;
+}
+
+function unwrapTrpc(payload: unknown): unknown {
+  if (
+    payload === null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload)
+  ) {
+    return payload;
+  }
+  const result = Reflect.get(payload, "result");
+  if (result === null || typeof result !== "object" || Array.isArray(result)) {
+    return payload;
+  }
+  const data = Reflect.get(result, "data");
+  if (
+    data !== null &&
+    typeof data === "object" &&
+    !Array.isArray(data) &&
+    "json" in data
+  ) {
+    return Reflect.get(data, "json");
+  }
+  return data;
+}
+
+function readKiloCreditBalance(payload: unknown): number | null {
+  if (typeof payload === "number" && Number.isFinite(payload)) {
+    return payload;
+  }
+  if (
+    payload === null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload)
+  ) {
+    return null;
+  }
+  const direct =
+    readNumber(payload, "creditBalance") ??
+    readNumber(payload, "balance") ??
+    readNumber(payload, "credits");
+  if (direct !== null) {
+    return direct;
+  }
+  const nested = Reflect.get(payload, "data");
+  return readKiloCreditBalance(nested);
+}
+
+function readKiloPassState(payload: unknown): string | null {
+  if (typeof payload === "string") {
+    const trimmed = payload.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  if (
+    payload === null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload)
+  ) {
+    return null;
+  }
+  const direct =
+    readString(payload, "passState") ?? readString(payload, "state");
+  if (direct !== null) {
+    return direct;
+  }
+  return readKiloPassState(Reflect.get(payload, "data"));
+}
+
+function kiloCodeBearerToken(): string | null {
+  const envContent = process.env.KILO_AUTH_CONTENT;
+  if (typeof envContent === "string" && envContent.trim().length > 0) {
+    const fromEnv = kiloBearerFromAuthStore(parseJsonObject(envContent.trim()));
+    if (fromEnv !== null) {
+      return fromEnv;
+    }
+  }
+  return kiloBearerFromAuthStore(
+    readJsonFile(join(xdgDataHome(), "kilo", "auth.json")),
+  );
+}
+
+function kiloBearerFromAuthStore(parsed: unknown): string | null {
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  const kilo = kiloAuthEntry(Reflect.get(parsed, "kilo"));
+  if (kilo === null) {
+    return null;
+  }
+  if (kilo.type === "api") {
+    return kilo.key;
+  }
+  return kilo.access;
+}
+
+function kiloAuthEntry(
+  value: unknown,
+):
+  | { readonly type: "api"; readonly key: string }
+  | { readonly type: "oauth"; readonly access: string | null }
+  | null {
+  if (value === null || typeof value !== "object") {
+    return null;
+  }
+  const type = Reflect.get(value, "type");
+  if (type === "api") {
+    const key = readString(value, "key");
+    return key === null ? null : { type: "api", key };
+  }
+  if (type === "oauth") {
+    return { type: "oauth", access: readString(value, "access") };
+  }
+  return null;
+}
+
+function openCodeGoApiKey(): string | null {
+  const envContent = process.env.OPENCODE_AUTH_CONTENT;
+  if (typeof envContent === "string" && envContent.trim().length > 0) {
+    const fromEnv = openCodeGoKeyFromAuth(parseJsonObject(envContent.trim()));
+    if (fromEnv !== null) {
+      return fromEnv;
+    }
+  }
+  return openCodeGoKeyFromAuth(
+    readJsonFile(join(xdgDataHome(), "opencode", "auth.json")),
+  );
+}
+
+function openCodeGoKeyFromAuth(parsed: unknown): string | null {
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return null;
+  }
+  const go = Reflect.get(parsed, "opencode-go");
+  if (go === null || typeof go !== "object" || Array.isArray(go)) {
+    return null;
+  }
+  if (Reflect.get(go, "type") !== "api") {
+    return null;
+  }
+  return readString(go, "key");
+}
+
+function xdgDataHome(): string {
+  const override = process.env.XDG_DATA_HOME;
+  if (typeof override === "string" && override.trim().length > 0) {
+    return override.trim();
+  }
+  return join(homedir(), ".local", "share");
+}
+
+function readJsonFile(path: string): unknown {
+  try {
+    return parseJsonObject(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function parseJsonObject(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function readOpenRouterKeyData(payload: unknown): {
+  readonly limit: number | null;
+  readonly limitRemaining: number | null;
+  readonly dailySpend: number | null;
+  readonly weeklySpend: number | null;
+  readonly monthlySpend: number | null;
+} | null {
+  if (
+    payload === null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload)
+  ) {
+    return null;
+  }
+  const data = Reflect.get(payload, "data");
+  if (data === null || typeof data !== "object" || Array.isArray(data)) {
+    return null;
+  }
+  return {
+    limit: readNumber(data, "limit"),
+    limitRemaining: readNumber(data, "limit_remaining"),
+    dailySpend: readNumber(data, "usage_daily"),
+    weeklySpend: readNumber(data, "usage_weekly"),
+    monthlySpend: readNumber(data, "usage_monthly"),
+  };
+}
+
+function readOpenRouterCreditsData(payload: unknown): {
+  readonly totalCredits: number | null;
+  readonly totalUsage: number | null;
+} | null {
+  if (
+    payload === null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload)
+  ) {
+    return null;
+  }
+  const data = Reflect.get(payload, "data");
+  if (data === null || typeof data !== "object" || Array.isArray(data)) {
+    return null;
+  }
+  return {
+    totalCredits: readNumber(data, "total_credits"),
+    totalUsage: readNumber(data, "total_usage"),
+  };
+}
+
+function parseOpenCodeGoWindow(
+  value: unknown,
+  durationMinutes: number | null,
+): {
+  readonly status: "ok" | "rate-limited";
+  readonly usedPercent: number;
+  readonly resetsAt: number | null;
+  readonly durationMinutes: number | null;
+} | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const status = Reflect.get(value, "status");
+  const usedPercent = readNumber(value, "percent");
+  if (
+    (status !== "ok" && status !== "rate-limited") ||
+    usedPercent === null ||
+    usedPercent < 0 ||
+    usedPercent > 100
+  ) {
+    return null;
+  }
+  const resetsAtRaw = readString(value, "resetsAt");
+  if (resetsAtRaw === null) {
+    return null;
+  }
+  const resetsAt = Date.parse(resetsAtRaw);
+  if (!Number.isFinite(resetsAt)) {
+    return null;
+  }
+  return { status, usedPercent, resetsAt, durationMinutes };
+}
+
+function nanoUsdToUsd(record: object, key: string): number | null {
+  const nano = readNumber(record, key);
+  return nano === null ? null : nano / HUGGINGFACE_NANO_USD;
+}
+
+function remainingUsd(base: number | null, used: number): number | null {
+  return base === null ? null : Math.max(0, base - used);
 }
 
 function cursorKeychainItemPresent(): boolean {

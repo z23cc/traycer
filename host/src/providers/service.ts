@@ -12,7 +12,11 @@ import {
   lookPath,
   pathBinaryName,
 } from "./catalog";
-import { credentialPresent } from "../gui/provider-rate-limits";
+import {
+  apiKeyStateForProvider,
+  credentialPresent,
+  storedApiKeyFromOverride,
+} from "../gui/provider-rate-limits";
 
 export type ProviderListResult = {
   readonly providers: ProviderCliState[];
@@ -97,6 +101,29 @@ export async function addCustomPath(
   return findProvider(store, providerId);
 }
 
+export async function setProviderApiKey(
+  store: HostStore,
+  providerId: ProviderId,
+  apiKey: string,
+): Promise<ProviderCliState | null> {
+  await upsertOverride(store, providerId, (current) => ({
+    ...current,
+    apiKey,
+  }));
+  return findProvider(store, providerId);
+}
+
+export async function clearProviderApiKey(
+  store: HostStore,
+  providerId: ProviderId,
+): Promise<ProviderCliState | null> {
+  await upsertOverride(store, providerId, (current) => ({
+    ...current,
+    apiKey: null,
+  }));
+  return findProvider(store, providerId);
+}
+
 export async function removeCustomPath(
   store: HostStore,
   providerId: ProviderId,
@@ -169,6 +196,7 @@ function buildState(
   const selected = readSelection(override);
   const resolved = resolveEffectiveCliIdentity(selected, candidates);
   const available = resolved.path !== null;
+  const storedApiKey = storedApiKeyFromOverride(override);
   const enabled =
     override !== null && override.enabled !== null
       ? override.enabled
@@ -181,7 +209,7 @@ function buildState(
     candidates,
     authPending: false,
     checkedAt: now,
-    apiKey: { supported: false, configured: false, source: null },
+    apiKey: apiKeyStateForProvider(providerId, storedApiKey),
     terminalAgentArgs: "",
     envOverrides: [],
     loginCapability: null,
@@ -203,7 +231,7 @@ function buildState(
             version: resolved.version,
           },
     auth: {
-      status: ambientAuthStatus(providerId, available),
+      status: ambientAuthStatus(providerId, available, storedApiKey),
       badgeText: null,
       label: null,
       detail: null,
@@ -271,8 +299,9 @@ function readSelection(
 function ambientAuthStatus(
   providerId: ProviderId,
   available: boolean,
+  storedApiKey: string | null,
 ): "authenticated" | "configured" | "unknown" {
-  if (credentialPresent(providerId)) {
+  if (credentialPresent(providerId, storedApiKey)) {
     return "authenticated";
   }
   if (!available) {
@@ -305,6 +334,7 @@ async function upsertOverride(
             selectedKind: "path",
             selectedPath: null,
             customPaths: [],
+            apiKey: null,
           }
         : current;
     const next = update(base);

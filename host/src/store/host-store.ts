@@ -141,6 +141,7 @@ export type StoredProviderOverride = {
   selectedKind: "bundled" | "path" | "custom";
   selectedPath: string | null;
   customPaths: string[];
+  apiKey: string | null;
 };
 
 export type HostState = {
@@ -275,7 +276,8 @@ function isPersistedHostState(value: unknown): value is PersistedHostState {
     Array.isArray(record.epics) &&
     Array.isArray(record.chats) &&
     Array.isArray(record.bindings) &&
-    (record.selectionGuide === null || typeof record.selectionGuide === "string") &&
+    (record.selectionGuide === null ||
+      typeof record.selectionGuide === "string") &&
     (record.providers === undefined || Array.isArray(record.providers)) &&
     (record.agents === undefined || Array.isArray(record.agents)) &&
     (record.tuiAgents === undefined || Array.isArray(record.tuiAgents))
@@ -305,10 +307,17 @@ function normalizeProviders(value: unknown): StoredProviderOverride[] {
       providerId: record.providerId,
       enabled: typeof record.enabled === "boolean" ? record.enabled : null,
       selectedKind,
-      selectedPath: typeof record.selectedPath === "string" ? record.selectedPath : null,
+      selectedPath:
+        typeof record.selectedPath === "string" ? record.selectedPath : null,
       customPaths: Array.isArray(record.customPaths)
-        ? record.customPaths.filter((path): path is string => typeof path === "string")
+        ? record.customPaths.filter(
+            (path): path is string => typeof path === "string",
+          )
         : [],
+      apiKey:
+        typeof record.apiKey === "string" && record.apiKey.length > 0
+          ? record.apiKey
+          : null,
     });
   }
   return rows;
@@ -421,9 +430,13 @@ function normalizeUsage(value: unknown): StoredTokenUsage | null {
     outputTokens,
     totalTokens,
     cacheReadInputTokens:
-      typeof cacheReadInputTokens === "number" ? cacheReadInputTokens : undefined,
-    contextTokens: typeof contextTokens === "number" ? contextTokens : undefined,
-    contextWindow: typeof contextWindow === "number" ? contextWindow : undefined,
+      typeof cacheReadInputTokens === "number"
+        ? cacheReadInputTokens
+        : undefined,
+    contextTokens:
+      typeof contextTokens === "number" ? contextTokens : undefined,
+    contextWindow:
+      typeof contextWindow === "number" ? contextWindow : undefined,
     costUsd: typeof costUsd === "number" ? costUsd : undefined,
   };
 }
@@ -433,7 +446,9 @@ function readNullableString(record: object, key: string): string | null {
   return typeof value === "string" ? value : null;
 }
 
-function normalizeProviderSession(value: unknown): StoredProviderSession | null {
+function normalizeProviderSession(
+  value: unknown,
+): StoredProviderSession | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
@@ -476,7 +491,8 @@ function normalizeTurns(value: unknown): StoredTurn[] {
       fromHarnessId:
         typeof record.fromHarnessId === "string" ? record.fromHarnessId : null,
       expectReply: record.expectReply === true,
-      responseId: typeof record.responseId === "string" ? record.responseId : null,
+      responseId:
+        typeof record.responseId === "string" ? record.responseId : null,
       userId: typeof record.userId === "string" ? record.userId : null,
       content: record.content === undefined ? null : record.content,
       turnId: typeof record.turnId === "string" ? record.turnId : null,
@@ -541,7 +557,8 @@ function normalizeTuiAgents(value: unknown): StoredTuiAgent[] {
       continue;
     }
     const workspaceMode =
-      record.workspaceMode === "inherit" || record.workspaceMode === "folderless"
+      record.workspaceMode === "inherit" ||
+      record.workspaceMode === "folderless"
         ? record.workspaceMode
         : null;
     rows.push({
@@ -571,7 +588,8 @@ function normalizeTuiAgents(value: unknown): StoredTuiAgent[] {
         typeof record.reasoningEffort === "string"
           ? record.reasoningEffort
           : null,
-      agentMode: typeof record.agentMode === "string" ? record.agentMode : "regular",
+      agentMode:
+        typeof record.agentMode === "string" ? record.agentMode : "regular",
       profileId: typeof record.profileId === "string" ? record.profileId : null,
       forkSourceHarnessSessionId:
         typeof record.forkSourceHarnessSessionId === "string"

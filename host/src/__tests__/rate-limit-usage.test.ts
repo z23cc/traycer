@@ -16,6 +16,10 @@ import {
   parseCodexRateLimitsPayload,
   parseCursorUsagePayload,
   parseGrokBillingPayload,
+  parseHuggingFaceUsagePayload,
+  parseKiloCodeUsagePayload,
+  parseOpenCodeGoUsagePayload,
+  parseOpenRouterRateLimitsPayload,
 } from "../gui/provider-rate-limits";
 
 describe("provider rate-limit payload mapping", () => {
@@ -186,6 +190,113 @@ describe("provider rate-limit payload mapping", () => {
       onDemandUsedUsd: null,
       onDemandRemainingUsd: null,
       displayMessage: "You've hit your usage limit",
+    });
+  });
+
+  it("maps OpenRouter key + credits payloads onto spend and balance", () => {
+    expect(
+      parseOpenRouterRateLimitsPayload(
+        {
+          data: {
+            limit: 20,
+            limit_remaining: 12,
+            usage_daily: 1.5,
+            usage_weekly: 4,
+            usage_monthly: 9,
+          },
+        },
+        { data: { total_credits: 100, total_usage: 37.25 } },
+      ),
+    ).toEqual({
+      provider: "openrouter",
+      available: true,
+      limit: 20,
+      limitRemaining: 12,
+      dailySpend: 1.5,
+      weeklySpend: 4,
+      monthlySpend: 9,
+      totalCredits: 100,
+      totalUsage: 37.25,
+      balance: 62.75,
+    });
+  });
+
+  it("maps Hugging Face nano-USD usage onto dollar fields", () => {
+    expect(
+      parseHuggingFaceUsagePayload({
+        usage: {
+          inferenceProviders: {
+            usedNanoUsd: 2_500_000_000,
+            includedNanoUsd: 5_000_000_000,
+            limitNanoUsd: 10_000_000_000,
+            numRequests: 8,
+            periodStart: "2026-08-02",
+            periodEnd: "2026-09-06",
+          },
+        },
+      }),
+    ).toEqual({
+      provider: "huggingface",
+      available: true,
+      includedUsd: 5,
+      usedUsd: 2.5,
+      remainingIncludedUsd: 2.5,
+      limitUsd: 10,
+      remainingLimitUsd: 7.5,
+      numRequests: 8,
+      periodStart: "2026-08-02",
+      periodEnd: "2026-09-06",
+    });
+  });
+
+  it("maps OpenCode zen/go usage windows", () => {
+    expect(
+      parseOpenCodeGoUsagePayload(
+        {
+          usage: {
+            rolling: {
+              status: "ok",
+              percent: 11,
+              resetsAt: "2026-09-06T18:00:00.000Z",
+            },
+            weekly: {
+              status: "rate-limited",
+              percent: 100,
+              resetsAt: "2026-09-11T12:00:00.000Z",
+            },
+            monthly: {
+              status: "ok",
+              percent: 40,
+              resetsAt: "2026-10-01T00:00:00.000Z",
+            },
+          },
+        },
+        "gen-1",
+      ),
+    ).toMatchObject({
+      provider: "opencode",
+      available: true,
+      credentialGeneration: "gen-1",
+      fiveHour: {
+        status: "ok",
+        usedPercent: 11,
+        durationMinutes: 300,
+      },
+      weekly: {
+        status: "rate-limited",
+        usedPercent: 100,
+        durationMinutes: 10_080,
+      },
+      monthly: { status: "ok", usedPercent: 40, durationMinutes: null },
+    });
+  });
+
+  it("maps Kilo Code credit and pass state", () => {
+    expect(parseKiloCodeUsagePayload(12.5, "active")).toEqual({
+      provider: "kilocode",
+      available: true,
+      creditBalance: 12.5,
+      passState: "active",
     });
   });
 });

@@ -1,15 +1,19 @@
 import {
   providersAddCustomPathRequestSchema,
+  providersClearApiKeyRequestSchema,
   providersDetectVersionRequestSchema,
   providersRemoveCustomPathRequestSchema,
+  providersSetApiKeyRequestSchema,
   providersSetEnabledRequestSchemaV21,
   providersSetSelectionRequestSchema,
 } from "@traycer/protocol/host/provider-schemas";
 import { probeCandidateVersion } from "../../providers/catalog";
 import {
   addCustomPath,
+  clearProviderApiKey,
   listProviderCliStates,
   removeCustomPath,
+  setProviderApiKey,
   setProviderEnabled,
   setProviderSelection,
 } from "../../providers/service";
@@ -25,10 +29,16 @@ export const handleProvidersDetectVersion: RpcHandler = async (params) => {
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
-  return { ok: true, result: await probeCandidateVersion(parsed.data.candidatePath) };
+  return {
+    ok: true,
+    result: await probeCandidateVersion(parsed.data.candidatePath),
+  };
 };
 
-export const handleProvidersSetEnabled: RpcHandler = async (params, runtime) => {
+export const handleProvidersSetEnabled: RpcHandler = async (
+  params,
+  runtime,
+) => {
   const parsed = providersSetEnabledRequestSchemaV21.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
@@ -44,7 +54,10 @@ export const handleProvidersSetEnabled: RpcHandler = async (params, runtime) => 
   return { ok: true, result: { state } };
 };
 
-export const handleProvidersSetSelection: RpcHandler = async (params, runtime) => {
+export const handleProvidersSetSelection: RpcHandler = async (
+  params,
+  runtime,
+) => {
   const parsed = providersSetSelectionRequestSchema.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
@@ -60,7 +73,10 @@ export const handleProvidersSetSelection: RpcHandler = async (params, runtime) =
   return { ok: true, result: { state } };
 };
 
-export const handleProvidersAddCustomPath: RpcHandler = async (params, runtime) => {
+export const handleProvidersAddCustomPath: RpcHandler = async (
+  params,
+  runtime,
+) => {
   const parsed = providersAddCustomPathRequestSchema.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
@@ -69,6 +85,40 @@ export const handleProvidersAddCustomPath: RpcHandler = async (params, runtime) 
     runtime.store,
     parsed.data.providerId,
     parsed.data.path,
+  );
+  if (state === null) {
+    return { ok: false, code: "RPC_ERROR", message: "Provider catalog miss" };
+  }
+  return { ok: true, result: { state } };
+};
+
+export const handleProvidersSetApiKey: RpcHandler = async (params, runtime) => {
+  const parsed = providersSetApiKeyRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const state = await setProviderApiKey(
+    runtime.store,
+    parsed.data.providerId,
+    parsed.data.apiKey,
+  );
+  if (state === null) {
+    return { ok: false, code: "RPC_ERROR", message: "Provider catalog miss" };
+  }
+  return { ok: true, result: { state } };
+};
+
+export const handleProvidersClearApiKey: RpcHandler = async (
+  params,
+  runtime,
+) => {
+  const parsed = providersClearApiKeyRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const state = await clearProviderApiKey(
+    runtime.store,
+    parsed.data.providerId,
   );
   if (state === null) {
     return { ok: false, code: "RPC_ERROR", message: "Provider catalog miss" };

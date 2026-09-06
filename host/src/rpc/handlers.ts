@@ -80,9 +80,11 @@ import {
 } from "./handlers/git-handlers";
 import {
   handleProvidersAddCustomPath,
+  handleProvidersClearApiKey,
   handleProvidersDetectVersion,
   handleProvidersList,
   handleProvidersRemoveCustomPath,
+  handleProvidersSetApiKey,
   handleProvidersSetEnabled,
   handleProvidersSetSelection,
 } from "./handlers/provider-handlers";
@@ -148,6 +150,8 @@ const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "providers.setSelection": handleProvidersSetSelection,
   "providers.addCustomPath": handleProvidersAddCustomPath,
   "providers.removeCustomPath": handleProvidersRemoveCustomPath,
+  "providers.setApiKey": handleProvidersSetApiKey,
+  "providers.clearApiKey": handleProvidersClearApiKey,
   "snapshots.getLocalStorageSize": handleSnapshotSize,
   "snapshots.clearLocalSnapshots": handleSnapshotClear,
   "snapshots.readSnapshotDiff": handleSnapshotReadDiff,
@@ -241,13 +245,12 @@ const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "terminal.rename": handleTerminalRename,
 };
 
-const HANDLERS: { readonly [method: string]: RpcHandler } = fillFloor(
-  CONCRETE_HANDLERS,
-);
+const HANDLERS: { readonly [method: string]: RpcHandler } =
+  fillFloor(CONCRETE_HANDLERS);
 
-function fillFloor(concrete: {
+function fillFloor(concrete: { readonly [method: string]: RpcHandler }): {
   readonly [method: string]: RpcHandler;
-}): { readonly [method: string]: RpcHandler } {
+} {
   const filled: { [method: string]: RpcHandler } = { ...concrete };
   for (const method of RELEASED_FLOOR_METHOD_NAMES) {
     if (filled[method] === undefined) {

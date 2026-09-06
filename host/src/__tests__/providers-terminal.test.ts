@@ -35,37 +35,92 @@ describe("providers and terminal", () => {
       listenHost: "127.0.0.1",
       listenPort: 0,
     });
-    const listed = await call(started.rpcUrl, "providers.list", {
-      major: 8,
-      minor: 0,
-    }, {
-      forceAuthRefresh: false,
-      native: null,
-    });
+    const listed = await call(
+      started.rpcUrl,
+      "providers.list",
+      {
+        major: 8,
+        minor: 0,
+      },
+      {
+        forceAuthRefresh: false,
+        native: null,
+      },
+    );
     const record = listed as {
-      providers: readonly { providerId: string; candidates: readonly unknown[] }[];
+      providers: readonly {
+        providerId: string;
+        candidates: readonly unknown[];
+      }[];
     };
     expect(record.providers.map((row) => row.providerId).sort()).toEqual(
       [...providerIdSchema.options].sort(),
     );
-    const probed = await call(started.rpcUrl, "providers.detectVersion", {
-      major: 1,
-      minor: 0,
-    }, {
-      candidatePath: "/usr/bin/git",
-    });
+    const probed = await call(
+      started.rpcUrl,
+      "providers.detectVersion",
+      {
+        major: 1,
+        minor: 0,
+      },
+      {
+        candidatePath: "/usr/bin/git",
+      },
+    );
     expect(probed).toMatchObject({ executable: true });
 
-    const disabled = await call(started.rpcUrl, "providers.setEnabled", {
-      major: 2,
-      minor: 1,
-    }, {
-      providerId: "claude-code",
-      enabled: false,
-      profileAction: null,
-    });
+    const disabled = await call(
+      started.rpcUrl,
+      "providers.setEnabled",
+      {
+        major: 2,
+        minor: 1,
+      },
+      {
+        providerId: "claude-code",
+        enabled: false,
+        profileAction: null,
+      },
+    );
     expect(disabled).toMatchObject({
       state: { providerId: "claude-code", enabled: false },
+    });
+
+    const keyed = await call(
+      started.rpcUrl,
+      "providers.setApiKey",
+      {
+        major: 2,
+        minor: 1,
+      },
+      {
+        providerId: "openrouter",
+        apiKey: "sk-or-test",
+      },
+    );
+    expect(keyed).toMatchObject({
+      state: {
+        providerId: "openrouter",
+        apiKey: { supported: true, configured: true, source: "stored" },
+        auth: { status: "authenticated" },
+      },
+    });
+    const cleared = await call(
+      started.rpcUrl,
+      "providers.clearApiKey",
+      {
+        major: 2,
+        minor: 1,
+      },
+      {
+        providerId: "openrouter",
+      },
+    );
+    expect(cleared).toMatchObject({
+      state: {
+        providerId: "openrouter",
+        apiKey: { supported: true, configured: false, source: null },
+      },
     });
   });
 
@@ -76,22 +131,27 @@ describe("providers and terminal", () => {
       listenHost: "127.0.0.1",
       listenPort: 0,
     });
-    const created = await call(started.rpcUrl, "terminal.create", {
-      major: 2,
-      minor: 1,
-    }, {
-      scope: { kind: "independent" },
-      sessionKind: "terminal",
-      tuiHarnessId: null,
-      cwd: tempDir,
-      shellCommand: "/bin/zsh",
-      shellArgs: [],
-      cols: 80,
-      rows: 24,
-      desiredSessionId: "term-1",
-      worktreeBusyPaths: [],
-      themeHint: null,
-    });
+    const created = await call(
+      started.rpcUrl,
+      "terminal.create",
+      {
+        major: 2,
+        minor: 1,
+      },
+      {
+        scope: { kind: "independent" },
+        sessionKind: "terminal",
+        tuiHarnessId: null,
+        cwd: tempDir,
+        shellCommand: "/bin/zsh",
+        shellArgs: [],
+        cols: 80,
+        rows: 24,
+        desiredSessionId: "term-1",
+        worktreeBusyPaths: [],
+        themeHint: null,
+      },
+    );
     expect(created).toMatchObject({
       session: { sessionId: "term-1", status: "running" },
     });
@@ -102,12 +162,17 @@ describe("providers and terminal", () => {
       sessionId: "term-1",
       session: { sessionId: "term-1" },
     });
-    const killed = await call(started.rpcUrl, "terminal.kill", {
-      major: 1,
-      minor: 0,
-    }, {
-      sessionId: "term-1",
-    });
+    const killed = await call(
+      started.rpcUrl,
+      "terminal.kill",
+      {
+        major: 1,
+        minor: 0,
+      },
+      {
+        sessionId: "term-1",
+      },
+    );
     expect(killed).toMatchObject({ killed: true });
   });
 });
