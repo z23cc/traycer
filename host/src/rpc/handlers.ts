@@ -1,0 +1,258 @@
+import type { RpcHandler } from "./handlers/types";
+export type { RpcHandler, RpcHandlerResult } from "./handlers/types";
+import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-floor";
+import {
+  handleEditorOpenPaths,
+  handleHostRestart,
+  handleHostStatus,
+  handleRateLimitUsage,
+  handleRuntimeCapabilities,
+  handleSelectionGuide,
+  handleSelectionGuideGlobalGet,
+  handleSelectionGuideGlobalReset,
+  handleSelectionGuideGlobalSet,
+  handleSelectionGuideOnboardingDraft,
+  handleSnapshotClear,
+  handleSnapshotReadDiff,
+  handleSnapshotSize,
+  handleSpeechModelStatus,
+} from "./handlers/misc-handlers";
+import {
+  handleEpicBatchDelete,
+  handleEpicCreate,
+  handleEpicCreateChat,
+  handleEpicDeleteChat,
+  handleEpicGetChatRunSettings,
+  handleEpicGetTaskContexts,
+  handleEpicListChatRecords,
+  handleEpicListCollaborators,
+  handleEpicListCommentThreads,
+  handleEpicListTasks,
+  handleEpicMentionArtifacts,
+  handleEpicMentionEpics,
+  handleEpicRecordViewed,
+  handleEpicRenameChat,
+  handleEpicUpdateChatRunSettings,
+  handleEpicUpdateTitle,
+} from "./handlers/epic-handlers";
+import {
+  handleAgentCreate,
+  handleAgentGetTranscript,
+  handleAgentList,
+  handleAgentSendMessage,
+  handleAgentStop,
+} from "./handlers/agent-handlers";
+import {
+  handleGuiGetPlan,
+  handleGuiListCommands,
+  handleGuiListHarnesses,
+  handleGuiListModels,
+  handleInboxRead,
+  handleListHarnessModels,
+} from "./handlers/gui-handlers";
+import {
+  handleEpicCreateTuiAgent,
+  handleEpicDeleteTuiAgent,
+  handleEpicListTuiAgents,
+  handleEpicRenameTuiAgent,
+  handleTuiGenerateTitle,
+  handleTuiListHarnesses,
+  handleTuiPrepareLaunch,
+  handleTuiPromptSubmitted,
+  handleTuiRecordActivity,
+  handleTuiTurnEnded,
+} from "./handlers/tui-handlers";
+import { floorUnavailable } from "./handlers/floor-handlers";
+import {
+  handleEpicChatBackupStatus,
+  handleEpicListChatPublicationTargets,
+  handleEpicListCloudChats,
+  handleHostChatForkGet,
+  handleHostNotificationsIndicatorState,
+  handleHostNotificationsMarkRead,
+  handleTerminalPlainList,
+} from "./handlers/analog-handlers";
+import {
+  handleGitCapabilities,
+  handleGitGetFileDiff,
+  handleGitGetFileDiffs,
+  handleGitListChangedFiles,
+} from "./handlers/git-handlers";
+import {
+  handleProvidersAddCustomPath,
+  handleProvidersDetectVersion,
+  handleProvidersList,
+  handleProvidersRemoveCustomPath,
+  handleProvidersSetEnabled,
+  handleProvidersSetSelection,
+} from "./handlers/provider-handlers";
+import {
+  handleTerminalCreate,
+  handleTerminalKill,
+  handleTerminalList,
+  handleTerminalRename,
+} from "./handlers/terminal-handlers";
+import {
+  handleWorkspaceListDirectory,
+  handleWorkspaceListFileTree,
+  handleWorkspaceMentionFiles,
+  handleWorkspaceMentionFolders,
+  handleWorkspaceMentionGitBranches,
+  handleWorkspaceMentionGitCommits,
+  handleWorkspaceMentionGitRoot,
+  handleWorkspaceMentionWorktrees,
+  handleWorkspacePrepareFolders,
+  handleWorkspaceReadFile,
+  handleWorkspaceResolvePaths,
+} from "./handlers/workspace-handlers";
+import {
+  handleWorkspaceBindingRemoveEntry,
+  handleWorktreeCreate,
+  handleWorktreeCreatePaths,
+  handleWorktreeDelete,
+  handleWorktreeGetBinding,
+  handleWorktreeImport,
+  handleWorktreeListAll,
+  handleWorktreeListBindingsForEpic,
+  handleWorktreeListBranches,
+  handleWorktreeListByWorkspacePaths,
+  handleWorktreeRetrySetup,
+  handleWorktreeSetEntryMode,
+  handleWorktreeSetRepoScripts,
+} from "./handlers/worktree-handlers";
+
+export function handlerFor(method: string): RpcHandler {
+  const found = HANDLERS[method];
+  if (found !== undefined) {
+    return found;
+  }
+  return () => ({
+    ok: false,
+    code: "RPC_ERROR",
+    message: `Method ${method} is not implemented by this OSS host`,
+  });
+}
+
+export function implementedRpcMethods(): readonly string[] {
+  return Object.keys(HANDLERS);
+}
+
+const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
+  "host.status": handleHostStatus,
+  "host.restart": handleHostRestart,
+  "host.getRuntimeCapabilities": handleRuntimeCapabilities,
+  "host.getRateLimitUsage": handleRateLimitUsage,
+  "providers.list": handleProvidersList,
+  "providers.detectVersion": handleProvidersDetectVersion,
+  "providers.setEnabled": handleProvidersSetEnabled,
+  "providers.setSelection": handleProvidersSetSelection,
+  "providers.addCustomPath": handleProvidersAddCustomPath,
+  "providers.removeCustomPath": handleProvidersRemoveCustomPath,
+  "snapshots.getLocalStorageSize": handleSnapshotSize,
+  "snapshots.clearLocalSnapshots": handleSnapshotClear,
+  "snapshots.readSnapshotDiff": handleSnapshotReadDiff,
+  "editor.openPaths": handleEditorOpenPaths,
+  "agent.create": handleAgentCreate,
+  "agent.sendMessage": handleAgentSendMessage,
+  "agent.list": handleAgentList,
+  "agent.getTranscript": handleAgentGetTranscript,
+  "agent.stop": handleAgentStop,
+  "agent.gui.listHarnesses": handleGuiListHarnesses,
+  "agent.gui.listModels": handleGuiListModels,
+  "agent.gui.listCommands": handleGuiListCommands,
+  "agent.gui.getPlan": handleGuiGetPlan,
+  "agent.listHarnessModels": handleListHarnessModels,
+  "agent.inbox.read": handleInboxRead,
+  "agent.tui.listHarnesses": handleTuiListHarnesses,
+  "agent.tui.prepareLaunch": handleTuiPrepareLaunch,
+  "agent.tui.generateTitle": handleTuiGenerateTitle,
+  "agent.tui.recordActivity": handleTuiRecordActivity,
+  "agent.tui.turnEnded": handleTuiTurnEnded,
+  "agent.tui.promptSubmitted": handleTuiPromptSubmitted,
+  "agent.selectionGuide": handleSelectionGuide,
+  "agent.selectionGuide.getGlobal": handleSelectionGuideGlobalGet,
+  "agent.selectionGuide.setGlobal": handleSelectionGuideGlobalSet,
+  "agent.selectionGuide.resetGlobalToDefault": handleSelectionGuideGlobalReset,
+  "agent.selectionGuide.getGlobalOnboardingDraft":
+    handleSelectionGuideOnboardingDraft,
+  "speech.getModelStatus": handleSpeechModelStatus,
+  "speech.ensureModel": handleSpeechModelStatus,
+  "epic.create": handleEpicCreate,
+  "epic.listTasks": handleEpicListTasks,
+  "epic.updateTitle": handleEpicUpdateTitle,
+  "epic.batchDelete": handleEpicBatchDelete,
+  "epic.createChat": handleEpicCreateChat,
+  "epic.renameChat": handleEpicRenameChat,
+  "epic.deleteChat": handleEpicDeleteChat,
+  "epic.recordViewed": handleEpicRecordViewed,
+  "epic.updateChatRunSettings": handleEpicUpdateChatRunSettings,
+  "epic.getChatRunSettings": handleEpicGetChatRunSettings,
+  "epic.getTaskContexts": handleEpicGetTaskContexts,
+  "epic.listChatRecords": handleEpicListChatRecords,
+  "epic.createTuiAgent": handleEpicCreateTuiAgent,
+  "epic.deleteTuiAgent": handleEpicDeleteTuiAgent,
+  "epic.renameTuiAgent": handleEpicRenameTuiAgent,
+  "epic.listTuiAgents": handleEpicListTuiAgents,
+  "epic.listCloudChats": handleEpicListCloudChats,
+  "epic.listChatPublicationTargets": handleEpicListChatPublicationTargets,
+  "epic.chatBackupStatus": handleEpicChatBackupStatus,
+  "host.chatFork.get": handleHostChatForkGet,
+  "host.notifications.indicatorState": handleHostNotificationsIndicatorState,
+  "host.notifications.markRead": handleHostNotificationsMarkRead,
+  "terminal.plain.list": handleTerminalPlainList,
+  "epic.listCollaborators": handleEpicListCollaborators,
+  "epic.mentionEpics": handleEpicMentionEpics,
+  "epic.mentionSpecs": handleEpicMentionArtifacts,
+  "epic.mentionTickets": handleEpicMentionArtifacts,
+  "epic.mentionStories": handleEpicMentionArtifacts,
+  "epic.mentionReviews": handleEpicMentionArtifacts,
+  "epic.listCommentThreads": handleEpicListCommentThreads,
+  "workspace.prepareFolders": handleWorkspacePrepareFolders,
+  "workspace.listDirectory": handleWorkspaceListDirectory,
+  "workspace.readFile": handleWorkspaceReadFile,
+  "workspace.listFileTree": handleWorkspaceListFileTree,
+  "workspace.mentionFolders": handleWorkspaceMentionFolders,
+  "workspace.mentionFiles": handleWorkspaceMentionFiles,
+  "workspace.mentionWorktrees": handleWorkspaceMentionWorktrees,
+  "workspace.mentionGitRoot": handleWorkspaceMentionGitRoot,
+  "workspace.mentionGitBranches": handleWorkspaceMentionGitBranches,
+  "workspace.mentionGitCommits": handleWorkspaceMentionGitCommits,
+  "workspace.resolvePathsByRepoIdentifiers": handleWorkspaceResolvePaths,
+  "worktree.listAllForHost": handleWorktreeListAll,
+  "worktree.getBinding": handleWorktreeGetBinding,
+  "worktree.listBindingsForEpic": handleWorktreeListBindingsForEpic,
+  "worktree.create": handleWorktreeCreate,
+  "worktree.createPaths": handleWorktreeCreatePaths,
+  "worktree.import": handleWorktreeImport,
+  "worktree.delete": handleWorktreeDelete,
+  "worktree.setEntryMode": handleWorktreeSetEntryMode,
+  "worktree.listBranches": handleWorktreeListBranches,
+  "worktree.listByWorkspacePaths": handleWorktreeListByWorkspacePaths,
+  "worktree.retrySetup": handleWorktreeRetrySetup,
+  "worktree.setRepoScripts": handleWorktreeSetRepoScripts,
+  "workspaceBinding.removeEntry": handleWorkspaceBindingRemoveEntry,
+  "git.getCapabilities": handleGitCapabilities,
+  "git.listChangedFiles": handleGitListChangedFiles,
+  "git.getFileDiff": handleGitGetFileDiff,
+  "git.getFileDiffs": handleGitGetFileDiffs,
+  "terminal.list": handleTerminalList,
+  "terminal.create": handleTerminalCreate,
+  "terminal.kill": handleTerminalKill,
+  "terminal.rename": handleTerminalRename,
+};
+
+const HANDLERS: { readonly [method: string]: RpcHandler } = fillFloor(
+  CONCRETE_HANDLERS,
+);
+
+function fillFloor(concrete: {
+  readonly [method: string]: RpcHandler;
+}): { readonly [method: string]: RpcHandler } {
+  const filled: { [method: string]: RpcHandler } = { ...concrete };
+  for (const method of RELEASED_FLOOR_METHOD_NAMES) {
+    if (filled[method] === undefined) {
+      filled[method] = floorUnavailable(method);
+    }
+  }
+  return filled;
+}

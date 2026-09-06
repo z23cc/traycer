@@ -1,0 +1,612 @@
+import {
+  getChatRunSettingsRequestSchema,
+  listChatRecordsRequestSchema,
+  listChatRecordsRequestV11Schema,
+} from "@traycer/protocol/host/epic/chat-records";
+import {
+  batchDeleteRequestSchema,
+  createChatRequestSchema,
+  deleteChatRequestSchema,
+  createEpicRequestSchema,
+  epicMentionArtifactsRequestSchema,
+  epicMentionEpicsRequestSchema,
+  getTaskContextsRequestSchema,
+  listCommentThreadsRequestSchema,
+  listEpicCollaboratorsRequestSchema,
+  listTasksRequestSchema,
+  recordEpicViewedRequestSchema,
+  renameChatRequestSchema,
+  updateChatRunSettingsRequestSchema,
+  updateChatRunSettingsRequestSchemaV11,
+  updateEpicRequestSchema,
+} from "@traycer/protocol/host/epic/unary-schemas";
+import {
+  beginGuiPrintTurn,
+  extractPlainText,
+  persistChatRunSettings,
+  persistGuiUserTurn,
+  derivedChatTitle,
+  readHarnessId,
+  readModelSlug,
+  readUserId,
+  seedGuiChat,
+  titleFromPrompt,
+} from "../../agent/gui-chat";
+import { createWorktreeBinding } from "../../worktree/service";
+import { LOCAL_USER_ID } from "../../local-user";
+import type { HostRuntime } from "../../runtime";
+import type { StoredChat, StoredEpic } from "../../store/host-store";
+import type { RpcHandler } from "./types";
+
+const EPIC_VERSION = "2.0.0";
+
+export const handleEpicCreate: RpcHandler = async (params, runtime) => {
+  const parsed = createEpicRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const now = Date.now();
+  const createdBy =
+    parsed.data.epic.createdBy.length > 0 ? parsed.data.epic.createdBy : "local";
+  const epic: StoredEpic = {
+    id: parsed.data.epic.id,
+    title: parsed.data.epic.title,
+    initialUserPrompt: parsed.data.epic.initialUserPrompt,
+    status: parsed.data.epic.status,
+    createdAt: parsed.data.epic.createdAt || now,
+    updatedAt: now,
+    createdBy,
+    version: parsed.data.epic.version.length > 0 ? parsed.data.epic.version : EPIC_VERSION,
+    ticketCount: parsed.data.epic.ticketCount,
+    specCount: parsed.data.epic.specCount,
+    storyCount: parsed.data.epic.storyCount,
+    reviewCount: parsed.data.epic.reviewCount,
+    repos: parsed.data.repoIdentifiers,
+    workspaces: parsed.data.workspaces.map((workspace) => workspace.workspacePath),
+    pinned: false,
+    lastViewedAt: now,
+  };
+  const chatSeed = parsed.data.chat;
+  const seedHarness =
+    chatSeed === undefined || chatSeed === null
+      ? "claude"
+      : (readHarnessId(chatSeed.initialMessage?.settings) ?? "claude");
+  await runtime.store.mutate((state) => {
+    state.epics = state.epics.filter((row) => row.id !== epic.id);
+    state.epics.unshift(epic);
+    if (chatSeed !== undefined && chatSeed !== null) {
+      seedGuiChat(
+        state,
+        {
+          epicId: epic.id,
+          chatId: chatSeed.chatId,
+          parentId: chatSeed.parentId,
+          hostId: chatSeed.hostId,
+          title: chatSeed.title,
+          createdAt: now,
+          runSettings: null,
+          providerSession: null,
+          turns: [],
+          events: [],
+          transcriptEpoch: 0,
+          indexRevision: 0,
+          fileChangeCount: 0,
+          lastUsage: null,
+        },
+        seedHarness,
+      );
+    }
+  });
+  if (chatSeed !== undefined && chatSeed !== null) {
+    await bindEpicWorkspacesToChat(runtime, epic, chatSeed.chatId);
+  }
+  const initialTurnStarted = await startFoldedTurn(
+    runtime,
+    epic.id,
+    chatSeed === undefined || chatSeed === null ? null : chatSeed.chatId,
+    chatSeed === undefined || chatSeed === null
+      ? null
+      : chatSeed.initialMessage,
+    seedHarness,
+  );
+  return {
+    ok: true,
+    result: {
+      roomInfo: null,
+      task: toTaskLight(epic, runtime.hostId),
+      initialTurnStarted,
+    },
+  };
+};
+
+export const handleEpicListTasks: RpcHandler = (params, runtime) => {
+  const parsed = listTasksRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const filters = parsed.data.filters;
+  let rows = runtime.store.snapshot().epics;
+  if (filters !== null && filters !== undefined) {
+    if (typeof filters.query === "string" && filters.query.length > 0) {
+      const query = filters.query.toLowerCase();
+      rows = rows.filter((epic) => epic.title.toLowerCase().includes(query));
+    }
+    if (typeof filters.hostId === "string" && filters.hostId.length > 0) {
+      rows = rows.filter(() => filters.hostId === runtime.hostId);
+    }
+  }
+  const sort = parsed.data.sort ?? "recent";
+  const sorted = [...rows].sort((left, right) => {
+    if (sort === "oldest") {
+      return left.createdAt - right.createdAt;
+    }
+    if (sort === "title-asc") {
+      return left.title.localeCompare(right.title);
+    }
+    if (sort === "title-desc") {
+      return right.title.localeCompare(left.title);
+    }
+    return right.updatedAt - left.updatedAt;
+  });
+  const limit = parsed.data.limit;
+  const page = sorted.slice(0, limit);
+  return {
+    ok: true,
+    result: {
+      tasks: page.map((epic) => toTaskLight(epic, runtime.hostId)),
+      hasMore: sorted.length > page.length,
+      nextCursor: undefined,
+      facets: {
+        repos: [],
+        workspaces: [],
+        ownershipScopes: [],
+        chatHosts: [{ hostId: runtime.hostId, count: page.length }],
+      },
+    },
+  };
+};
+
+export const handleEpicUpdateTitle: RpcHandler = async (params, runtime) => {
+  const parsed = updateEpicRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const delta = parsed.data.epicDelta;
+  if (delta === null) {
+    return { ok: true, result: { updated: false } };
+  }
+  const updated = await runtime.store.mutate((state) => {
+    const index = state.epics.findIndex((epic) => epic.id === delta.id);
+    if (index < 0) {
+      return false;
+    }
+    const current = state.epics[index];
+    state.epics[index] = {
+      ...current,
+      title: delta.title ?? current.title,
+      status: delta.status ?? current.status,
+      initialUserPrompt: delta.initialUserPrompt ?? current.initialUserPrompt,
+      updatedAt: delta.updatedAt,
+    };
+    return true;
+  });
+  return { ok: true, result: { updated } };
+};
+
+export const handleEpicBatchDelete: RpcHandler = async (params, runtime) => {
+  const parsed = batchDeleteRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const results = await runtime.store.mutate((state) =>
+    parsed.data.ids.map((id) => {
+      const existed = state.epics.some((epic) => epic.id === id);
+      state.epics = state.epics.filter((epic) => epic.id !== id);
+      state.chats = state.chats.filter((chat) => chat.epicId !== id);
+      state.agents = state.agents.filter((agent) => agent.epicId !== id);
+      state.tuiAgents = state.tuiAgents.filter((agent) => agent.epicId !== id);
+      state.bindings = state.bindings.filter((binding) => binding.epicId !== id);
+      return { taskId: id, success: existed };
+    }),
+  );
+  return { ok: true, result: { results } };
+};
+
+export const handleEpicCreateChat: RpcHandler = async (params, runtime) => {
+  const parsed = createChatRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const epic = runtime.store
+    .snapshot()
+    .epics.find((row) => row.id === parsed.data.epicId);
+  if (epic === undefined) {
+    return { ok: false, code: "RPC_ERROR", message: "Epic not found" };
+  }
+  const harnessId =
+    readHarnessId(parsed.data.initialMessage?.settings) ?? "claude";
+  await runtime.store.mutate((state) => {
+    seedGuiChat(
+      state,
+      {
+        epicId: parsed.data.epicId,
+        chatId: parsed.data.chatId,
+        parentId: parsed.data.parentId,
+        hostId: parsed.data.hostId,
+        title: parsed.data.title,
+        createdAt: Date.now(),
+        runSettings: null,
+        providerSession: null,
+        turns: [],
+        events: [],
+        transcriptEpoch: 0,
+        indexRevision: 0,
+        fileChangeCount: 0,
+        lastUsage: null,
+      },
+      harnessId,
+    );
+  });
+  await bindEpicWorkspacesToChat(runtime, epic, parsed.data.chatId);
+  const initialTurnStarted = await startFoldedTurn(
+    runtime,
+    parsed.data.epicId,
+    parsed.data.chatId,
+    parsed.data.initialMessage ?? null,
+    harnessId,
+  );
+  return {
+    ok: true,
+    result: { chatId: parsed.data.chatId, initialTurnStarted },
+  };
+};
+
+export const handleEpicRenameChat: RpcHandler = async (params, runtime) => {
+  const parsed = renameChatRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const updated = await runtime.store.mutate((state) => {
+    const chatIndex = state.chats.findIndex(
+      (row) =>
+        row.chatId === parsed.data.chatId && row.epicId === parsed.data.epicId,
+    );
+    if (chatIndex < 0) {
+      return false;
+    }
+    const chat = state.chats[chatIndex];
+    if (chat === undefined) {
+      return false;
+    }
+    state.chats[chatIndex] = { ...chat, title: parsed.data.title };
+    const agentIndex = state.agents.findIndex(
+      (row) => row.id === parsed.data.chatId,
+    );
+    if (agentIndex >= 0) {
+      state.agents[agentIndex] = {
+        ...state.agents[agentIndex],
+        title: parsed.data.title,
+      };
+    }
+    return true;
+  });
+  return { ok: true, result: { updated } };
+};
+
+export const handleEpicDeleteChat: RpcHandler = async (params, runtime) => {
+  const parsed = deleteChatRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  runtime.guiRuns.requestStop(parsed.data.chatId);
+  runtime.guiRuns.kill(parsed.data.chatId);
+  const deleted = await runtime.store.mutate((state) => {
+    const existed = state.chats.some(
+      (row) =>
+        row.chatId === parsed.data.chatId && row.epicId === parsed.data.epicId,
+    );
+    state.chats = state.chats.filter(
+      (row) => row.chatId !== parsed.data.chatId,
+    );
+    state.agents = state.agents.filter((row) => row.id !== parsed.data.chatId);
+    state.bindings = state.bindings.filter(
+      (row) =>
+        !(row.ownerKind === "chat" && row.ownerId === parsed.data.chatId),
+    );
+    return existed;
+  });
+  runtime.guiRuns.endPrint(parsed.data.chatId, null);
+  runtime.queue.clear(parsed.data.chatId);
+  return { ok: true, result: { deleted } };
+};
+
+export const handleEpicUpdateChatRunSettings: RpcHandler = async (
+  params,
+  runtime,
+) => {
+  const latest = updateChatRunSettingsRequestSchemaV11.safeParse(params);
+  const parsed = latest.success
+    ? latest
+    : updateChatRunSettingsRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const harnessId = readHarnessId(parsed.data.settings);
+  const updated = await persistChatRunSettings(runtime, {
+    epicId: parsed.data.epicId,
+    chatId: parsed.data.chatId,
+    settings: parsed.data.settings,
+    harnessId,
+  });
+  return { ok: true, result: { updated } };
+};
+
+export const handleEpicGetChatRunSettings: RpcHandler = (params, runtime) => {
+  const parsed = getChatRunSettingsRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const chat = runtime.store
+    .snapshot()
+    .chats.find(
+      (row) =>
+        row.chatId === parsed.data.chatId && row.epicId === parsed.data.epicId,
+    );
+  if (chat === undefined) {
+    return { ok: false, code: "RPC_ERROR", message: "Chat not found" };
+  }
+  return { ok: true, result: { settings: chat.runSettings } };
+};
+
+export const handleEpicRecordViewed: RpcHandler = async (params, runtime) => {
+  const parsed = recordEpicViewedRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const viewedAt = Date.now();
+  const updated = await runtime.store.mutate((state) => {
+    const index = state.epics.findIndex((epic) => epic.id === parsed.data.epicId);
+    if (index < 0) {
+      return false;
+    }
+    state.epics[index] = { ...state.epics[index], lastViewedAt: viewedAt };
+    return true;
+  });
+  if (!updated) {
+    return { ok: false, code: "RPC_ERROR", message: "Epic not found" };
+  }
+  return { ok: true, result: { viewedAt } };
+};
+
+export const handleEpicGetTaskContexts: RpcHandler = (params, runtime) => {
+  const parsed = getTaskContextsRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const epics = runtime.store.snapshot().epics;
+  const tasks: { [taskId: string]: unknown } = {};
+  for (const taskId of parsed.data.taskIds) {
+    const epic = epics.find((row) => row.id === taskId);
+    if (epic === undefined) {
+      tasks[taskId] = { status: "confirmed-absent" };
+    } else {
+      tasks[taskId] = {
+        status: "found",
+        task: toTaskLight(epic, runtime.hostId),
+      };
+    }
+  }
+  return { ok: true, result: { tasks } };
+};
+
+export const handleEpicListChatRecords: RpcHandler = (params, runtime) => {
+  const parsedV11 = listChatRecordsRequestV11Schema.safeParse(params);
+  const parsedV10 = listChatRecordsRequestSchema.safeParse(params);
+  let epicId: string;
+  if (parsedV11.success) {
+    epicId = parsedV11.data.epicId;
+  } else if (parsedV10.success) {
+    epicId = parsedV10.data.epicId;
+  } else {
+    return { ok: false, code: "RPC_ERROR", message: parsedV10.error.message };
+  }
+  const snapshot = runtime.store.snapshot();
+  const chats = snapshot.chats
+    .filter((chat) => chat.epicId === epicId)
+    .map((chat) => {
+      const harnessId =
+        snapshot.agents.find((agent) => agent.id === chat.chatId)?.harnessId ??
+        null;
+      return {
+        chatId: chat.chatId,
+        ownerUserId: chatOwnerUserId(chat),
+        originHostId: chat.hostId,
+        title: derivedChatTitle(chat),
+        isTitleEditedByUser: chat.title.length > 0,
+        parentChatId: chat.parentId,
+        createdAt: chat.createdAt,
+        updatedAt: latestTurnTime(chat),
+        archived: false,
+        archivedAt: null,
+        runSettingsSummary: harnessId,
+        revision: latestTurnTime(chat),
+        visibility: "private" as const,
+        origin: "own" as const,
+        docResident: false,
+      };
+    });
+  return { ok: true, result: { chats } };
+};
+
+export const handleEpicListCollaborators: RpcHandler = (params) => {
+  const parsed = listEpicCollaboratorsRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  return {
+    ok: true,
+    result: { collaborators: [], collaboratorsAvailable: false },
+  };
+};
+
+export const handleEpicMentionEpics: RpcHandler = (params, runtime) => {
+  const parsed = epicMentionEpicsRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const query = parsed.data.query.toLowerCase();
+  const entries = runtime.store
+    .snapshot()
+    .epics.filter(
+      (epic) => query.length === 0 || epic.title.toLowerCase().includes(query),
+    )
+    .slice(0, parsed.data.limit)
+    .map((epic) => ({
+      kind: "epic" as const,
+      id: `epic:${epic.id}`,
+      token: `epic:${epic.id}`,
+      epicId: epic.id,
+      label: epic.title,
+      description: epic.initialUserPrompt,
+      status: epic.status,
+      updatedAt: epic.updatedAt,
+    }));
+  return { ok: true, result: { entries } };
+};
+
+export const handleEpicListCommentThreads: RpcHandler = (params) => {
+  const parsed = listCommentThreadsRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  return { ok: true, result: { threads: [] } };
+};
+
+export const handleEpicMentionArtifacts: RpcHandler = (params) => {
+  const parsed = epicMentionArtifactsRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  return { ok: true, result: { entries: [] } };
+};
+
+async function bindEpicWorkspacesToChat(
+  runtime: HostRuntime,
+  epic: StoredEpic,
+  chatId: string,
+): Promise<void> {
+  if (epic.workspaces.length === 0) {
+    return;
+  }
+  await createWorktreeBinding(runtime, {
+    epicId: epic.id,
+    ownerId: chatId,
+    ownerKind: "chat",
+    entries: epic.workspaces.map((workspacePath, index) => ({
+      kind: "local" as const,
+      workspacePath,
+      repoIdentifier: null,
+      isPrimary: index === 0,
+    })),
+  });
+}
+
+async function startFoldedTurn(
+  runtime: HostRuntime,
+  epicId: string,
+  chatId: string | null,
+  initialMessage: {
+    readonly messageId: string;
+    readonly content: unknown;
+    readonly sender: unknown;
+    readonly settings: unknown;
+  } | null,
+  harnessId: string,
+): Promise<boolean> {
+  if (chatId === null || initialMessage === null) {
+    return false;
+  }
+  const prompt = extractPlainText(initialMessage.content);
+  const turn = await persistGuiUserTurn(runtime, {
+    epicId,
+    chatId,
+    messageId: initialMessage.messageId,
+    prompt,
+    content: initialMessage.content,
+    userId: readUserId(initialMessage.sender),
+    harnessId,
+    runSettings: initialMessage.settings,
+  });
+  if (turn === null) {
+    return false;
+  }
+  beginGuiPrintTurn(runtime, {
+    epicId,
+    chatId,
+    harnessId,
+    prompt,
+    responseId: turn.responseId,
+    model: readModelSlug(initialMessage.settings),
+  });
+  return true;
+}
+
+function latestTurnTime(chat: StoredChat): number {
+  const last = chat.turns[chat.turns.length - 1];
+  return last === undefined ? chat.createdAt : last.timestamp;
+}
+
+function chatOwnerUserId(chat: StoredChat): string {
+  for (const turn of chat.turns) {
+    if (turn.userId !== null && turn.userId.length > 0) {
+      return turn.userId;
+    }
+  }
+  return LOCAL_USER_ID;
+}
+
+function toTaskLight(epic: StoredEpic, hostId: string) {
+  return {
+    pinned: epic.pinned,
+    chatHostIds: [hostId],
+    epic: {
+      light: {
+        id: epic.id,
+        title:
+          epic.title.length > 0
+            ? epic.title
+            : titleFromPrompt(epic.initialUserPrompt),
+        initialUserPrompt: epic.initialUserPrompt,
+        ticketCount: epic.ticketCount,
+        specCount: epic.specCount,
+        storyCount: epic.storyCount,
+        reviewCount: epic.reviewCount,
+        status: epic.status,
+        createdAt: epic.createdAt,
+        updatedAt: epic.updatedAt,
+        createdBy: epic.createdBy,
+        version: epic.version,
+      },
+      permission: {
+        role: "owner",
+        accessType: "direct",
+        grantedBy: epic.createdBy,
+        grantedAt: epic.createdAt,
+      },
+      repos: epic.repos.map((repo) => ({
+        task: { taskId: epic.id, taskType: "epic" as const },
+        repoIdentifier: repo,
+        createdAt: epic.createdAt,
+        createdBy: epic.createdBy,
+      })),
+      workspaces: epic.workspaces.map((workspacePath) => ({
+        task: { taskId: epic.id, taskType: "epic" as const },
+        hostId,
+        workspacePath,
+        createdAt: epic.createdAt,
+      })),
+      roomInfo: null,
+    },
+    phase: null,
+  };
+}

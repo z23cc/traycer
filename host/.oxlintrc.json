@@ -1,0 +1,43 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": [],
+  "categories": {
+    "correctness": "off"
+  },
+  "env": {
+    "builtin": true
+  },
+  "ignorePatterns": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/dist-*/**",
+    "**/out/**",
+    "**/@types/**",
+    "**/*.d.ts",
+    "**/*.cjs",
+    "**/*.mjs"
+  ],
+  "overrides": [
+    {
+      "files": ["**/*.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["@traycer/protocol/**/_internal/**"],
+                "message": "Do not import from `@traycer/protocol/.../_internal/...`. Use `getRecordSchema(<registry>, \"<record-name>\", \"latest\")` to obtain a versioned record schema, or use `RecordValue<typeof <registry>, \"<record-name>\">` for the type."
+              }
+            ]
+          }
+        ]
+      },
+      "env": {
+        "es2026": true,
+        "node": true
+      },
+      "plugins": ["typescript"]
+    }
+  ]
+}

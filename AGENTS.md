@@ -16,6 +16,7 @@ are **not** here — the CLI provisions a signed host from GitHub Releases; see
 | Path                   | Package                        | Role                             |
 | ---------------------- | ------------------------------ | -------------------------------- |
 | `protocol/`            | `@traycer/protocol`            | Client⇄host wire contract        |
+| `host/`                | `@traycer/host`                | Local host daemon (RPC / stream) |
 | `clients/traycer-cli/` | `@traycer-clients/traycer-cli` | CLI (host install, auth, agents) |
 | `clients/shared/`      | `@traycer-clients/shared`      | Transport / auth / formatting    |
 | `clients/gui-app/`     | `@traycer-clients/gui-app`     | GUI renderer                     |

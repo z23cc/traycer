@@ -35,6 +35,7 @@ bunx nx run @traycer-clients/traycer-cli:build
 | Path                   | Package                                         |
 | ---------------------- | ----------------------------------------------- |
 | `protocol/`            | `@traycer/protocol` — client⇄host wire contract |
+| `host/`                | `@traycer/host` — local host daemon             |
 | `clients/traycer-cli/` | the `traycer` CLI                               |
 | `clients/shared/`      | shared transport / auth / formatting            |
 | `clients/gui-app/`     | GUI renderer                                    |

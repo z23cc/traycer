@@ -23,6 +23,7 @@ Install the hygiene hooks once with `pipx install pre-commit && pre-commit insta
 | Path                   | Package                        | Responsibility                                                                      |
 | ---------------------- | ------------------------------ | ----------------------------------------------------------------------------------- |
 | `protocol/`            | `@traycer/protocol`            | The versioned client⇄host wire contract (schemas, RPC, framework versioning).       |
+| `host/`                | `@traycer/host`                | Local host daemon (loopback `/rpc` + `/stream`).                                    |
 | `clients/traycer-cli/` | `@traycer-clients/traycer-cli` | The `traycer` CLI — provisions/upgrades the host, auth, agent & workspace commands. |
 | `clients/shared/`      | `@traycer-clients/shared`      | Transport (WebSocket/RPC), auth (PKCE/bearer), comment & agent formatting.          |
 | `clients/gui-app/`     | `@traycer-clients/gui-app`     | The GUI renderer (React).                                                           |

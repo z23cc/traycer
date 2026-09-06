@@ -1,0 +1,37 @@
+{
+  "name": "@traycer/host",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Traycer local host — versioned RPC/stream daemon",
+  "license": "MIT",
+  "bin": {
+    "traycer-host": "./src/index.ts"
+  },
+  "type": "module",
+  "scripts": {
+    "traycer-host": "bun run src/index.ts",
+    "compile": "tsgo --noEmit",
+    "lint": "oxlint -c oxlint.config.ts --fix --deny-warnings .",
+    "format": "oxfmt .",
+    "format:check": "oxfmt --check .",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "ws": "^8.18.3",
+    "yjs": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@traycer/protocol": "workspace:*",
+    "@types/node": "catalog:",
+    "@types/ws": "^8.18.1",
+    "@typescript-eslint/eslint-plugin": "catalog:",
+    "@typescript-eslint/parser": "catalog:",
+    "eslint": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}
