@@ -151,7 +151,7 @@ export async function awaitProviderLogin(
     await job.done;
   }
   const finished = LAST_FINISHED.get(providerId);
-  const listed = await listProviderCliStates(store);
+  const listed = await listProviderCliStates(store, false);
   const found = listed.providers.find((row) => row.providerId === providerId);
   return {
     state: found === undefined ? null : found,

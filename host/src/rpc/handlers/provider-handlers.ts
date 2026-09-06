@@ -16,6 +16,7 @@ import {
   providersStartTerminalLoginRequestSchemaV20,
   providersSubmitLoginCodeRequestSchema,
   providersTouchLoginRequestSchema,
+  providersNativeMutateRequestSchema,
 } from "@traycer/protocol/host/provider-schemas";
 import type { ProviderId } from "@traycer/protocol/host/provider-ids";
 import type { TerminalScope } from "@traycer/protocol/host/terminal/unary-schemas";
@@ -25,6 +26,7 @@ import {
   clearProviderApiKey,
   deleteProviderEnvOverride,
   listProviderCliStates,
+  UNSUPPORTED_NATIVE,
   removeCustomPath,
   setProviderApiKey,
   setProviderEnabled,
@@ -42,9 +44,32 @@ import {
 } from "../../providers/login";
 import type { RpcHandler } from "./types";
 
-export const handleProvidersList: RpcHandler = async (_params, runtime) => {
-  const listed = await listProviderCliStates(runtime.store);
-  return { ok: true, result: listed };
+export const handleProvidersList: RpcHandler = async (params, runtime) => {
+  const queried =
+    params !== null &&
+    typeof params === "object" &&
+    !Array.isArray(params) &&
+    (params as { readonly native?: unknown }).native !== undefined &&
+    (params as { readonly native?: unknown }).native !== null;
+  return {
+    ok: true,
+    result: await listProviderCliStates(runtime.store, queried),
+  };
+};
+
+/**
+ * MCP, plugin and skill config belongs to each provider CLI's own files, and
+ * this host manages none of them - it advertises no such tab in
+ * `nativeCapabilities`, so the surface is not reachable in the first place.
+ * `unsupported_action` says that; the analog's `{ok:true, servers: []}` said
+ * the mutation had been applied and the provider had no servers left.
+ */
+export const handleProvidersNativeMutate: RpcHandler = (params) => {
+  const parsed = providersNativeMutateRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  return { ok: true, result: { result: UNSUPPORTED_NATIVE } };
 };
 
 export const handleProvidersDetectVersion: RpcHandler = async (params) => {
