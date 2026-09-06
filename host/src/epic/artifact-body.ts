@@ -1,19 +1,46 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import * as Y from "yjs";
 import type { HostRuntime } from "../runtime";
 import type { StoredArtifact } from "../store/host-store";
+
+export function artifactFolderSegments(
+  artifacts: readonly StoredArtifact[],
+  artifact: StoredArtifact,
+): readonly string[] {
+  const byId = new Map<string, StoredArtifact>();
+  for (const row of artifacts) {
+    if (row.epicId === artifact.epicId) {
+      byId.set(row.artifactId, row);
+    }
+  }
+  const segments: string[] = [];
+  const seen = new Set<string>();
+  let cursor: StoredArtifact | undefined = artifact;
+  while (cursor !== undefined) {
+    if (seen.has(cursor.artifactId)) {
+      break;
+    }
+    seen.add(cursor.artifactId);
+    segments.unshift(cursor.folderName);
+    cursor = cursor.parentId === null ? undefined : byId.get(cursor.parentId);
+  }
+  return segments;
+}
 
 export function artifactIndexPath(
   runtime: HostRuntime,
   artifact: StoredArtifact,
 ): string {
+  const rows = runtime.store
+    .snapshot()
+    .artifacts.filter((row) => row.epicId === artifact.epicId);
   return join(
     runtime.dataDir,
     "epics",
     artifact.epicId,
     "artifacts",
-    artifact.folderName,
+    ...artifactFolderSegments(rows, artifact),
     "index.md",
   );
 }
@@ -66,11 +93,7 @@ export function seedXmlFragmentFromMarkdown(
       if (trimmed.length === 0) {
         continue;
       }
-      const paragraph = new Y.XmlElement("paragraph");
-      const text = new Y.XmlText();
-      text.insert(0, trimmed);
-      paragraph.insert(0, [text]);
-      fragment.push([paragraph]);
+      fragment.push([xmlBlockFromMarkdown(trimmed)]);
     }
   };
   if (doc === null) {
@@ -120,20 +143,41 @@ export async function writeArtifactMarkdownFile(
   artifact: StoredArtifact,
   body: string,
 ): Promise<void> {
-  const dir = join(
-    runtime.dataDir,
-    "epics",
-    artifact.epicId,
-    "artifacts",
-    artifact.folderName,
-  );
-  await mkdir(dir, { recursive: true });
+  const path = artifactIndexPath(runtime, artifact);
+  await mkdir(dirname(path), { recursive: true });
   const title = artifact.title.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
   const frontMatter = `---\ntitle: "${title}"\nkind: ${artifact.kind}\n---\n`;
   const trimmed = body.replace(/^\n+/u, "").replace(/\s+$/u, "");
   const file =
     trimmed.length === 0 ? frontMatter : `${frontMatter}\n${trimmed}\n`;
-  await writeFile(artifactIndexPath(runtime, artifact), file, "utf8");
+  await writeFile(path, file, "utf8");
+}
+
+function xmlBlockFromMarkdown(trimmed: string): Y.XmlElement {
+  let level = 0;
+  while (level < trimmed.length && trimmed[level] === "#") {
+    level += 1;
+  }
+  if (
+    level >= 1 &&
+    level <= 6 &&
+    (trimmed.length === level || trimmed[level] === " ")
+  ) {
+    const heading = new Y.XmlElement("heading");
+    heading.setAttribute("level", String(level));
+    const text = new Y.XmlText();
+    const content = trimmed.slice(level).trim();
+    if (content.length > 0) {
+      text.insert(0, content);
+    }
+    heading.insert(0, [text]);
+    return heading;
+  }
+  const paragraph = new Y.XmlElement("paragraph");
+  const text = new Y.XmlText();
+  text.insert(0, trimmed);
+  paragraph.insert(0, [text]);
+  return paragraph;
 }
 
 function xmlElementText(element: Y.XmlElement): string {

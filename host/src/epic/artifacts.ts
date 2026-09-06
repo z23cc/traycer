@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { rm } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, rename, rm } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { deriveArtifactPathLayoutRootAgnostic } from "@traycer/protocol/common/artifact-path";
 import {
+  artifactFolderSegments,
+  artifactIndexPath,
   readArtifactMarkdown,
   splitFrontMatter,
   writeArtifactMarkdownFile,
@@ -24,7 +27,7 @@ export async function createArtifact(
   }
   const artifactId = randomUUID();
   const now = Date.now();
-  const folderName = uniqueFolderName(runtime, epicId, title);
+  const folderName = uniqueFolderName(runtime, epicId, parentId, title, null);
   const status = kind === "ticket" || kind === "story" ? 0 : null;
   const created: StoredArtifact = {
     epicId,
@@ -63,14 +66,14 @@ export async function deleteArtifact(
   const now = Date.now();
   const removedIds = descendantArtifactIds(runtime, epicId, artifactId);
   removedIds.add(artifactId);
-  const removedFolders: string[] = [];
+  const before = runtime.store
+    .snapshot()
+    .artifacts.filter((row) => row.epicId === epicId);
+  const removedRows = before.filter((row) => removedIds.has(row.artifactId));
   await runtime.store.mutate((state) => {
     const removed = state.artifacts.filter(
       (row) => row.epicId === epicId && removedIds.has(row.artifactId),
     );
-    for (const row of removed) {
-      removedFolders.push(row.folderName);
-    }
     state.artifacts = state.artifacts.filter(
       (row) => !(row.epicId === epicId && removedIds.has(row.artifactId)),
     );
@@ -85,8 +88,8 @@ export async function deleteArtifact(
       epic.updatedAt = now;
     }
   });
-  for (const folderName of removedFolders) {
-    await removeArtifactDir(runtime, epicId, folderName);
+  for (const row of removedRows) {
+    await removeArtifactDir(runtime, before, row);
   }
   return true;
 }
@@ -169,7 +172,18 @@ export async function reparentArtifact(
   if (wouldCycle(runtime, epicId, artifactId, newParentId)) {
     return false;
   }
+  const before = runtime.store
+    .snapshot()
+    .artifacts.filter((row) => row.epicId === epicId);
+  const from = artifactDir(runtime, before, existing);
   const now = Date.now();
+  const nextName = uniqueFolderName(
+    runtime,
+    epicId,
+    newParentId,
+    existing.title,
+    artifactId,
+  );
   await runtime.store.mutate((state) => {
     const row = state.artifacts.find(
       (entry) => entry.epicId === epicId && entry.artifactId === artifactId,
@@ -178,8 +192,17 @@ export async function reparentArtifact(
       return;
     }
     row.parentId = newParentId;
+    row.folderName = nextName;
     row.updatedAt = now;
   });
+  const updated = findArtifact(runtime, epicId, artifactId);
+  if (updated !== null) {
+    const after = runtime.store
+      .snapshot()
+      .artifacts.filter((row) => row.epicId === epicId);
+    const to = artifactDir(runtime, after, updated);
+    await moveArtifactDir(from, to);
+  }
   return true;
 }
 
@@ -188,33 +211,33 @@ export function resolveArtifactByPath(
   epicId: string,
   filePath: string,
 ): StoredArtifact | null {
-  const needle = `/artifacts/`;
-  const index = filePath.lastIndexOf(needle);
-  if (index < 0) {
-    return (
-      runtime.store
-        .snapshot()
-        .artifacts.find(
-          (row) =>
-            row.epicId === epicId &&
-            (filePath.endsWith(`/${row.folderName}/index.md`) ||
-              filePath.endsWith(`/${row.artifactId}/index.md`)),
-        ) ?? null
-    );
-  }
-  const rest = filePath.slice(index + needle.length);
-  const folder = rest.split("/")[0];
-  if (folder === undefined || folder.length === 0) {
-    return null;
+  const layout = deriveArtifactPathLayoutRootAgnostic(filePath, epicId);
+  const rows = runtime.store
+    .snapshot()
+    .artifacts.filter((row) => row.epicId === epicId);
+  if (layout !== null) {
+    const chain = [...layout.parentSegments, layout.folderName];
+    let parentId: string | null = null;
+    let found: StoredArtifact | null = null;
+    for (const segment of chain) {
+      const match =
+        rows.find(
+          (row) => row.parentId === parentId && row.folderName === segment,
+        ) ?? null;
+      if (match === null) {
+        return null;
+      }
+      found = match;
+      parentId = match.artifactId;
+    }
+    return found;
   }
   return (
-    runtime.store
-      .snapshot()
-      .artifacts.find(
-        (row) =>
-          row.epicId === epicId &&
-          (row.folderName === folder || row.artifactId === folder),
-      ) ?? null
+    rows.find(
+      (row) =>
+        filePath.endsWith(`/${row.folderName}/index.md`) ||
+        filePath.endsWith(`/${row.artifactId}/index.md`),
+    ) ?? null
   );
 }
 
@@ -233,8 +256,14 @@ export function listArtifacts(
     .slice(0, limit);
 }
 
-export function artifactRelativePath(artifact: StoredArtifact): string {
-  return `artifacts/${artifact.folderName}/index.md`;
+export function artifactRelativePath(
+  runtime: HostRuntime,
+  artifact: StoredArtifact,
+): string {
+  const rows = runtime.store
+    .snapshot()
+    .artifacts.filter((row) => row.epicId === artifact.epicId);
+  return `artifacts/${artifactFolderSegments(rows, artifact).join("/")}/index.md`;
 }
 
 export function findArtifact(
@@ -260,13 +289,20 @@ function findEpic(runtime: HostRuntime, epicId: string): StoredEpic | null {
 function uniqueFolderName(
   runtime: HostRuntime,
   epicId: string,
+  parentId: string | null,
   title: string,
+  excludeId: string | null,
 ): string {
   const base = slugify(title);
   const taken = new Set(
     runtime.store
       .snapshot()
-      .artifacts.filter((row) => row.epicId === epicId)
+      .artifacts.filter(
+        (row) =>
+          row.epicId === epicId &&
+          row.parentId === parentId &&
+          row.artifactId !== excludeId,
+      )
       .map((row) => row.folderName),
   );
   if (!taken.has(base)) {
@@ -343,10 +379,28 @@ function wouldCycle(
 
 function artifactDir(
   runtime: HostRuntime,
-  epicId: string,
-  folderName: string,
+  rows: readonly StoredArtifact[],
+  artifact: StoredArtifact,
 ): string {
-  return join(runtime.dataDir, "epics", epicId, "artifacts", folderName);
+  return join(
+    runtime.dataDir,
+    "epics",
+    artifact.epicId,
+    "artifacts",
+    ...artifactFolderSegments(rows, artifact),
+  );
+}
+
+async function moveArtifactDir(from: string, to: string): Promise<void> {
+  if (from === to) {
+    return;
+  }
+  await mkdir(dirname(to), { recursive: true });
+  try {
+    await rename(from, to);
+  } catch {
+    return;
+  }
 }
 
 async function writeArtifactMarkdown(
@@ -360,10 +414,10 @@ async function writeArtifactMarkdown(
 
 async function removeArtifactDir(
   runtime: HostRuntime,
-  epicId: string,
-  folderName: string,
+  rows: readonly StoredArtifact[],
+  artifact: StoredArtifact,
 ): Promise<void> {
-  await rm(artifactDir(runtime, epicId, folderName), {
+  await rm(artifactDir(runtime, rows, artifact), {
     recursive: true,
     force: true,
   });

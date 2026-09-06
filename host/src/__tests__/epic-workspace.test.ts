@@ -562,6 +562,100 @@ describe("epic and workspace RPCs", () => {
     );
   });
 
+  it("nests child artifact folders on disk and resolves the chain", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "traycer-host-"));
+    started = await startHost({
+      argv: ["--host-data-dir", tempDir],
+      listenHost: "127.0.0.1",
+      listenPort: 0,
+    });
+    await call(
+      started.rpcUrl,
+      "epic.create",
+      { major: 1, minor: 0 },
+      {
+        epic: {
+          id: "epic-nest",
+          title: "Nested",
+          initialUserPrompt: "",
+          ticketCount: 0,
+          specCount: 0,
+          storyCount: 0,
+          reviewCount: 0,
+          status: "active",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          createdBy: "local",
+          version: "2.0.0",
+        },
+        repoIdentifiers: [],
+        workspaces: [],
+        chat: null,
+      },
+    );
+    const parent = (await call(
+      started.rpcUrl,
+      "epic.createArtifact",
+      { major: 1, minor: 0 },
+      {
+        epicId: "epic-nest",
+        parentId: null,
+        artifactType: "ticket",
+        title: "Ticket breakdown",
+      },
+    )) as { artifactId: string };
+    const child = (await call(
+      started.rpcUrl,
+      "epic.createArtifact",
+      { major: 1, minor: 0 },
+      {
+        epicId: "epic-nest",
+        parentId: parent.artifactId,
+        artifactType: "ticket",
+        title: "Something",
+      },
+    )) as { artifactId: string };
+    const nestedPath = join(
+      tempDir,
+      "epics",
+      "epic-nest",
+      "artifacts",
+      "ticket-breakdown",
+      "something",
+      "index.md",
+    );
+    expect(await readFile(nestedPath, "utf8")).toContain("kind: ticket");
+    const resolved = await call(
+      started.rpcUrl,
+      "epic.resolveArtifactByPath",
+      { major: 1, minor: 0 },
+      { epicId: "epic-nest", filePath: nestedPath },
+    );
+    expect(resolved).toEqual({
+      artifact: { artifactId: child.artifactId, kind: "ticket" },
+    });
+    const reparented = await call(
+      started.rpcUrl,
+      "epic.reparentArtifact",
+      { major: 1, minor: 0 },
+      {
+        epicId: "epic-nest",
+        artifactId: child.artifactId,
+        newParentId: null,
+      },
+    );
+    expect(reparented).toEqual({ updated: true });
+    const rootPath = join(
+      tempDir,
+      "epics",
+      "epic-nest",
+      "artifacts",
+      "something",
+      "index.md",
+    );
+    expect(await readFile(rootPath, "utf8")).toContain("kind: ticket");
+  });
+
   it("loads index.md into the artifact room and writes a room update back", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "traycer-host-"));
     started = await startHost({

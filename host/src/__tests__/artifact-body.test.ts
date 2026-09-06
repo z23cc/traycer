@@ -15,6 +15,13 @@ describe("artifact markdown body", () => {
     });
   });
 
+  it("seeds markdown headings as Tiptap heading nodes", () => {
+    const doc = new Y.Doc();
+    const fragment = doc.getXmlFragment("artifact-body:one");
+    seedXmlFragmentFromMarkdown(fragment, "# Title\n\nHello");
+    expect(xmlFragmentToMarkdown(fragment)).toBe("# Title\n\nHello");
+  });
+
   it("seeds empty Tiptap paragraphs from markdown and round-trips text", () => {
     const doc = new Y.Doc();
     const fragment = doc.getXmlFragment("artifact-body:one");

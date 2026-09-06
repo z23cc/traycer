@@ -158,7 +158,7 @@ export type StoredArtifact = {
   readonly kind: string;
   title: string;
   parentId: string | null;
-  readonly folderName: string;
+  folderName: string;
   readonly artifactRoomId: string;
   readonly createdAt: number;
   updatedAt: number;

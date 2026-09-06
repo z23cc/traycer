@@ -225,7 +225,7 @@ export function listCommentsArtifacts(
     const path =
       artifact === undefined
         ? `artifacts/${thread.artifactId}/index.md`
-        : artifactRelativePath(artifact);
+        : artifactRelativePath(runtime, artifact);
     if (wantedPaths !== null && !wantedPaths.has(path)) {
       continue;
     }
@@ -246,7 +246,9 @@ export function listCommentsArtifacts(
   const rows: CommentsListArtifact[] = [];
   for (const [artifactPath, bucket] of grouped) {
     const artifact =
-      artifacts.find((row) => artifactRelativePath(row) === artifactPath) ??
+      artifacts.find(
+        (row) => artifactRelativePath(runtime, row) === artifactPath,
+      ) ??
       artifacts.find((row) => row.artifactId === pathArtifactId(artifactPath));
     rows.push({
       artifactPath,
@@ -293,7 +295,8 @@ export async function setThreadStatusByPath(
     .snapshot()
     .artifacts.find(
       (row) =>
-        row.epicId === epicId && artifactRelativePath(row) === artifactPath,
+        row.epicId === epicId &&
+        artifactRelativePath(runtime, row) === artifactPath,
     );
   const status = resolved ? "resolved" : "open";
   if (artifact === undefined) {

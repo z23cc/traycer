@@ -407,7 +407,7 @@ function mentionArtifacts(
         artifactId: row.artifactId,
         artifactType,
         label: row.title,
-        description: artifactRelativePath(row),
+        description: artifactRelativePath(runtime, row),
         status: row.status,
         updatedAt: row.updatedAt,
       };
