@@ -1,5 +1,6 @@
 import type { TuiActivityOracle } from "./agent/activity";
 import type { AgentInbox } from "./agent/inbox";
+import type { InboxMonitorRegistry } from "./stream/inbox";
 import type { GuiRunRegistry } from "./gui/deliver";
 import type { NotificationHub } from "./gui/notifications";
 import type { ChatQueue } from "./gui/queue";
@@ -19,6 +20,7 @@ export type HostRuntime = {
   readonly terminals: TerminalRegistry;
   readonly pty: PtyManager;
   readonly inbox: AgentInbox;
+  readonly inboxMonitors: InboxMonitorRegistry;
   readonly tuiActivity: TuiActivityOracle;
   readonly guiRuns: GuiRunRegistry;
   readonly queue: ChatQueue;

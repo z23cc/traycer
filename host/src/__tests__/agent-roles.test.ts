@@ -9,6 +9,7 @@ import {
 } from "../rpc/handlers/role-handlers";
 import { TRAYCER_SYSTEM_SENDER_AGENT_ID } from "@traycer/protocol/host/agent/roles";
 import { handleEpicCreate } from "../rpc/handlers/epic-handlers";
+import { InboxMonitor } from "../stream/inbox";
 import { startHost, type StartedHost } from "../start-host";
 import type { StoredChat, StoredTuiAgent } from "../store/host-store";
 
@@ -61,17 +62,76 @@ describe("agent role claims", () => {
     expect(second.overlapping[0]).toMatchObject({ agentId: "chat-1" });
   });
 
-  it("tells TUI peers and classifies GUI peers unreachable", async () => {
+  it("classifies every peer with no attached monitor unreachable", async () => {
     const host = await boot();
     await seed(host);
     const claimed = await claim(host, "chat-1", "Reviewer", "host");
+    // Awareness is NEVER queued: nothing was attempted for a peer with no
+    // monitor connected right now, and it reads current roles from its next
+    // prompt instead.
     expect(claimed.awareness).toEqual({
-      deliveredTo: ["tui-1"],
+      deliveredTo: [],
       deferredToPrompt: [],
-      unreachable: ["chat-2"],
+      unreachable: ["tui-1", "chat-2"],
       failed: [],
     });
-    expect(host.runtime.inbox.read("tui-1", null).messages).toHaveLength(1);
+    expect(host.runtime.inbox.read("tui-1", null).messages).toHaveLength(0);
+  });
+
+  it("delivers awareness to an attached monitor that negotiated it", async () => {
+    const host = await boot();
+    await seed(host);
+    const sent: unknown[] = [];
+    const socket = {
+      OPEN: 1,
+      readyState: 1,
+      send: (payload: string) => sent.push(JSON.parse(payload)),
+    };
+    host.runtime.inboxMonitors.add(
+      socket as never,
+      new InboxMonitor(socket as never, host.runtime, "tui-1", "epic-1", 2),
+    );
+    const claimed = await claim(host, "chat-1", "Reviewer", "host");
+    expect(claimed.awareness).toMatchObject({
+      deliveredTo: ["tui-1"],
+      unreachable: ["chat-2"],
+    });
+    expect(sent).toEqual([
+      {
+        kind: "role-awareness",
+        hasBinaryPayload: false,
+        event: {
+          kind: "role-claimed",
+          epicId: "epic-1",
+          claim: expect.objectContaining({
+            agentId: "chat-1",
+            role: "Reviewer",
+          }),
+          at: expect.any(Number),
+        },
+      },
+    ]);
+  });
+
+  it("never sends the awareness frame a @1.0 monitor did not negotiate", async () => {
+    const host = await boot();
+    await seed(host);
+    const sent: unknown[] = [];
+    const socket = {
+      OPEN: 1,
+      readyState: 1,
+      send: (payload: string) => sent.push(JSON.parse(payload)),
+    };
+    host.runtime.inboxMonitors.add(
+      socket as never,
+      new InboxMonitor(socket as never, host.runtime, "tui-1", "epic-1", 0),
+    );
+    const claimed = await claim(host, "chat-1", "Reviewer", "host");
+    expect(sent).toEqual([]);
+    expect(claimed.awareness).toMatchObject({
+      deliveredTo: [],
+      unreachable: ["tui-1", "chat-2"],
+    });
   });
 
   it("refuses a claimant that is not an agent of the epic", async () => {

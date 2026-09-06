@@ -28,6 +28,8 @@ import {
 import { attachTerminalStream, type TerminalStreamSession } from "./terminal";
 import { workspaceSubscribeFileListOpenRequestSchema } from "@traycer/protocol/host/workspace/subscribe";
 import { WorkspaceFileListSession } from "../workspace/file-list-stream";
+import { agentInboxSubscribeOpenRequestSchema } from "@traycer/protocol/host/agent/inbox";
+import { InboxMonitor } from "./inbox";
 
 const SUBSCRIBE_TIMEOUT_MS = 30_000;
 const POLICY_VIOLATION = 1008;
@@ -60,6 +62,7 @@ export function attachStreamConnection(
     runtime.chats.remove(socket);
     runtime.notifications.remove(socket);
     runtime.plainTerminals.remove(socket);
+    runtime.inboxMonitors.remove(socket);
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
@@ -72,6 +75,7 @@ export function attachStreamConnection(
     runtime.chats.remove(socket);
     runtime.notifications.remove(socket);
     runtime.plainTerminals.remove(socket);
+    runtime.inboxMonitors.remove(socket);
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
@@ -305,6 +309,28 @@ export function attachStreamConnection(
       sendJson(snapshotFrame(runtime));
       return;
     }
+    if (subscribe.data.method === "agent.inbox.subscribe") {
+      const opened = agentInboxSubscribeOpenRequestSchema.safeParse(
+        subscribe.data.params,
+      );
+      if (!opened.success) {
+        reject(
+          unauthorized("agent.inbox.subscribe requires an agentId and epicId"),
+          "missing-agent",
+        );
+        return;
+      }
+      const monitor = new InboxMonitor(
+        socket,
+        runtime,
+        opened.data.agentId,
+        opened.data.epicId,
+        subscribe.data.schemaVersion.minor,
+      );
+      runtime.inboxMonitors.add(socket, monitor);
+      monitor.drain();
+      return;
+    }
     if (subscribe.data.method === "workspace.subscribeFileList") {
       const opened = workspaceSubscribeFileListOpenRequestSchema.safeParse(
         subscribe.data.params,
@@ -329,6 +355,9 @@ export function attachStreamConnection(
     }
     if (fileListStream !== null) {
       void fileListStream.handleFrame(parsed);
+      return;
+    }
+    if (runtime.inboxMonitors.handleFrame(socket, parsed)) {
       return;
     }
     if (parsed === null || typeof parsed !== "object" || !("kind" in parsed)) {

@@ -153,7 +153,7 @@ export async function sendLocalAgentMessage(
     chat.turns.push(turn);
   });
   if (receiver.surface === "tui") {
-    runtime.inbox.enqueue({
+    const envelope = runtime.inbox.enqueue({
       epicId: input.epicId,
       toAgentId: receiver.id,
       fromAgentId: sender.id,
@@ -163,6 +163,11 @@ export async function sendLocalAgentMessage(
       expectsReply: input.expectReply,
       responseId,
     });
+    // A monitor attached right now sees it immediately; one that attaches
+    // later drains the same durable row on subscribe.
+    for (const monitor of runtime.inboxMonitors.forAgent(receiver.id)) {
+      monitor.deliver(envelope);
+    }
     return { responseId };
   }
   if (!input.expectReply) {

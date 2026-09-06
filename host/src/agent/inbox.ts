@@ -65,6 +65,11 @@ export class AgentInbox {
     return envelope;
   }
 
+  /** Everything still queued for one agent, oldest first. */
+  pending(agentId: string): readonly InboxEnvelope[] {
+    return [...(this.byAgent.get(agentId) ?? [])];
+  }
+
   /** Retires rows the agent has consumed. Unknown ids are a no-op. */
   ack(agentId: string, eventIds: readonly string[]): number {
     const rows = this.byAgent.get(agentId);

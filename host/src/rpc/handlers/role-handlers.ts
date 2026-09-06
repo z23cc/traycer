@@ -1,8 +1,8 @@
 import {
-  TRAYCER_SYSTEM_SENDER_AGENT_ID,
   claimAgentRoleRequestSchema,
   listAgentRolesRequestSchema,
   relinquishAgentRoleRequestSchema,
+  type RoleAwarenessEvent,
 } from "@traycer/protocol/host/agent/roles";
 import type { RoleClaim } from "@traycer/protocol/persistence/epic/role-claims";
 import {
@@ -32,40 +32,50 @@ import type { RpcHandler } from "./types";
  */
 function announce(
   runtime: HostRuntime,
-  epicId: string,
-  claimantAgentId: string,
-  notice: string,
+  event: RoleAwarenessEvent,
 ): {
   readonly deliveredTo: string[];
   readonly deferredToPrompt: string[];
   readonly unreachable: string[];
-  readonly failed: never[];
+  readonly failed: { readonly agentId: string; readonly reason: string }[];
 } {
-  const state = runtime.store.snapshot();
   const deliveredTo: string[] = [];
   const unreachable: string[] = [];
-  for (const agent of state.tuiAgents) {
-    if (agent.epicId !== epicId || agent.tuiAgentId === claimantAgentId) {
+  const failed: { readonly agentId: string; readonly reason: string }[] = [];
+  const monitored = new Set<string>();
+  for (const monitor of runtime.inboxMonitors.inEpic(event.epicId)) {
+    if (monitor.agentId === event.claim.agentId) {
       continue;
     }
-    runtime.inbox.enqueue({
-      epicId,
-      toAgentId: agent.tuiAgentId,
-      fromAgentId: TRAYCER_SYSTEM_SENDER_AGENT_ID,
-      senderTitle: null,
-      senderHarnessId: null,
-      prompt: notice,
-      expectsReply: false,
-      responseId: null,
-    });
-    deliveredTo.push(agent.tuiAgentId);
+    monitored.add(monitor.agentId);
+    if (monitor.announce(event)) {
+      deliveredTo.push(monitor.agentId);
+      continue;
+    }
+    // A monitor that negotiated `@1.0` never agreed to receive this frame,
+    // and one whose socket has gone is not reachable either.
+    unreachable.push(monitor.agentId);
   }
-  for (const chat of state.chats) {
-    if (chat.epicId === epicId && chat.chatId !== claimantAgentId) {
-      unreachable.push(chat.chatId);
+  const state = runtime.store.snapshot();
+  for (const agent of [
+    ...state.tuiAgents.map((row) => ({
+      id: row.tuiAgentId,
+      epicId: row.epicId,
+    })),
+    ...state.chats.map((row) => ({ id: row.chatId, epicId: row.epicId })),
+  ]) {
+    if (
+      agent.epicId === event.epicId &&
+      agent.id !== event.claim.agentId &&
+      !monitored.has(agent.id)
+    ) {
+      // Nothing was attempted: awareness is never queued, and waking an idle
+      // agent to hand it a courtesy notice costs more than letting it read
+      // current roles from its next prompt.
+      unreachable.push(agent.id);
     }
   }
-  return { deliveredTo, deferredToPrompt: [], unreachable, failed: [] };
+  return { deliveredTo, deferredToPrompt: [], unreachable, failed };
 }
 
 export const handleAgentRolesClaim: RpcHandler = async (params, runtime) => {
@@ -130,12 +140,12 @@ export const handleAgentRolesClaim: RpcHandler = async (params, runtime) => {
       claim: withoutUser({ ...minted }),
       created: true,
       overlapping,
-      awareness: announce(
-        runtime,
-        request.epicId,
-        request.claimantAgentId,
-        `${request.claimantAgentId} claimed the role "${request.role}" for scope "${request.scope}".`,
-      ),
+      awareness: announce(runtime, {
+        kind: "role-claimed",
+        epicId: request.epicId,
+        claim: withoutUser({ ...minted }),
+        at: minted.claimedAt,
+      }),
     },
   };
 };
@@ -196,12 +206,12 @@ export const handleAgentRolesRelinquish: RpcHandler = async (
     ok: true,
     result: {
       released: true,
-      awareness: announce(
-        runtime,
-        request.epicId,
-        request.claimantAgentId,
-        `${request.claimantAgentId} relinquished the role "${held.role}" for scope "${held.scope}".`,
-      ),
+      awareness: announce(runtime, {
+        kind: "role-relinquished",
+        epicId: request.epicId,
+        claim: withoutUser(held),
+        at: Date.now(),
+      }),
     },
   };
 };

@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { TuiActivityOracle } from "./agent/activity";
 import { AgentInbox } from "./agent/inbox";
+import { InboxMonitorRegistry } from "./stream/inbox";
 import { resolveHostDataDir } from "./data-dir";
 import { GuiRunRegistry } from "./gui/deliver";
 import { NotificationHub } from "./gui/notifications";
@@ -61,6 +62,7 @@ export async function startHost(
     terminals,
     pty,
     inbox: new AgentInbox(),
+    inboxMonitors: new InboxMonitorRegistry(),
     tuiActivity: new TuiActivityOracle(),
     guiRuns: new GuiRunRegistry(),
     queue: new ChatQueue(),
