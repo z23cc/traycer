@@ -86,6 +86,57 @@ describe("diagnostics", () => {
     expect(tail.result).toMatchObject({ status: "available", lines: [] });
   });
 
+  it("reads the doctor report out of the CLI result envelope", async () => {
+    const setup = await boot();
+    tempDir = setup.tempDir;
+    started = setup.started;
+    const issue = {
+      code: "RECENT_CRASH_MARKERS",
+      severity: "warning",
+      title: "Host crashed recently",
+      message: "phase=crashed",
+      fixAction: "host-logs",
+      terminalCommand: "traycer host logs",
+      details: null,
+    };
+    await recordCli(
+      started.runtime.dataDir,
+      "/bin/sh",
+      JSON.stringify({
+        type: "result",
+        status: "ok",
+        data: { issues: [issue] },
+      }),
+    );
+    const doctor = await handleHostDoctor({}, started.runtime);
+    if (!doctor.ok) {
+      throw new Error(doctor.message);
+    }
+    // A non-zero exit is a REPORT, and the three local-WS codes are provable
+    // from this call having arrived on the loopback listener.
+    expect(doctor.result).toEqual({
+      status: "ok",
+      issues: [issue],
+      triviallyGreenIssueCodes: [
+        "SERVICE_STOPPED",
+        "PORT_UNREACHABLE",
+        "PORT_CONFLICT",
+      ],
+    });
+  });
+
+  it("answers invalid-output for a CLI that prints something else", async () => {
+    const setup = await boot();
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await recordCli(started.runtime.dataDir, "/bin/sh", "not json");
+    const doctor = await handleHostDoctor({}, started.runtime);
+    if (!doctor.ok) {
+      throw new Error(doctor.message);
+    }
+    expect(doctor.result).toEqual({ status: "invalid-output" });
+  });
+
   it("answers cli-unavailable when no invocation vector is recorded", async () => {
     const setup = await boot();
     tempDir = setup.tempDir;
@@ -102,21 +153,7 @@ describe("diagnostics", () => {
     tempDir = setup.tempDir;
     started = setup.started;
     const dir = join(started.runtime.dataDir, "cli-invocation");
-    await mkdir(dir, { recursive: true });
-    await writeFile(
-      join(dir, "cli-invocation.json"),
-      JSON.stringify({
-        schemaVersion: 1,
-        command: "/bin/echo",
-        args: [],
-        source: {
-          kind: "service-registration",
-          platform: "macos",
-          serviceLabel: "test",
-        },
-        recoveredAt: new Date().toISOString(),
-      }),
-    );
+    await recordCli(started.runtime.dataDir, "/bin/sh", "");
     await writeFile(
       join(
         dir,
@@ -133,6 +170,32 @@ describe("diagnostics", () => {
     expect(doctor.result).toEqual({ status: "cli-unavailable" });
   });
 });
+
+/** A CLI vector this host may spawn, whose stdout is `output`. */
+async function recordCli(
+  dataDir: string,
+  command: string,
+  output: string,
+): Promise<void> {
+  const dir = join(dataDir, "cli-invocation");
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, "cli-invocation.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      command,
+      // The handler appends `host doctor --json`; this vector prints `output`
+      // and ignores whatever trails it.
+      args: ["-c", 'printf %s "$1"', "sh", output],
+      source: {
+        kind: "service-registration",
+        platform: "macos",
+        serviceLabel: "test",
+      },
+      recoveredAt: new Date().toISOString(),
+    }),
+  );
+}
 
 async function boot(): Promise<{
   readonly tempDir: string;

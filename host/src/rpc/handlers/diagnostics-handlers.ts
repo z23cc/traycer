@@ -101,9 +101,18 @@ export const handleDiagnosticsLogsTail: RpcHandler = async (
   };
 };
 
-const doctorOutputSchema = z.object({
+const doctorReportSchema = z.object({
   issues: z.array(hostDoctorIssueSchema),
 });
+/**
+ * `--json` wraps every command's payload in the CLI runner's result envelope,
+ * so the report is one level down. The bare shape is accepted too rather than
+ * pinning this to one CLI generation's framing.
+ */
+const doctorOutputSchema = z.union([
+  z.object({ data: doctorReportSchema }).transform((value) => value.data),
+  doctorReportSchema,
+]);
 
 /**
  * The doctor engine lives in the CLI, which the host spawns rather than
