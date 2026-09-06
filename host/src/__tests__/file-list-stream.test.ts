@@ -67,14 +67,16 @@ describe("workspace.subscribeFileList", () => {
     const socket = new FakeSocket();
     session = new WorkspaceFileListSession(socket as never);
     await session.open(root);
-    // The client names the directory the way the listing spelled it.
+    // The client hands back exactly the token the listing gave it, and the
+    // answer is keyed by that same token - not a stripped variant it would
+    // have to parse to match.
     await session.handleFrame({
       kind: "watch",
       directoryPaths: ["src/"],
       hasBinaryPayload: false,
     });
     const listing = socket.frames.at(-1);
-    expect(listing).toMatchObject({ kind: "listing", directoryPath: "src" });
+    expect(listing).toMatchObject({ kind: "listing", directoryPath: "src/" });
     expect((listing?.entries as { name: string }[]).map((e) => e.name)).toEqual(
       ["main.ts"],
     );
@@ -93,13 +95,62 @@ describe("workspace.subscribeFileList", () => {
     await session.open(root);
     await session.handleFrame({
       kind: "watch",
-      directoryPaths: ["nope"],
+      directoryPaths: ["nope/"],
       hasBinaryPayload: false,
     });
     expect(socket.frames.at(-1)).toMatchObject({
       kind: "pruned",
-      directoryPaths: ["nope"],
+      directoryPaths: ["nope/"],
+      reason: "missing",
+    });
+  });
+
+  it("refuses a watch whose parent is not covered", async () => {
+    const root = await seed();
+    await mkdir(join(root, "src", "deep"), { recursive: true });
+    const socket = new FakeSocket();
+    session = new WorkspaceFileListSession(socket as never);
+    await session.open(root);
+    // `src/` was never covered, so its child may not be either.
+    await session.handleFrame({
+      kind: "watch",
+      directoryPaths: ["src/deep/"],
+      hasBinaryPayload: false,
+    });
+    expect(socket.frames.at(-1)).toMatchObject({
+      kind: "pruned",
+      directoryPaths: ["src/deep/"],
       reason: "error",
+    });
+    // Naming the parent and the child in ONE frame is legal: ancestors first.
+    await session.handleFrame({
+      kind: "watch",
+      directoryPaths: ["src/deep/", "src/"],
+      hasBinaryPayload: false,
+    });
+    expect(socket.frames.slice(-2).map((frame) => frame.directoryPath)).toEqual(
+      ["src/", "src/deep/"],
+    );
+  });
+
+  it("prunes a covered child its parent no longer lists", async () => {
+    const root = await seed();
+    const socket = new FakeSocket();
+    session = new WorkspaceFileListSession(socket as never);
+    await session.open(root);
+    await session.handleFrame({
+      kind: "watch",
+      directoryPaths: ["src/"],
+      hasBinaryPayload: false,
+    });
+    await rm(join(root, "src"), { recursive: true, force: true });
+    // The root's own watcher is what discovers it, and the child goes with it.
+    const pruned = await waitFor(() =>
+      socket.frames.find((frame) => frame.kind === "pruned"),
+    );
+    expect(pruned).toMatchObject({
+      directoryPaths: ["src/"],
+      reason: "missing",
     });
   });
 
@@ -112,6 +163,17 @@ describe("workspace.subscribeFileList", () => {
       reason: "missing",
     });
   });
+
+  async function waitFor<T>(read: () => T | undefined): Promise<T> {
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const found = read();
+      if (found !== undefined) {
+        return found;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error("timed out waiting for a frame");
+  }
 
   async function seed(): Promise<string> {
     tempDir = await mkdtemp(join(tmpdir(), "traycer-ws-"));
