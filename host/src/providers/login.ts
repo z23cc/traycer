@@ -1,11 +1,16 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
 import type { ProviderId } from "@traycer/protocol/host/provider-ids";
+import { PROVIDER_DISPLAY_NAMES } from "@traycer/protocol/host/provider-schemas";
+import type { TerminalScope } from "@traycer/protocol/host/terminal/unary-schemas";
 import {
   listProviderCliStates,
   providerCliIdentity,
   spawnEnvForProvider,
 } from "./service";
 import { PROVIDER_LOGIN_CAPABILITY } from "./login-capability";
+import type { HostRuntime } from "../runtime";
 import type { HostStore } from "../store/host-store";
 
 const LOGIN_HARD_CAP_MS = 15 * 60_000;
@@ -29,6 +34,7 @@ type FinishedLogin = {
 
 const JOBS = new Map<ProviderId, LoginJob>();
 const LAST_FINISHED = new Map<ProviderId, FinishedLogin>();
+const TERMINAL_LOGIN_SESSIONS = new Map<ProviderId, string>();
 
 export function startProviderLogin(
   store: HostStore,
@@ -179,4 +185,101 @@ function armDeadline(job: LoginJob): void {
   job.killTimer = setTimeout(() => {
     job.child.kill("SIGTERM");
   }, wait);
+}
+
+export type TerminalLoginStart =
+  | {
+      readonly ok: true;
+      readonly sessionId: string;
+      readonly replacedSessionId: string | null;
+    }
+  | { readonly ok: false; readonly message: string };
+
+export function startProviderTerminalLogin(
+  runtime: HostRuntime,
+  providerId: ProviderId,
+  scope: TerminalScope,
+  cols: number,
+  rows: number,
+): TerminalLoginStart {
+  const capability = PROVIDER_LOGIN_CAPABILITY[providerId];
+  const displayName = PROVIDER_DISPLAY_NAMES[providerId];
+  if (capability === null || capability.terminalLogin === null) {
+    return {
+      ok: false,
+      message: `${displayName} does not support signing in from a terminal.`,
+    };
+  }
+  const identity = providerCliIdentity(runtime.store, providerId);
+  if (identity.path === null) {
+    return {
+      ok: false,
+      message: `${displayName} CLI was not found.`,
+    };
+  }
+  const loginArgs =
+    capability.oauthArgs === null ? [] : [...capability.oauthArgs];
+  const replacedSessionId = killPredecessorLoginSession(runtime, providerId);
+  const sessionId = randomUUID();
+  const home = homedir();
+  const cwd = home.length > 0 ? home : process.cwd();
+  const now = Date.now();
+  runtime.terminals.put({
+    sessionId,
+    scope,
+    sessionKind: "terminal",
+    cwd,
+    currentCwd: cwd,
+    shellCommand: identity.path,
+    shellArgs: loginArgs,
+    cols,
+    rows,
+    status: "running",
+    exitCode: null,
+    exitReason: null,
+    createdAt: now,
+    title: `${displayName} sign-in`,
+    activeProcessName: null,
+    lifecycleOwner: "manager",
+  });
+  runtime.pty.spawn({
+    sessionId,
+    command: identity.path,
+    args: loginArgs,
+    cwd,
+    cols,
+    rows,
+    extraEnv: extraEnvForTerminalLogin(runtime.store, providerId),
+  });
+  TERMINAL_LOGIN_SESSIONS.set(providerId, sessionId);
+  return { ok: true, sessionId, replacedSessionId };
+}
+
+function killPredecessorLoginSession(
+  runtime: HostRuntime,
+  providerId: ProviderId,
+): string | null {
+  const previous = TERMINAL_LOGIN_SESSIONS.get(providerId);
+  if (previous === undefined) {
+    return null;
+  }
+  runtime.pty.kill(previous);
+  runtime.terminals.kill(previous);
+  TERMINAL_LOGIN_SESSIONS.delete(providerId);
+  return previous;
+}
+
+function extraEnvForTerminalLogin(
+  store: HostStore,
+  providerId: ProviderId,
+): { readonly [key: string]: string } {
+  const extra: { [key: string]: string } = {};
+  const spawnEnv = spawnEnvForProvider(store, providerId);
+  for (const [key, value] of Object.entries(spawnEnv)) {
+    if (typeof value === "string" && process.env[key] !== value) {
+      extra[key] = value;
+    }
+  }
+  extra.COPILOT_AUTO_UPDATE = "false";
+  return extra;
 }

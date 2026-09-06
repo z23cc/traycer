@@ -143,6 +143,7 @@ import {
   handleProvidersSetSelection,
   handleProvidersSetTerminalAgentArgs,
   handleProvidersStartLogin,
+  handleProvidersStartTerminalLogin,
   handleProvidersSubmitLoginCode,
   handleProvidersTouchLogin,
 } from "./handlers/provider-handlers";
@@ -215,6 +216,7 @@ const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "providers.setEnvOverride": handleProvidersSetEnvOverride,
   "providers.deleteEnvOverride": handleProvidersDeleteEnvOverride,
   "providers.startLogin": handleProvidersStartLogin,
+  "providers.startTerminalLogin": handleProvidersStartTerminalLogin,
   "providers.awaitLogin": handleProvidersAwaitLogin,
   "providers.cancelLogin": handleProvidersCancelLogin,
   "providers.submitLoginCode": handleProvidersSubmitLoginCode,

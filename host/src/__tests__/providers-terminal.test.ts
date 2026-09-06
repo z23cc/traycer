@@ -370,6 +370,143 @@ exit 1
     );
     expect(killed).toMatchObject({ killed: true });
   });
+
+  it("refuses startTerminalLogin for providers without terminalLogin", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "traycer-host-"));
+    started = await startHost({
+      argv: ["--host-data-dir", tempDir],
+      listenHost: "127.0.0.1",
+      listenPort: 0,
+    });
+    const error = await callExpectingError(
+      started.rpcUrl,
+      "providers.startTerminalLogin",
+      { major: 2, minor: 0 },
+      {
+        providerId: "claude-code",
+        scope: { kind: "independent" },
+        cols: 80,
+        rows: 24,
+      },
+    );
+    expect(error.code).toBe("RPC_ERROR");
+    expect(error.message).toBe(
+      "Claude Code does not support signing in from a terminal.",
+    );
+  });
+
+  it("opens a host-owned copilot login PTY and replaces it on retry", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "traycer-host-"));
+    started = await startHost({
+      argv: ["--host-data-dir", tempDir],
+      listenHost: "127.0.0.1",
+      listenPort: 0,
+    });
+    const script = join(tempDir, "fake-copilot");
+    await writeFile(
+      script,
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [ "\${1-}" = "login" ]; then
+  printf 'COPILOT_AUTO_UPDATE=%s\\n' "\${COPILOT_AUTO_UPDATE-}"
+  printf 'GH_TOKEN=%s\\n' "\${GH_TOKEN-}"
+  printf 'Visit https://github.com/login/device and enter code ABCD-1234\\n'
+  while true; do sleep 30; done
+fi
+exit 1
+`,
+    );
+    await chmod(script, 0o755);
+    await call(
+      started.rpcUrl,
+      "providers.addCustomPath",
+      { major: 2, minor: 1 },
+      { providerId: "copilot", path: script },
+    );
+    await call(
+      started.rpcUrl,
+      "providers.setEnvOverride",
+      { major: 2, minor: 1 },
+      { providerId: "copilot", key: "GH_TOKEN", value: "gho-test-token" },
+    );
+    const first = (await call(
+      started.rpcUrl,
+      "providers.startTerminalLogin",
+      { major: 2, minor: 0 },
+      {
+        providerId: "copilot",
+        scope: { kind: "independent" },
+        cols: 80,
+        rows: 24,
+      },
+    )) as { sessionId: string; replacedSessionId: string | null };
+    expect(first.replacedSessionId).toBeNull();
+    expect(first.sessionId.length).toBeGreaterThan(0);
+    await waitForScrollback(started, first.sessionId, "ABCD-1234");
+    const scrollback = started.runtime.pty.scrollback(first.sessionId);
+    expect(scrollback).toContain("COPILOT_AUTO_UPDATE=false");
+    expect(scrollback).toContain("GH_TOKEN=gho-test-token");
+    const listed = (await call(
+      started.rpcUrl,
+      "terminal.list",
+      { major: 2, minor: 3 },
+      { scope: { kind: "independent" } },
+    )) as {
+      sessions: readonly {
+        sessionId: string;
+        title: string | null;
+        sessionKind: string;
+        lifecycleOwner: string;
+        shellCommand: string;
+        shellArgs: readonly string[];
+      }[];
+    };
+    const row = listed.sessions.find(
+      (session) => session.sessionId === first.sessionId,
+    );
+    expect(row).toMatchObject({
+      title: "Copilot sign-in",
+      sessionKind: "terminal",
+      lifecycleOwner: "manager",
+      shellCommand: script,
+      shellArgs: ["login"],
+    });
+    const snapshot = (await subscribeTerminal(
+      started.rpcUrl.replace(/\/rpc$/u, "/stream"),
+      first.sessionId,
+    )) as { kind: string; sessionId: string; scrollback: string };
+    expect(snapshot.kind).toBe("snapshot");
+    expect(snapshot.scrollback).toContain("ABCD-1234");
+    const second = (await call(
+      started.rpcUrl,
+      "providers.startTerminalLogin",
+      { major: 1, minor: 0 },
+      {
+        providerId: "copilot",
+        epicId: "epic-login-1",
+        cols: 80,
+        rows: 24,
+      },
+    )) as { sessionId: string; replacedSessionId: string | null };
+    expect(second.sessionId).not.toBe(first.sessionId);
+    expect(second.replacedSessionId).toBe(first.sessionId);
+    const replaced = started.runtime.terminals.get(first.sessionId);
+    expect(replaced).toMatchObject({
+      status: "exited",
+      exitReason: "killed",
+    });
+    const epicListed = (await call(
+      started.rpcUrl,
+      "terminal.list",
+      { major: 2, minor: 3 },
+      { scope: { kind: "epic", epicId: "epic-login-1" } },
+    )) as { sessions: readonly { sessionId: string }[] };
+    expect(
+      epicListed.sessions.some(
+        (session) => session.sessionId === second.sessionId,
+      ),
+    ).toBe(true);
+  }, 15_000);
 });
 
 async function call(
@@ -378,6 +515,37 @@ async function call(
   schemaVersion: { major: number; minor: number },
   params: unknown,
 ): Promise<unknown> {
+  const exchange = await rpcExchange(url, method, schemaVersion, params);
+  if (exchange.error !== null) {
+    throw new Error(`RPC error: ${JSON.stringify(exchange.error)}`);
+  }
+  return exchange.result;
+}
+
+async function callExpectingError(
+  url: string,
+  method: string,
+  schemaVersion: { major: number; minor: number },
+  params: unknown,
+): Promise<{ readonly code: string; readonly message: string }> {
+  const exchange = await rpcExchange(url, method, schemaVersion, params);
+  if (exchange.error === null) {
+    throw new Error(
+      `expected RPC error, got ${JSON.stringify(exchange.result)}`,
+    );
+  }
+  return exchange.error;
+}
+
+async function rpcExchange(
+  url: string,
+  method: string,
+  schemaVersion: { major: number; minor: number },
+  params: unknown,
+): Promise<{
+  readonly result: unknown;
+  readonly error: { readonly code: string; readonly message: string } | null;
+}> {
   const clientManifests = splitConnectionManifest(
     hostRpcRegistry,
     RELEASED_FLOOR_METHOD_NAMES,
@@ -431,10 +599,39 @@ async function call(
     throw new Error(`expected response, got ${JSON.stringify(response)}`);
   }
   const record = response as Record<string, unknown>;
-  if (record.error !== null) {
-    throw new Error(`RPC error: ${JSON.stringify(record.error)}`);
+  if (record.error === null) {
+    return { result: record.result, error: null };
   }
-  return record.result;
+  if (record.error === undefined || typeof record.error !== "object") {
+    throw new Error(
+      `expected error object, got ${JSON.stringify(record.error)}`,
+    );
+  }
+  const errorRecord = record.error as Record<string, unknown>;
+  const code =
+    typeof errorRecord.code === "string" ? errorRecord.code : "UNKNOWN";
+  const message =
+    typeof errorRecord.message === "string" ? errorRecord.message : "";
+  return { result: record.result, error: { code, message } };
+}
+
+async function waitForScrollback(
+  host: StartedHost,
+  sessionId: string,
+  needle: string,
+): Promise<void> {
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    if (host.runtime.pty.scrollback(sessionId).includes(needle)) {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 50);
+    });
+  }
+  throw new Error(
+    `timed out waiting for ${needle} in ${host.runtime.pty.scrollback(sessionId)}`,
+  );
 }
 
 async function subscribeTerminal(

@@ -40,7 +40,7 @@ export async function startHost(
   const pty = new PtyManager();
   pty.on("exit", (sessionId: string, exitCode: number) => {
     const existing = terminals.get(sessionId);
-    if (existing === null) {
+    if (existing === null || existing.status === "exited") {
       return;
     }
     terminals.put({

@@ -8,6 +8,7 @@ export type PtySpawnRequest = {
   readonly cwd: string;
   readonly cols: number;
   readonly rows: number;
+  readonly extraEnv: { readonly [key: string]: string };
 };
 
 type PtyProcess = {
@@ -31,7 +32,15 @@ export class PtyManager extends EventEmitter {
     env.TERM = "xterm-256color";
     env.COLUMNS = String(request.cols);
     env.LINES = String(request.rows);
-    const child = spawnPtyProcess(request.command, request.args, request.cwd, env);
+    for (const [key, value] of Object.entries(request.extraEnv)) {
+      env[key] = value;
+    }
+    const child = spawnPtyProcess(
+      request.command,
+      request.args,
+      request.cwd,
+      env,
+    );
     const entry: PtyProcess = { child, scrollback: "" };
     this.processes.set(request.sessionId, entry);
     child.stdout.on("data", (chunk: Buffer) => {
@@ -116,23 +125,9 @@ function spawnPtyProcess(
   cwd: string,
   env: { readonly [key: string]: string },
 ): ChildProcessWithoutNullStreams {
-  if (process.platform === "darwin") {
-    return spawn("/usr/bin/script", ["-q", "/dev/null", command, ...args], {
-      cwd,
-      env,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-  }
-  if (process.platform === "linux") {
-    const quoted = [command, ...args]
-      .map((part) => `'${part.replaceAll("'", "'\\''")}'`)
-      .join(" ");
-    return spawn("script", ["-q", "-c", quoted, "/dev/null"], {
-      cwd,
-      env,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-  }
+  // `script` cannot wrap a piped stdin on current macOS (tcgetattr/ioctl
+  // fails and the child never starts). This analog is a piped child, not a
+  // real PTY.
   return spawn(command, [...args], {
     cwd,
     env,

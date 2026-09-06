@@ -12,9 +12,13 @@ import {
   providersSetSelectionRequestSchema,
   providersSetTerminalAgentArgsRequestSchema,
   providersStartLoginRequestSchemaV11,
+  providersStartTerminalLoginRequestSchema,
+  providersStartTerminalLoginRequestSchemaV20,
   providersSubmitLoginCodeRequestSchema,
   providersTouchLoginRequestSchema,
 } from "@traycer/protocol/host/provider-schemas";
+import type { ProviderId } from "@traycer/protocol/host/provider-ids";
+import type { TerminalScope } from "@traycer/protocol/host/terminal/unary-schemas";
 import { probeCandidateVersion } from "../../providers/catalog";
 import {
   addCustomPath,
@@ -32,6 +36,7 @@ import {
   awaitProviderLogin,
   cancelProviderLogin,
   startProviderLogin,
+  startProviderTerminalLogin,
   submitProviderLoginCode,
   touchProviderLogin,
 } from "../../providers/login";
@@ -264,6 +269,73 @@ export const handleProvidersTouchLogin: RpcHandler = (params) => {
     result: { extended: touchProviderLogin(parsed.data.providerId) },
   };
 };
+
+export const handleProvidersStartTerminalLogin: RpcHandler = (
+  params,
+  runtime,
+) => {
+  // Dispatch binds the requested major's schema and does not upgrade, so
+  // this handler accepts both v2.0 (`scope`) and v1.0 (`epicId`).
+  const parsed = readStartTerminalLogin(params);
+  if (!parsed.ok) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.message };
+  }
+  const started = startProviderTerminalLogin(
+    runtime,
+    parsed.value.providerId,
+    parsed.value.scope,
+    parsed.value.cols,
+    parsed.value.rows,
+  );
+  if (!started.ok) {
+    return { ok: false, code: "RPC_ERROR", message: started.message };
+  }
+  return {
+    ok: true,
+    result: {
+      sessionId: started.sessionId,
+      replacedSessionId: started.replacedSessionId,
+    },
+  };
+};
+
+function readStartTerminalLogin(params: unknown):
+  | {
+      readonly ok: true;
+      readonly value: {
+        readonly providerId: ProviderId;
+        readonly scope: TerminalScope;
+        readonly cols: number;
+        readonly rows: number;
+      };
+    }
+  | { readonly ok: false; readonly message: string } {
+  const scoped = providersStartTerminalLoginRequestSchemaV20.safeParse(params);
+  if (scoped.success) {
+    return {
+      ok: true,
+      value: {
+        providerId: scoped.data.providerId,
+        scope: scoped.data.scope,
+        cols: scoped.data.cols,
+        rows: scoped.data.rows,
+      },
+    };
+  }
+  const legacy = providersStartTerminalLoginRequestSchema.safeParse(params);
+  if (legacy.success) {
+    return {
+      ok: true,
+      value: {
+        providerId: legacy.data.providerId,
+        scope: { kind: "epic", epicId: legacy.data.epicId },
+        cols: legacy.data.cols,
+        rows: legacy.data.rows,
+      },
+    };
+  }
+  return { ok: false, message: scoped.error.message };
+}
 
 export const handleProvidersRemoveCustomPath: RpcHandler = async (
   params,

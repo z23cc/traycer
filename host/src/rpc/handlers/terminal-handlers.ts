@@ -41,7 +41,8 @@ export const handleTerminalCreate: RpcHandler = (params, runtime) => {
     return { ok: true, result: { session: existing } };
   }
   const now = Date.now();
-  const shellCommand = parsed.data.shellCommand ?? process.env.SHELL ?? "/bin/zsh";
+  const shellCommand =
+    parsed.data.shellCommand ?? process.env.SHELL ?? "/bin/zsh";
   const shellArgs = parsed.data.shellArgs ?? [];
   const session = {
     sessionId: parsed.data.desiredSessionId,
@@ -69,6 +70,7 @@ export const handleTerminalCreate: RpcHandler = (params, runtime) => {
     cwd: parsed.data.cwd,
     cols: parsed.data.cols,
     rows: parsed.data.rows,
+    extraEnv: {},
   });
   return { ok: true, result: { session } };
 };
@@ -79,7 +81,10 @@ export const handleTerminalKill: RpcHandler = (params, runtime) => {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
   runtime.pty.kill(parsed.data.sessionId);
-  return { ok: true, result: { killed: runtime.terminals.kill(parsed.data.sessionId) } };
+  return {
+    ok: true,
+    result: { killed: runtime.terminals.kill(parsed.data.sessionId) },
+  };
 };
 
 export const handleTerminalRename: RpcHandler = (params, runtime) => {
