@@ -1,7 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { printPromptFromTurns } from "../agent/gui-chat";
+import {
+  persistAssistantPrompt,
+  printPromptFromTurns,
+} from "../agent/gui-chat";
 import { ChatQueue } from "../gui/queue";
 import type { StoredTurn } from "../store/host-store";
+
+describe("persistAssistantPrompt", () => {
+  it("keeps live assembled text so the snapshot matches the stream", () => {
+    expect(persistAssistantPrompt("hello\n", "hello")).toBe("hello\n");
+  });
+
+  it("falls back to the print result when no deltas arrived", () => {
+    expect(persistAssistantPrompt("", "Stopped.")).toBe("Stopped.");
+  });
+});
 
 describe("printPromptFromTurns", () => {
   it("returns the current prompt when there is no prior history", () => {
@@ -10,11 +23,7 @@ describe("printPromptFromTurns", () => {
 
   it("prefixes earlier turns and skips the current user message", () => {
     const prompt = printPromptFromTurns(
-      [
-        user("u1", "first"),
-        assistant("a1", "ok"),
-        user("u2", "second"),
-      ],
+      [user("u1", "first"), assistant("a1", "ok"), user("u2", "second")],
       "second",
     );
     expect(prompt).toContain("Conversation so far:");

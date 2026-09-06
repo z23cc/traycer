@@ -17,6 +17,7 @@ const repo = join(dirname(fileURLToPath(import.meta.url)), "../../..");
 export async function launchHostStatusOnce(): Promise<{
   readonly hostId: string;
   readonly ready: boolean;
+  readonly stderr: string;
 }> {
   const dataDir = await mkdtemp(join(tmpdir(), "traycer-oss-launch-"));
   const child = spawn(
@@ -49,7 +50,7 @@ export async function launchHostStatusOnce(): Promise<{
     if (typeof pid.hostId !== "string" || pid.hostId.length === 0) {
       throw new Error("pid.json missing hostId");
     }
-    return { hostId: pid.hostId, ready: result.ready };
+    return { hostId: pid.hostId, ready: result.ready, stderr };
   } finally {
     child.kill("SIGTERM");
     await new Promise<void>((resolve) => {

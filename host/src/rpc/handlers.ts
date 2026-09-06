@@ -95,6 +95,7 @@ import {
   handlePhaseMigrateToEpic,
   handleHostNotificationsIndicatorState,
   handleHostNotificationsMarkRead,
+  handleHostUsageSummary,
   handleTerminalPlainList,
 } from "./handlers/analog-handlers";
 import {
@@ -175,6 +176,7 @@ const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "host.restart": handleHostRestart,
   "host.getRuntimeCapabilities": handleRuntimeCapabilities,
   "host.getRateLimitUsage": handleRateLimitUsage,
+  "host.usage.summary": handleHostUsageSummary,
   "providers.list": handleProvidersList,
   "providers.detectVersion": handleProvidersDetectVersion,
   "providers.setEnabled": handleProvidersSetEnabled,

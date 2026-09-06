@@ -585,7 +585,7 @@ async function runAndPersistAssistant(
       chatId: input.chatId,
       model: input.model,
       harnessId: input.harnessId,
-      prompt: replyText,
+      prompt: persistAssistantPrompt(assembled, replyText),
       responseId: input.responseId,
       messageId: input.assistantMessageId,
       turnId: input.turnId,
@@ -606,6 +606,13 @@ async function runAndPersistAssistant(
     });
     throw error;
   }
+}
+
+export function persistAssistantPrompt(
+  assembled: string,
+  replyText: string,
+): string {
+  return assembled.length > 0 ? assembled : replyText;
 }
 
 async function persistAssistantTurn(
@@ -787,7 +794,9 @@ async function finishPrint(
     severity: "info",
   });
   runtime.guiRuns.endPrint(chatId, assistantMessageId);
-  await stampAssistantTurn(runtime, chatId, assistantMessageId, now);
+  // Live `text.completed` uses `now`. Equal stamps keep live when snapshot
+  // blocks differ, so the persisted turn must be strictly newer.
+  await stampAssistantTurn(runtime, chatId, assistantMessageId, now + 1);
   broadcastTurnStateChanged(runtime, epicId, chatId);
   broadcastChatSnapshot(runtime, epicId, chatId);
   drainGuiQueue(runtime, epicId, chatId);

@@ -9,5 +9,7 @@ describe("traycer-host CLI entry", () => {
     expect(second.ready).toBe(true);
     expect(first.hostId.length).toBeGreaterThan(0);
     expect(second.hostId.length).toBeGreaterThan(0);
+    expect(first.stderr).toContain("[host] RPC listening");
+    expect(second.stderr).toContain("[host] RPC listening");
   }, 30_000);
 });
