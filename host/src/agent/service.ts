@@ -66,6 +66,7 @@ export async function createLocalAgent(
         indexRevision: 0,
         fileChangeCount: 0,
         lastUsage: null,
+        archivedAt: null,
       };
       state.chats = state.chats.filter((row) => row.chatId !== agentId);
       state.chats.push(chat);
@@ -81,14 +82,18 @@ export async function sendLocalAgentMessage(
   const snapshot = runtime.store.snapshot();
   const sender = snapshot.agents.find((row) => row.id === input.senderAgentId);
   if (sender === undefined) {
-    throw new Error(`agent.sendMessage: sender agent '${input.senderAgentId}' was not found.`);
+    throw new Error(
+      `agent.sendMessage: sender agent '${input.senderAgentId}' was not found.`,
+    );
   }
   if (sender.hostId !== runtime.hostId) {
     throw new Error(
       `agent.sendMessage: SENDER_NOT_LOCAL - sender '${input.senderAgentId}' is not local to host '${runtime.hostId}'.`,
     );
   }
-  const receiver = snapshot.agents.find((row) => row.id === input.receiverAgentId);
+  const receiver = snapshot.agents.find(
+    (row) => row.id === input.receiverAgentId,
+  );
   if (receiver === undefined) {
     throw new Error(
       `agent.sendMessage: RECEIVER_NOT_FOUND - '${input.receiverAgentId}'.`,
@@ -139,6 +144,7 @@ export async function sendLocalAgentMessage(
         indexRevision: 0,
         fileChangeCount: 0,
         lastUsage: null,
+        archivedAt: null,
       };
       state.chats.push(chat);
     }
@@ -212,7 +218,10 @@ export function listLocalAgents(
   senderAgentId: string,
   scope: "user" | "all",
 ): {
-  readonly caller: { readonly agentId: string; readonly canSendMessages: boolean };
+  readonly caller: {
+    readonly agentId: string;
+    readonly canSendMessages: boolean;
+  };
   readonly scope: "user" | "all";
   readonly agents: AgentSummary[];
 } {
@@ -257,7 +266,11 @@ export async function stopLocalAgent(
     while (grew) {
       grew = false;
       for (const agent of snapshot.agents) {
-        if (agent.parentId !== null && ids.has(agent.parentId) && !ids.has(agent.id)) {
+        if (
+          agent.parentId !== null &&
+          ids.has(agent.parentId) &&
+          !ids.has(agent.id)
+        ) {
           ids.add(agent.id);
           grew = true;
         }

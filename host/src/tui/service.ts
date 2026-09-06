@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { tuiHarnessIdSchema, type TuiHarnessId } from "@traycer/protocol/host/agent/shared";
+import {
+  tuiHarnessIdSchema,
+  type TuiHarnessId,
+} from "@traycer/protocol/host/agent/shared";
 import type {
   GenerateTuiAgentTitleRequest,
   PrepareTuiLaunchRequestV11,
@@ -88,8 +91,7 @@ export async function prepareTuiLaunch(
     }
     return {
       harnessId: request.harnessId,
-      harnessSessionId:
-        request.harnessId === "opencode" ? randomUUID() : null,
+      harnessSessionId: request.harnessId === "opencode" ? randomUUID() : null,
       terminalShellCommand: null,
       terminalShellArgs: null,
       hostId: runtime.hostId,
@@ -170,13 +172,16 @@ export async function createTuiAgent(
   }
   const requestedId = request.tuiAgentId;
   const tuiAgentId =
-    requestedId === undefined || requestedId === null || requestedId.length === 0
+    requestedId === undefined ||
+    requestedId === null ||
+    requestedId.length === 0
       ? randomUUID()
       : requestedId;
   const workspaceMode =
     request.workspaceMode === undefined ? null : request.workspaceMode;
   const now = Date.now();
   const record: StoredTuiAgent = {
+    archivedAt: null,
     tuiAgentId,
     epicId: request.epicId,
     parentId: request.parentId,
@@ -186,7 +191,9 @@ export async function createTuiAgent(
     terminalAgentArgs: request.terminalAgentArgs,
     terminalShellCommand: request.terminalShellCommand,
     terminalShellArgs:
-      request.terminalShellArgs === null ? null : [...request.terminalShellArgs],
+      request.terminalShellArgs === null
+        ? null
+        : [...request.terminalShellArgs],
     hostId: request.hostId,
     workspaceFolders: [...request.workspaceFolders],
     workspaceMode,
@@ -507,7 +514,9 @@ export async function generateTuiTitle(
       title,
       updatedAt: Date.now(),
     };
-    const agentIndex = state.agents.findIndex((row) => row.id === found.tuiAgentId);
+    const agentIndex = state.agents.findIndex(
+      (row) => row.id === found.tuiAgentId,
+    );
     if (agentIndex >= 0) {
       state.agents[agentIndex] = {
         ...state.agents[agentIndex],

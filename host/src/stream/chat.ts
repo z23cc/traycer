@@ -527,6 +527,7 @@ function emptyChat(hostId: string, epicId: string, chatId: string): StoredChat {
     indexRevision: 0,
     fileChangeCount: 0,
     lastUsage: null,
+    archivedAt: null,
   };
 }
 

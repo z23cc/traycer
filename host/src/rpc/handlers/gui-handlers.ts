@@ -1,3 +1,4 @@
+import { agentInboxAckRequestSchema } from "@traycer/protocol/host/agent/inbox";
 import {
   getGuiAgentPlanRequestSchema,
   listGuiAgentCommandsRequestSchema,
@@ -63,7 +64,9 @@ export const handleGuiGetPlan: RpcHandler = (params, runtime) => {
     .snapshot()
     .agents.find((row) => row.id === parsed.data.chatId);
   const harnessId =
-    agent === undefined || agent.harnessId === null ? "claude" : agent.harnessId;
+    agent === undefined || agent.harnessId === null
+      ? "claude"
+      : agent.harnessId;
   return {
     ok: true,
     result: {
@@ -109,4 +112,13 @@ export const handleInboxRead: RpcHandler = (params, runtime) => {
     ok: true,
     result: runtime.inbox.read(legacy.data.agentId, null),
   };
+};
+
+export const handleInboxAck: RpcHandler = (params, runtime) => {
+  const parsed = agentInboxAckRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  runtime.inbox.ack(parsed.data.agentId, parsed.data.eventIds);
+  return { ok: true, result: {} };
 };

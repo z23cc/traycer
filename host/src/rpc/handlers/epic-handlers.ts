@@ -16,6 +16,8 @@ import {
   listEpicCollaboratorsRequestSchema,
   reparentChatRequestSchema,
   removeEpicRepoRequestSchema,
+  setChatArchivedRequestSchema,
+  updateChatProfileRequestSchema,
   revokeEpicCollaboratorRequestSchema,
   listTasksRequestSchema,
   recordEpicViewedRequestSchema,
@@ -40,6 +42,8 @@ import {
   seedGuiChat,
   titleFromPrompt,
 } from "../../agent/gui-chat";
+import { retryMigrationRequestSchema } from "@traycer/protocol/host/epic/lane-unaries";
+import { publishEpic } from "../../stream/epic-hub";
 import { createWorktreeBinding } from "../../worktree/service";
 import { LOCAL_USER_ID } from "../../local-user";
 import type { HostRuntime } from "../../runtime";
@@ -111,6 +115,7 @@ export const handleEpicCreate: RpcHandler = async (params, runtime) => {
           indexRevision: 0,
           fileChangeCount: 0,
           lastUsage: null,
+          archivedAt: null,
         },
         seedHarness,
       );
@@ -268,6 +273,7 @@ export const handleEpicCreateChat: RpcHandler = async (params, runtime) => {
         indexRevision: 0,
         fileChangeCount: 0,
         lastUsage: null,
+        archivedAt: null,
       },
       harnessId,
     );
@@ -666,6 +672,105 @@ function upsertCollaborator(
   }
   existing.role = row.role;
 }
+
+/** Archiving resolves the id across chats and terminal agents alike. */
+export const handleEpicSetChatArchived: RpcHandler = async (
+  params,
+  runtime,
+) => {
+  const parsed = setChatArchivedRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const archivedAt = parsed.data.archived ? Date.now() : null;
+  const updated = await runtime.store.mutate((state) => {
+    const chat = state.chats.find(
+      (row) =>
+        row.epicId === parsed.data.epicId && row.chatId === parsed.data.chatId,
+    );
+    if (chat !== undefined) {
+      if ((chat.archivedAt === null) === (archivedAt === null)) {
+        return false;
+      }
+      chat.archivedAt = archivedAt;
+      return true;
+    }
+    const tui = state.tuiAgents.find(
+      (row) =>
+        row.epicId === parsed.data.epicId &&
+        row.tuiAgentId === parsed.data.chatId,
+    );
+    if (tui === undefined) {
+      return false;
+    }
+    if ((tui.archivedAt === null) === (archivedAt === null)) {
+      return false;
+    }
+    tui.archivedAt = archivedAt;
+    tui.updatedAt = Date.now();
+    return true;
+  });
+  if (updated) {
+    await publishEpic(runtime, parsed.data.epicId);
+  }
+  return { ok: true, result: { updated } };
+};
+
+/**
+ * Patches the profile inside the chat's persisted run settings. A chat that
+ * has never been configured has no tuple to patch - its first send stamps the
+ * whole thing, profile included - so this answers `updated: false`.
+ */
+export const handleEpicUpdateChatProfile: RpcHandler = async (
+  params,
+  runtime,
+) => {
+  const parsed = updateChatProfileRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const updated = await runtime.store.mutate((state) => {
+    const index = state.chats.findIndex(
+      (row) =>
+        row.epicId === parsed.data.epicId && row.chatId === parsed.data.chatId,
+    );
+    const chat = index < 0 ? undefined : state.chats[index];
+    if (chat === undefined || chat.runSettings === null) {
+      return false;
+    }
+    if (typeof chat.runSettings !== "object") {
+      return false;
+    }
+    state.chats[index] = {
+      ...chat,
+      runSettings: { ...chat.runSettings, profileId: parsed.data.profileId },
+    };
+    return true;
+  });
+  return { ok: true, result: { updated } };
+};
+
+/**
+ * There is no migration lane on the local plane - an epic is already here in
+ * its final form - so a retry is an existence check.
+ */
+export const handleEpicRetryMigration: RpcHandler = (params, runtime) => {
+  const parsed = retryMigrationRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const epic = runtime.store
+    .snapshot()
+    .epics.find((row) => row.id === parsed.data.epicId);
+  if (epic === undefined) {
+    return {
+      ok: false,
+      code: "RPC_ERROR",
+      message: `Epic ${parsed.data.epicId} not found`,
+    };
+  }
+  return { ok: true, result: { ok: true } };
+};
 
 export const handleEpicRemoveRepo: RpcHandler = async (params, runtime) => {
   const parsed = removeEpicRepoRequestSchema.safeParse(params);

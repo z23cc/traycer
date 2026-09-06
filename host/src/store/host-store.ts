@@ -169,6 +169,7 @@ export type StoredChat = {
   indexRevision: number;
   fileChangeCount: number;
   lastUsage: StoredTokenUsage | null;
+  archivedAt: number | null;
 };
 
 export type StoredAgent = {
@@ -203,7 +204,8 @@ export type StoredTuiAgent = {
   readonly forkSourceHarnessSessionId: string | null;
   readonly titleEditedByUser: boolean;
   readonly createdAt: number;
-  readonly updatedAt: number;
+  updatedAt: number;
+  archivedAt: number | null;
 };
 
 export type StoredBinding = {
@@ -662,6 +664,8 @@ function normalizeChats(value: unknown): StoredChat[] {
       fileChangeCount:
         typeof record.fileChangeCount === "number" ? record.fileChangeCount : 0,
       lastUsage: normalizeUsage(record.lastUsage),
+      archivedAt:
+        typeof record.archivedAt === "number" ? record.archivedAt : null,
     });
   }
   return rows;
@@ -864,6 +868,8 @@ function normalizeTuiAgents(value: unknown): StoredTuiAgent[] {
         ? record.workspaceMode
         : null;
     rows.push({
+      archivedAt:
+        typeof record.archivedAt === "number" ? record.archivedAt : null,
       tuiAgentId: record.tuiAgentId,
       epicId: record.epicId,
       parentId: typeof record.parentId === "string" ? record.parentId : null,

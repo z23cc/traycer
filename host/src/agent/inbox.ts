@@ -15,7 +15,10 @@ export type InboxEnvelope = {
 
 export type InboxReadPage = {
   readonly messages: readonly InboxWireMessage[];
-  readonly nextCursor: { readonly createdAt: number; readonly eventId: string } | null;
+  readonly nextCursor: {
+    readonly createdAt: number;
+    readonly eventId: string;
+  } | null;
 };
 
 export type InboxWireMessage = {
@@ -62,6 +65,18 @@ export class AgentInbox {
     return envelope;
   }
 
+  /** Retires rows the agent has consumed. Unknown ids are a no-op. */
+  ack(agentId: string, eventIds: readonly string[]): number {
+    const rows = this.byAgent.get(agentId);
+    if (rows === undefined) {
+      return 0;
+    }
+    const retiring = new Set(eventIds);
+    const kept = rows.filter((row) => !retiring.has(row.eventId));
+    this.byAgent.set(agentId, kept);
+    return rows.length - kept.length;
+  }
+
   read(
     agentId: string,
     after: { readonly createdAt: number; readonly eventId: string } | null,
@@ -73,7 +88,8 @@ export class AgentInbox {
         : rows.findIndex(
             (row) =>
               row.enqueuedAt > after.createdAt ||
-              (row.enqueuedAt === after.createdAt && row.eventId > after.eventId),
+              (row.enqueuedAt === after.createdAt &&
+                row.eventId > after.eventId),
           );
     const sliced = start < 0 ? [] : rows.slice(start);
     const page = sliced.slice(0, 50);

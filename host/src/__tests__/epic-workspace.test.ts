@@ -835,6 +835,119 @@ describe("epic and workspace RPCs", () => {
     );
     expect(readRoles(revoked)).toEqual(["owner"]);
   });
+  it("archives a chat, patches its profile, and retries a migration", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "traycer-host-"));
+    started = await startHost({
+      argv: ["--host-data-dir", tempDir],
+      listenHost: "127.0.0.1",
+      listenPort: 0,
+    });
+    await call(
+      started.rpcUrl,
+      "epic.create",
+      { major: 1, minor: 0 },
+      {
+        epic: {
+          id: "epic-archive",
+          title: "Archive me",
+          initialUserPrompt: "hi",
+          ticketCount: 0,
+          specCount: 0,
+          storyCount: 0,
+          reviewCount: 0,
+          status: "active",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          createdBy: "local",
+          version: "2.0.0",
+        },
+        repoIdentifiers: [],
+        workspaces: [],
+        chat: {
+          chatId: "chat-archive",
+          parentId: null,
+          hostId: started.runtime.hostId,
+          title: "Chat",
+          worktreeIntent: null,
+          initialMessage: null,
+        },
+      },
+    );
+    expect(
+      await call(
+        started.rpcUrl,
+        "epic.setChatArchived",
+        { major: 1, minor: 0 },
+        { epicId: "epic-archive", chatId: "chat-archive", archived: true },
+      ),
+    ).toEqual({ updated: true });
+    // Idempotent: archiving an archived chat changes nothing.
+    expect(
+      await call(
+        started.rpcUrl,
+        "epic.setChatArchived",
+        { major: 1, minor: 0 },
+        { epicId: "epic-archive", chatId: "chat-archive", archived: true },
+      ),
+    ).toEqual({ updated: false });
+    expect(
+      started.runtime.store
+        .snapshot()
+        .chats.find((row) => row.chatId === "chat-archive")?.archivedAt,
+    ).toBeTypeOf("number");
+
+    // A chat with no persisted run settings has no tuple to patch.
+    expect(
+      await call(
+        started.rpcUrl,
+        "epic.updateChatProfile",
+        { major: 1, minor: 0 },
+        {
+          epicId: "epic-archive",
+          chatId: "chat-archive",
+          profileId: "profile-1",
+        },
+      ),
+    ).toEqual({ updated: false });
+    await call(
+      started.rpcUrl,
+      "epic.updateChatRunSettings",
+      { major: 1, minor: 0 },
+      {
+        epicId: "epic-archive",
+        chatId: "chat-archive",
+        settings: {
+          harnessId: "claude",
+          model: "claude-opus-5",
+          permissionMode: "supervised",
+          reasoningEffort: null,
+          agentMode: "regular",
+          profileId: null,
+        },
+      },
+    );
+    expect(
+      await call(
+        started.rpcUrl,
+        "epic.updateChatProfile",
+        { major: 1, minor: 0 },
+        {
+          epicId: "epic-archive",
+          chatId: "chat-archive",
+          profileId: "profile-1",
+        },
+      ),
+    ).toEqual({ updated: true });
+
+    expect(
+      await call(
+        started.rpcUrl,
+        "epic.retryMigration",
+        { major: 1, minor: 0 },
+        { epicId: "epic-archive" },
+      ),
+    ).toEqual({ ok: true });
+  });
 });
 
 function readRoles(result: unknown): readonly string[] {

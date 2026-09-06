@@ -318,6 +318,7 @@ function chatMap(rows: readonly StoredChat[]): Y.Map<unknown> {
     entry.set("userId", LOCAL_USER_ID);
     entry.set("hostId", row.hostId);
     entry.set("isTitleEditedByUser", row.title.length > 0);
+    entry.set("archivedAt", row.archivedAt);
     map.set(row.chatId, entry);
   }
   return map;
@@ -338,6 +339,7 @@ function tuiMap(rows: readonly StoredTuiAgent[]): Y.Map<unknown> {
     entry.set("harnessSessionId", row.harnessSessionId);
     entry.set("workspaceFolders", [...row.workspaceFolders]);
     entry.set("workspaceMode", row.workspaceMode);
+    entry.set("archivedAt", row.archivedAt);
     entry.set("model", row.model);
     entry.set("reasoningEffort", row.reasoningEffort);
     entry.set("agentMode", row.agentMode);
