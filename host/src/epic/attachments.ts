@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { SupportedImageMediaType } from "@traycer/protocol/persistence/epic/images";
 import type { HostRuntime } from "../runtime";
@@ -33,13 +33,14 @@ export type StagedImage = {
   readonly hash: string;
   readonly mediaType: SupportedImageMediaType;
   readonly src: string;
-  readonly path: string;
+  readonly bytes: Uint8Array;
 };
 
 /**
- * Prepared-but-uncommitted images, keyed by `operationId`. In memory on
- * purpose: a staged image whose host died is a temp file the next `commit`
- * cannot find, which is exactly the `unknown-operation` the contract has.
+ * Prepared-but-uncommitted images, keyed by `operationId`. The bytes are held
+ * in memory, not in a temp file: a prepare whose host died is exactly the
+ * `unknown-operation` the contract already has, and nothing outlives the
+ * process to be swept later.
  */
 const staged = new Map<string, StagedImage>();
 
@@ -97,31 +98,25 @@ export function sniffMediaType(
   return null;
 }
 
-export async function stageImage(
-  runtime: HostRuntime,
+export function stageImage(
   epicId: string,
   bytes: Uint8Array,
-): Promise<StagedImage | null> {
+): StagedImage | null {
   const mediaType = sniffMediaType(bytes);
   const extension = mediaType === null ? null : extensionFor(mediaType);
   if (mediaType === null || extension === null) {
     return null;
   }
   const hash = createHash("sha256").update(bytes).digest("hex");
-  const dir = join(attachmentsDir(runtime, epicId), "staging");
-  await mkdir(dir, { recursive: true });
-  const operationId = randomUUID();
-  const path = join(dir, `${operationId}.${extension}`);
-  await writeFile(path, bytes);
   const entry: StagedImage = {
-    operationId,
+    operationId: randomUUID(),
     epicId,
     hash,
     mediaType,
     src: attachmentSrc(hash, extension),
-    path,
+    bytes,
   };
-  staged.set(operationId, entry);
+  staged.set(entry.operationId, entry);
   return entry;
 }
 
@@ -133,24 +128,17 @@ export async function commitStagedImage(
   if (entry === undefined) {
     return false;
   }
-  const dir = attachmentsDir(runtime, entry.epicId);
-  await mkdir(dir, { recursive: true });
-  await rename(
-    entry.path,
+  await mkdir(attachmentsDir(runtime, entry.epicId), { recursive: true });
+  await writeFile(
     join(runtime.dataDir, "epics", entry.epicId, entry.src),
+    entry.bytes,
   );
   staged.delete(operationId);
   return true;
 }
 
-export async function abortStagedImage(operationId: string): Promise<boolean> {
-  const entry = staged.get(operationId);
-  if (entry === undefined) {
-    return false;
-  }
-  staged.delete(operationId);
-  await rm(entry.path, { force: true });
-  return true;
+export function abortStagedImage(operationId: string): boolean {
+  return staged.delete(operationId);
 }
 
 export async function readAttachment(

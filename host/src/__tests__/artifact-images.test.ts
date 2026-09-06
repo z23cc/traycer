@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -6,7 +6,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
   abortStagedImage,
-  attachmentsDir,
   commitStagedImage,
   readAttachment,
   stageImage,
@@ -42,7 +41,7 @@ describe("artifact images", () => {
     const setup = await boot();
     tempDir = setup.tempDir;
     started = setup.started;
-    const staged = await stageImage(started.runtime, "epic-1", PNG);
+    const staged = stageImage("epic-1", PNG);
     expect(staged).not.toBeNull();
     const hash = createHash("sha256").update(PNG).digest("hex");
     expect(staged?.hash).toBe(hash);
@@ -63,25 +62,24 @@ describe("artifact images", () => {
     ).toBe(false);
   });
 
-  it("deletes the staged bytes on abort", async () => {
+  it("drops the staged bytes on abort", async () => {
     const setup = await boot();
     tempDir = setup.tempDir;
     started = setup.started;
-    const staged = await stageImage(started.runtime, "epic-1", PNG);
-    expect(await abortStagedImage(staged?.operationId ?? "")).toBe(true);
+    const staged = stageImage("epic-1", PNG);
+    expect(abortStagedImage(staged?.operationId ?? "")).toBe(true);
+    // Nothing was ever written, and the operation is gone for good.
     expect(
-      await readdir(join(attachmentsDir(started.runtime, "epic-1"), "staging")),
-    ).toEqual([]);
-    expect(await abortStagedImage(staged?.operationId ?? "")).toBe(false);
+      await commitStagedImage(started.runtime, staged?.operationId ?? ""),
+    ).toBe(false);
+    expect(abortStagedImage(staged?.operationId ?? "")).toBe(false);
   });
 
   it("rejects bytes that are not a supported image", async () => {
     const setup = await boot();
     tempDir = setup.tempDir;
     started = setup.started;
-    expect(
-      await stageImage(started.runtime, "epic-1", Buffer.from("not an image")),
-    ).toBeNull();
+    expect(stageImage("epic-1", Buffer.from("not an image"))).toBeNull();
   });
 
   it("recovers the attachment hash when a body is re-read from disk", () => {

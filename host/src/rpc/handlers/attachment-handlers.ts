@@ -43,7 +43,7 @@ export const handlePrepareArtifactImage: RpcHandler = async (
       },
     };
   }
-  const stagedImage = await stageImage(runtime, parsed.data.epicId, bytes);
+  const stagedImage = stageImage(parsed.data.epicId, bytes);
   if (stagedImage === null) {
     return {
       ok: true,
@@ -75,7 +75,7 @@ export const handleFinishArtifactImage: RpcHandler = async (
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
   if (!parsed.data.commit) {
-    const aborted = await abortStagedImage(parsed.data.operationId);
+    const aborted = abortStagedImage(parsed.data.operationId);
     return {
       ok: true,
       result: { status: aborted ? "aborted" : "unknown-operation" },
