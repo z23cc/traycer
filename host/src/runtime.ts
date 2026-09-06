@@ -4,6 +4,7 @@ import type { GuiRunRegistry } from "./gui/deliver";
 import type { ChatQueue } from "./gui/queue";
 import type { HostStore } from "./store/host-store";
 import type { ChatHub } from "./stream/chat-hub";
+import type { EpicHub } from "./stream/epic-hub";
 import type { PtyManager } from "./terminal/pty";
 import type { TerminalRegistry } from "./terminal/sessions";
 
@@ -19,6 +20,7 @@ export type HostRuntime = {
   readonly guiRuns: GuiRunRegistry;
   readonly queue: ChatQueue;
   readonly chats: ChatHub;
+  readonly epics: EpicHub;
   requestRestart: () => void;
   lastRestartTransitionId: string | null;
 };

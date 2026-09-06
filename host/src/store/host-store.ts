@@ -159,6 +159,7 @@ export type StoredArtifact = {
   title: string;
   parentId: string | null;
   readonly folderName: string;
+  readonly artifactRoomId: string;
   readonly createdAt: number;
   updatedAt: number;
   status: number | null;
@@ -433,6 +434,11 @@ function normalizeArtifacts(value: unknown): StoredArtifact[] {
       title: record.title,
       parentId: typeof record.parentId === "string" ? record.parentId : null,
       folderName: record.folderName,
+      artifactRoomId:
+        typeof record.artifactRoomId === "string" &&
+        record.artifactRoomId.length > 0
+          ? record.artifactRoomId
+          : "",
       createdAt: record.createdAt,
       updatedAt:
         typeof record.updatedAt === "number"

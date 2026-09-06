@@ -26,6 +26,11 @@ import {
   setProviderSelection,
   setProviderTerminalAgentArgs,
 } from "../../providers/service";
+import {
+  awaitProviderLogin,
+  cancelProviderLogin,
+  startProviderLogin,
+} from "../../providers/login";
 import type { RpcHandler } from "./types";
 
 export const handleProvidersList: RpcHandler = async (_params, runtime) => {
@@ -193,25 +198,28 @@ export const handleProvidersDeleteEnvOverride: RpcHandler = async (
   return { ok: true, result: { state } };
 };
 
-export const handleProvidersStartLogin: RpcHandler = (params) => {
+export const handleProvidersStartLogin: RpcHandler = (params, runtime) => {
   const parsed = providersStartLoginRequestSchemaV11.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
   return {
     ok: true,
-    result: { url: null, started: false, profileId: null },
+    result: startProviderLogin(runtime.store, parsed.data.providerId),
   };
 };
 
-export const handleProvidersAwaitLogin: RpcHandler = (params) => {
+export const handleProvidersAwaitLogin: RpcHandler = async (
+  params,
+  runtime,
+) => {
   const parsed = providersAwaitLoginRequestSchema.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
   return {
     ok: true,
-    result: { state: null, existingProfileId: null, codeRejected: false },
+    result: await awaitProviderLogin(runtime.store, parsed.data.providerId),
   };
 };
 
@@ -220,7 +228,10 @@ export const handleProvidersCancelLogin: RpcHandler = (params) => {
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
-  return { ok: true, result: { cancelled: false } };
+  return {
+    ok: true,
+    result: { cancelled: cancelProviderLogin(parsed.data.providerId) },
+  };
 };
 
 export const handleProvidersRemoveCustomPath: RpcHandler = async (

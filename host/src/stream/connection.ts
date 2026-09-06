@@ -11,10 +11,7 @@ import {
 import { hostStreamRpcRegistry } from "@traycer/protocol/host/registry";
 import { authenticateOpenToken } from "../auth";
 import { epochRejectionReason, evaluateClientEpoch } from "../epoch-gate";
-import {
-  clientStreamManifestOverlap,
-  hostStreamManifest,
-} from "../manifest";
+import { clientStreamManifestOverlap, hostStreamManifest } from "../manifest";
 import type { HostRuntime } from "../runtime";
 import { handleChatClientFrame } from "./chat-actions";
 import { sendChatSnapshot } from "./chat";
@@ -25,15 +22,18 @@ import {
   sendEpicStatusSnapshot,
   sendNotificationsSnapshot,
 } from "./snapshots";
-import {
-  attachTerminalStream,
-  type TerminalStreamSession,
-} from "./terminal";
+import { attachTerminalStream, type TerminalStreamSession } from "./terminal";
 
 const SUBSCRIBE_TIMEOUT_MS = 30_000;
 const POLICY_VIOLATION = 1008;
 
 type StreamState = "pending" | "opened" | "subscribed" | "closed";
+
+type PendingBinary = {
+  readonly kind: string;
+  readonly epicId: string;
+  readonly artifactRoomId: string | null;
+};
 
 export function attachStreamConnection(
   socket: WebSocket,
@@ -42,6 +42,7 @@ export function attachStreamConnection(
   let state: StreamState = "pending";
   let subscribeTimer: NodeJS.Timeout | null = null;
   let terminalStream: TerminalStreamSession | null = null;
+  let pendingBinary: PendingBinary | null = null;
   const hostManifest = hostStreamManifest();
 
   socket.on("message", (data, isBinary) => {
@@ -51,6 +52,7 @@ export function attachStreamConnection(
     state = "closed";
     clearSubscribeTimer();
     runtime.chats.remove(socket);
+    runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
   });
@@ -58,6 +60,7 @@ export function attachStreamConnection(
     state = "closed";
     clearSubscribeTimer();
     runtime.chats.remove(socket);
+    runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
   });
@@ -91,6 +94,10 @@ export function attachStreamConnection(
       return;
     }
     if (isBinary) {
+      if (state === "subscribed" && pendingBinary !== null) {
+        applyPendingBinary(rawToBuffer(data));
+        pendingBinary = null;
+      }
       return;
     }
     let parsed: unknown;
@@ -219,10 +226,7 @@ export function attachStreamConnection(
     if (subscribe.data.method === "epic.subscribe") {
       const epicId = readEpicId(subscribe.data.params);
       if (epicId === null) {
-        reject(
-          unauthorized("epic.subscribe requires epicId"),
-          "missing-epic",
-        );
+        reject(unauthorized("epic.subscribe requires epicId"), "missing-epic");
         return;
       }
       sendEpicSnapshot(socket, runtime, epicId);
@@ -284,7 +288,53 @@ export function attachStreamConnection(
       sendJson({ kind: "pong", hasBinaryPayload: false });
       return;
     }
+    if (parsed.kind === "applyUpdate" || parsed.kind === "awareness") {
+      const epicId = readEpicId(parsed);
+      if (epicId !== null && Reflect.get(parsed, "hasBinaryPayload") === true) {
+        pendingBinary = { kind: parsed.kind, epicId, artifactRoomId: null };
+      }
+      return;
+    }
+    if (
+      parsed.kind === "artifactRoomApplyUpdate" ||
+      parsed.kind === "artifactRoomAwareness"
+    ) {
+      const epicId = readEpicId(parsed);
+      const artifactRoomId = Reflect.get(parsed, "artifactRoomId");
+      if (
+        epicId !== null &&
+        typeof artifactRoomId === "string" &&
+        Reflect.get(parsed, "hasBinaryPayload") === true
+      ) {
+        pendingBinary = {
+          kind: parsed.kind,
+          epicId,
+          artifactRoomId,
+        };
+      }
+      return;
+    }
     handleChatClientFrame(parsed, socket, runtime);
+  }
+
+  function applyPendingBinary(bytes: Buffer): void {
+    if (pendingBinary === null) {
+      return;
+    }
+    if (pendingBinary.kind === "applyUpdate") {
+      runtime.epics.applyRootUpdate(pendingBinary.epicId, bytes);
+      return;
+    }
+    if (
+      pendingBinary.kind === "artifactRoomApplyUpdate" &&
+      pendingBinary.artifactRoomId !== null
+    ) {
+      runtime.epics.applyRoomUpdate(
+        pendingBinary.epicId,
+        pendingBinary.artifactRoomId,
+        bytes,
+      );
+    }
   }
 }
 
@@ -311,6 +361,19 @@ function unauthorized(reason: string): FatalErrorDetails {
     incompatibleMethods: null,
     upgradeGuidance: null,
   };
+}
+
+function rawToBuffer(data: RawData): Buffer {
+  if (Buffer.isBuffer(data)) {
+    return data;
+  }
+  if (typeof data === "string") {
+    return Buffer.from(data);
+  }
+  if (Array.isArray(data)) {
+    return Buffer.concat(data);
+  }
+  return Buffer.from(data);
 }
 
 function rawToString(data: RawData): string {

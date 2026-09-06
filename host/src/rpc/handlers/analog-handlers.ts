@@ -1,3 +1,4 @@
+import { migratePhaseToEpicRequestSchema } from "@traycer/protocol/host/migration/unary-schemas";
 import { chatBackupStatusRequestSchema } from "@traycer/protocol/host/epic/chat-backup-status";
 import { listChatPublicationTargetsRequestSchema } from "@traycer/protocol/host/epic/chat-publication-identity";
 import { listCloudChatsRequestSchema } from "@traycer/protocol/host/epic/cloud-chat";
@@ -14,6 +15,41 @@ const QUIET_INDICATOR = {
   unreadDone: false,
   pendingFork: false,
 } as const;
+
+export const handlePhaseMigrateToEpic: RpcHandler = async (params, runtime) => {
+  const parsed = migratePhaseToEpicRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const existing = runtime.store
+    .snapshot()
+    .epics.find((row) => row.id === parsed.data.phaseId);
+  if (existing !== undefined) {
+    return { ok: true, result: { epicId: existing.id } };
+  }
+  const now = Date.now();
+  await runtime.store.mutate((state) => {
+    state.epics.unshift({
+      id: parsed.data.phaseId,
+      title: "Migrated phase",
+      initialUserPrompt: "",
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+      createdBy: "local",
+      version: "2.0.0",
+      ticketCount: 0,
+      specCount: 0,
+      storyCount: 0,
+      reviewCount: 0,
+      repos: [],
+      workspaces: [],
+      pinned: false,
+      lastViewedAt: now,
+    });
+  });
+  return { ok: true, result: { epicId: parsed.data.phaseId } };
+};
 
 export const handleHostChatForkGet: RpcHandler = () => {
   return { ok: true, result: { event: null } };
@@ -122,4 +158,3 @@ function readScope(
   }
   return null;
 }
-

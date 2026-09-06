@@ -18,6 +18,7 @@ import {
   credentialPresent,
   storedApiKeyFromOverride,
 } from "../gui/provider-rate-limits";
+import { PROVIDER_LOGIN_CAPABILITY } from "./login-capability";
 
 export type ProviderListResult = {
   readonly providers: ProviderCliState[];
@@ -285,7 +286,7 @@ function buildState(
     apiKey: apiKeyStateForProvider(providerId, storedApiKey),
     terminalAgentArgs: override === null ? "" : override.terminalAgentArgs,
     envOverrides: override === null ? [] : [...override.envOverrides],
-    loginCapability: null,
+    loginCapability: PROVIDER_LOGIN_CAPABILITY[providerId],
     availabilityPending: false,
     profiles: [],
     managedInstallState: null,

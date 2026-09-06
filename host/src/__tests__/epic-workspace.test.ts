@@ -3,12 +3,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
+import * as Y from "yjs";
 import {
   CURRENT_CLIENT_COMPATIBILITY_EPOCH,
   SERVES_EVERY_INSTALLED_MAJOR,
   splitConnectionManifest,
 } from "@traycer/protocol/framework/index";
-import { hostRpcRegistry } from "@traycer/protocol/host/registry";
+import { buildStreamManifest } from "@traycer/protocol/framework/stream-compat";
+import {
+  hostRpcRegistry,
+  hostStreamRpcRegistry,
+} from "@traycer/protocol/host/registry";
 import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-floor";
 import { startHost, type StartedHost } from "../start-host";
 
@@ -471,6 +476,82 @@ describe("epic and workspace RPCs", () => {
     );
     expect(emptyMentions).toEqual({ entries: [] });
   });
+
+  it("seeds artifacts into epic.subscribe and emits dirtySnapshot", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "traycer-host-"));
+    started = await startHost({
+      argv: ["--host-data-dir", tempDir],
+      listenHost: "127.0.0.1",
+      listenPort: 0,
+    });
+    await call(
+      started.rpcUrl,
+      "epic.create",
+      { major: 1, minor: 0 },
+      {
+        epic: {
+          id: "epic-y",
+          title: "Yjs epic",
+          initialUserPrompt: "",
+          ticketCount: 0,
+          specCount: 0,
+          storyCount: 0,
+          reviewCount: 0,
+          status: "active",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          createdBy: "local",
+          version: "2.0.0",
+        },
+        repoIdentifiers: [],
+        workspaces: [],
+        chat: null,
+      },
+    );
+    const created = (await call(
+      started.rpcUrl,
+      "epic.createArtifact",
+      { major: 1, minor: 0 },
+      {
+        epicId: "epic-y",
+        parentId: null,
+        artifactType: "ticket",
+        title: "First ticket",
+      },
+    )) as { artifactId: string };
+    const migrated = await call(
+      started.rpcUrl,
+      "phase.migrateToEpic",
+      { major: 1, minor: 0 },
+      { phaseId: "epic-y" },
+    );
+    expect(migrated).toEqual({ epicId: "epic-y" });
+    const frames = await subscribeEpic(started.rpcUrl, "epic-y");
+    const snapshot = frames.find(
+      (frame) => frame.kind === "snapshot" && frame.binary !== null,
+    );
+    expect(snapshot).toBeDefined();
+    const doc = new Y.Doc();
+    Y.applyUpdate(doc, snapshot?.binary ?? new Uint8Array());
+    const artifacts = doc.getMap("epic").get("artifacts");
+    expect(artifacts instanceof Y.Map).toBe(true);
+    const entry =
+      artifacts instanceof Y.Map ? artifacts.get(created.artifactId) : null;
+    expect(entry instanceof Y.Map).toBe(true);
+    if (entry instanceof Y.Map) {
+      expect(entry.get("kind")).toBe("ticket");
+      expect(entry.get("title")).toBe("First ticket");
+      expect(typeof entry.get("artifactRoomId")).toBe("string");
+    }
+    expect(
+      frames.some(
+        (frame) => frame.kind === "dirtySnapshot" && frame.rootDirty === false,
+      ),
+    ).toBe(true);
+    expect(frames.some((frame) => frame.kind === "artifactRoomState")).toBe(
+      true,
+    );
+  });
 });
 
 async function call(
@@ -536,4 +617,98 @@ async function call(
     throw new Error(`RPC error: ${JSON.stringify(record.error)}`);
   }
   return record.result;
+}
+
+async function subscribeEpic(
+  rpcUrl: string,
+  epicId: string,
+): Promise<
+  readonly {
+    readonly kind: string;
+    readonly rootDirty?: boolean;
+    readonly binary: Uint8Array | null;
+  }[]
+> {
+  const streamUrl = rpcUrl.replace(/\/rpc$/u, "/stream");
+  const socket = new WebSocket(streamUrl);
+  await new Promise<void>((resolve, reject) => {
+    socket.once("open", () => resolve());
+    socket.once("error", reject);
+  });
+  const frames: {
+    kind: string;
+    rootDirty?: boolean;
+    binary: Uint8Array | null;
+  }[] = [];
+  let pending: (typeof frames)[number] | null = null;
+  const done = new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      socket.close();
+    }, 2_000);
+    socket.on("message", (data, isBinary) => {
+      if (isBinary) {
+        if (pending !== null) {
+          pending.binary = new Uint8Array(
+            Buffer.isBuffer(data) ? data : Buffer.from(String(data)),
+          );
+          pending = null;
+        }
+        if (frames.some((frame) => frame.kind === "dirtySnapshot")) {
+          clearTimeout(timer);
+          socket.close();
+        }
+        return;
+      }
+      const parsed: unknown = JSON.parse(String(data));
+      if (parsed === null || typeof parsed !== "object") {
+        return;
+      }
+      const kind = Reflect.get(parsed, "kind");
+      if (typeof kind !== "string") {
+        return;
+      }
+      if (kind === "openAck") {
+        socket.send(
+          JSON.stringify({
+            kind: "subscribe",
+            method: "epic.subscribe",
+            schemaVersion: { major: 1, minor: 3 },
+            params: { epicId },
+          }),
+        );
+        return;
+      }
+      const frame = {
+        kind,
+        rootDirty: Reflect.get(parsed, "rootDirty") === true ? true : false,
+        binary: null as Uint8Array | null,
+      };
+      frames.push(frame);
+      if (Reflect.get(parsed, "hasBinaryPayload") === true) {
+        pending = frame;
+      } else if (kind === "dirtySnapshot") {
+        clearTimeout(timer);
+        socket.close();
+      }
+    });
+    socket.once("close", () => resolve());
+    socket.once("error", reject);
+  });
+  socket.send(
+    JSON.stringify({
+      kind: "open",
+      token: "test-token",
+      manifest: buildStreamManifest(
+        hostStreamRpcRegistry,
+        SERVES_EVERY_INSTALLED_MAJOR,
+      ),
+      clientIdentity: {
+        kind: "cli",
+        compatibilityEpoch: CURRENT_CLIENT_COMPATIBILITY_EPOCH,
+        appVersion: "0.1.0",
+      },
+    }),
+  );
+  await done;
+  return frames;
 }

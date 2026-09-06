@@ -191,13 +191,46 @@ describe("providers and terminal", () => {
     expect(deletedEnv).toMatchObject({
       state: { providerId: "claude-code", envOverrides: [] },
     });
+    const withCapability = await call(
+      started.rpcUrl,
+      "providers.list",
+      { major: 8, minor: 0 },
+      { forceAuthRefresh: false, native: null },
+    );
+    const capabilityRecord = withCapability as {
+      providers: readonly {
+        providerId: string;
+        loginCapability: { oauthArgs: readonly string[] | null } | null;
+      }[];
+    };
+    expect(
+      capabilityRecord.providers.find(
+        (row) => row.providerId === "claude-code",
+      )?.loginCapability,
+    ).toMatchObject({
+      oauthArgs: ["auth", "login"],
+      token: {
+        vars: ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
+      },
+    });
     const login = await call(
       started.rpcUrl,
       "providers.startLogin",
       { major: 1, minor: 1 },
-      { providerId: "claude-code" },
+      { providerId: "cursor" },
     );
     expect(login).toEqual({
+      url: null,
+      started: false,
+      profileId: null,
+    });
+    const terminalLogin = await call(
+      started.rpcUrl,
+      "providers.startLogin",
+      { major: 1, minor: 1 },
+      { providerId: "copilot" },
+    );
+    expect(terminalLogin).toEqual({
       url: null,
       started: false,
       profileId: null,

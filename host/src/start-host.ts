@@ -11,6 +11,7 @@ import { buildPidMetadata, writePidMetadata } from "./pid-metadata";
 import type { HostRuntime } from "./runtime";
 import { HostStore } from "./store/host-store";
 import { ChatHub } from "./stream/chat-hub";
+import { EpicHub } from "./stream/epic-hub";
 import { PtyManager } from "./terminal/pty";
 import { TerminalRegistry } from "./terminal/sessions";
 import { HOST_VERSION } from "./version";
@@ -61,6 +62,7 @@ export async function startHost(
     guiRuns: new GuiRunRegistry(),
     queue: new ChatQueue(),
     chats: new ChatHub(),
+    epics: new EpicHub(),
     requestRestart: () => undefined,
     lastRestartTransitionId: null,
   };

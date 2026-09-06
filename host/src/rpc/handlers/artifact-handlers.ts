@@ -43,6 +43,7 @@ import {
   setCommentThreadResolved,
   setThreadStatusByPath,
 } from "../../epic/comments";
+import { publishEpic } from "../../stream/epic-hub";
 import type { RpcHandler, RpcHandlerResult } from "./types";
 
 export const handleEpicCreateArtifact: RpcHandler = async (params, runtime) => {
@@ -60,6 +61,7 @@ export const handleEpicCreateArtifact: RpcHandler = async (params, runtime) => {
   if (artifactId === null) {
     return fail("Epic or parent artifact not found");
   }
+  await publishEpic(runtime, parsed.data.epicId);
   return { ok: true, result: { artifactId } };
 };
 
@@ -73,6 +75,9 @@ export const handleEpicDeleteArtifact: RpcHandler = async (params, runtime) => {
     parsed.data.epicId,
     parsed.data.artifactId,
   );
+  if (deleted) {
+    await publishEpic(runtime, parsed.data.epicId);
+  }
   return { ok: true, result: { deleted } };
 };
 
@@ -87,6 +92,9 @@ export const handleEpicRenameArtifact: RpcHandler = async (params, runtime) => {
     parsed.data.artifactId,
     parsed.data.title,
   );
+  if (updated) {
+    await publishEpic(runtime, parsed.data.epicId);
+  }
   return { ok: true, result: { updated } };
 };
 
@@ -112,6 +120,9 @@ export const handleEpicUpdateArtifactStatus: RpcHandler = async (
     parsed.data.artifactId,
     parsed.data.status,
   );
+  if (updated) {
+    await publishEpic(runtime, parsed.data.epicId);
+  }
   return { ok: true, result: { updated } };
 };
 
@@ -129,6 +140,9 @@ export const handleEpicReparentArtifact: RpcHandler = async (
     parsed.data.artifactId,
     parsed.data.newParentId,
   );
+  if (updated) {
+    await publishEpic(runtime, parsed.data.epicId);
+  }
   return { ok: true, result: { updated } };
 };
 

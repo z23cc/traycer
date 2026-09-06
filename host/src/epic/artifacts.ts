@@ -28,6 +28,7 @@ export async function createArtifact(
     title,
     parentId,
     folderName,
+    artifactRoomId: randomUUID(),
     createdAt: now,
     updatedAt: now,
     status,
