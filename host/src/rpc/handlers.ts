@@ -18,8 +18,16 @@ import {
   hostUpdateCheckV11,
 } from "@traycer/protocol/host/maintenance/contracts";
 import {
+  handleClaimShutdown,
+  handleCommitShutdown,
+  handleReleaseShutdown,
+} from "./handlers/lifecycle-handlers";
+import {
   handleEditorOpenPaths,
   handleHostRestart,
+  handleHostServiceDeregister,
+  handleHostServiceRegister,
+  handleHostUpdateInstall,
   handleHostStatus,
   handleRateLimitUsage,
   handleRuntimeCapabilities,
@@ -434,6 +442,12 @@ const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "config.env.list": handleConfigEnvList,
   "config.env.set": handleConfigEnvSet,
   "config.env.delete": handleConfigEnvDelete,
+  "lifecycle.claimShutdown": handleClaimShutdown,
+  "lifecycle.commitShutdown": handleCommitShutdown,
+  "lifecycle.releaseShutdown": handleReleaseShutdown,
+  "host.update.install": handleHostUpdateInstall,
+  "host.service.register": handleHostServiceRegister,
+  "host.service.deregister": handleHostServiceDeregister,
 };
 
 const HANDLERS: { readonly [method: string]: RpcHandler } =

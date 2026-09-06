@@ -261,3 +261,25 @@ export const handleSpeechModelStatus: RpcHandler = (params) => {
     },
   };
 };
+
+/**
+ * The updater, the service registration, and its removal all shell out to the
+ * `traycer` CLI so it can bootout/bootstrap the launchd job that supervises
+ * this process. An OSS host does not own that job - it is started by whatever
+ * supervisor launched it, and its bits come from a checkout rather than a
+ * signed release - so there is no CLI run here that could honestly succeed.
+ *
+ * `externally-managed` is the contract's own word for exactly that: an
+ * external supervisor owns this host's service lifecycle. Answering
+ * `accepted`/`ok` instead would tell the GUI an update or a registration is
+ * under way when nothing is happening, and on this machine it would also
+ * invite a second supervisor over a host home that already has one.
+ */
+const EXTERNALLY_MANAGED: RpcHandler = () => ({
+  ok: true,
+  result: { outcome: "externally-managed" },
+});
+
+export const handleHostUpdateInstall = EXTERNALLY_MANAGED;
+export const handleHostServiceRegister = EXTERNALLY_MANAGED;
+export const handleHostServiceDeregister = EXTERNALLY_MANAGED;

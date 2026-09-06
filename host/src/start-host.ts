@@ -13,6 +13,7 @@ import type { HostRuntime } from "./runtime";
 import { HostStore } from "./store/host-store";
 import { PlainTerminalHub } from "./terminal/plain";
 import { ChatHub } from "./stream/chat-hub";
+import { ShutdownCoordinator } from "./lifecycle/shutdown";
 import { EpicHub } from "./stream/epic-hub";
 import { PtyManager } from "./terminal/pty";
 import { TerminalRegistry } from "./terminal/sessions";
@@ -67,6 +68,7 @@ export async function startHost(
     notifications: new NotificationHub(),
     plainTerminals: new PlainTerminalHub(),
     epics: new EpicHub(),
+    shutdown: new ShutdownCoordinator(),
     requestRestart: () => undefined,
     lastRestartTransitionId: null,
   };

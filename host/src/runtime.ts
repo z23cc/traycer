@@ -5,6 +5,7 @@ import type { NotificationHub } from "./gui/notifications";
 import type { ChatQueue } from "./gui/queue";
 import type { HostStore } from "./store/host-store";
 import type { ChatHub } from "./stream/chat-hub";
+import type { ShutdownCoordinator } from "./lifecycle/shutdown";
 import type { EpicHub } from "./stream/epic-hub";
 import type { PlainTerminalHub } from "./terminal/plain";
 import type { PtyManager } from "./terminal/pty";
@@ -25,6 +26,7 @@ export type HostRuntime = {
   readonly notifications: NotificationHub;
   readonly plainTerminals: PlainTerminalHub;
   readonly epics: EpicHub;
+  readonly shutdown: ShutdownCoordinator;
   requestRestart: () => void;
   lastRestartTransitionId: string | null;
 };
