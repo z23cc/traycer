@@ -23,6 +23,7 @@ import {
 } from "@traycer/protocol/host/registry";
 import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-floor";
 import { artifactBodyFragmentName } from "@traycer/protocol/persistence/epic/artifacts";
+import { listEpicCollaboratorsResponseSchema } from "@traycer/protocol/host/epic/unary-schemas";
 import { xmlFragmentToMarkdown } from "../epic/artifact-body";
 import { startHost, type StartedHost } from "../start-host";
 
@@ -758,7 +759,89 @@ describe("epic and workspace RPCs", () => {
     expect(written).toContain("OSS body");
     expect(written).toContain("Edited locally");
   });
+  it("keeps a local owner and persists the grants beside it", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "traycer-host-"));
+    started = await startHost({
+      argv: ["--host-data-dir", tempDir],
+      listenHost: "127.0.0.1",
+      listenPort: 0,
+    });
+    await call(
+      started.rpcUrl,
+      "phase.migrateToEpic",
+      { major: 1, minor: 0 },
+      { phaseId: "epic-collab" },
+    );
+    const initial = await call(
+      started.rpcUrl,
+      "epic.listCollaborators",
+      { major: 1, minor: 0 },
+      { epicId: "epic-collab" },
+    );
+    expect(initial).toMatchObject({
+      collaboratorsAvailable: true,
+      collaborators: [
+        { role: "owner", accessType: "direct", user: { userId: "local" } },
+      ],
+    });
+    const granted = await call(
+      started.rpcUrl,
+      "epic.grantAccess",
+      { major: 1, minor: 0 },
+      {
+        epicId: "epic-collab",
+        input: {
+          kind: "users",
+          invites: [
+            {
+              identifier: "someone@example.dev",
+              identifierType: "email",
+              role: "editor",
+            },
+          ],
+        },
+      },
+    );
+    expect(readRoles(granted)).toEqual(["owner", "editor"]);
+    const updated = await call(
+      started.rpcUrl,
+      "epic.batchUpdateRoles",
+      { major: 1, minor: 0 },
+      {
+        epicId: "epic-collab",
+        input: {
+          changes: [{ userId: "local:someone@example.dev", newRole: "viewer" }],
+        },
+      },
+    );
+    expect(readRoles(updated)).toEqual(["owner", "viewer"]);
+    // The owner is synthesized, so revoking it is a no-op rather than a
+    // locked-out epic.
+    const keptOwner = await call(
+      started.rpcUrl,
+      "epic.revokeCollaborator",
+      { major: 1, minor: 0 },
+      { epicId: "epic-collab", input: { kind: "users", userId: "local" } },
+    );
+    expect(readRoles(keptOwner)).toEqual(["owner", "viewer"]);
+    const revoked = await call(
+      started.rpcUrl,
+      "epic.revokeCollaborator",
+      { major: 1, minor: 0 },
+      {
+        epicId: "epic-collab",
+        input: { kind: "users", userId: "local:someone@example.dev" },
+      },
+    );
+    expect(readRoles(revoked)).toEqual(["owner"]);
+  });
 });
+
+function readRoles(result: unknown): readonly string[] {
+  return listEpicCollaboratorsResponseSchema
+    .parse(result)
+    .collaborators.map((entry) => entry.role);
+}
 
 async function call(
   url: string,

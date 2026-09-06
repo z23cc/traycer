@@ -1,3 +1,4 @@
+import { userInfo } from "node:os";
 import {
   getChatRunSettingsRequestSchema,
   listChatRecordsRequestSchema,
@@ -22,6 +23,10 @@ import {
   updateChatRunSettingsRequestSchema,
   updateChatRunSettingsRequestSchemaV11,
   updateEpicRequestSchema,
+  type CollaboratorEntry,
+  type CollaboratorProfile,
+  type ListEpicCollaboratorsResponse,
+  type PermissionRole,
 } from "@traycer/protocol/host/epic/unary-schemas";
 import {
   beginGuiPrintTurn,
@@ -38,7 +43,11 @@ import {
 import { createWorktreeBinding } from "../../worktree/service";
 import { LOCAL_USER_ID } from "../../local-user";
 import type { HostRuntime } from "../../runtime";
-import type { StoredChat, StoredEpic } from "../../store/host-store";
+import type {
+  StoredChat,
+  StoredCollaborator,
+  StoredEpic,
+} from "../../store/host-store";
 import type { RpcHandler } from "./types";
 
 const EPIC_VERSION = "2.0.0";
@@ -456,15 +465,12 @@ export const handleEpicListChatRecords: RpcHandler = (params, runtime) => {
   return { ok: true, result: { chats } };
 };
 
-export const handleEpicListCollaborators: RpcHandler = (params) => {
+export const handleEpicListCollaborators: RpcHandler = (params, runtime) => {
   const parsed = listEpicCollaboratorsRequestSchema.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
-  return {
-    ok: true,
-    result: { collaborators: [], collaboratorsAvailable: false },
-  };
+  return { ok: true, result: collaboratorsOf(runtime, parsed.data.epicId) };
 };
 
 export const handleEpicMentionEpics: RpcHandler = (params, runtime) => {
@@ -492,34 +498,174 @@ export const handleEpicMentionEpics: RpcHandler = (params, runtime) => {
   return { ok: true, result: { entries } };
 };
 
-const EMPTY_COLLABORATORS = {
-  collaborators: [],
-  collaboratorsAvailable: false,
-} as const;
-
-export const handleEpicGrantAccess: RpcHandler = (params) => {
+export const handleEpicGrantAccess: RpcHandler = async (params, runtime) => {
   const parsed = grantEpicAccessRequestSchema.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
-  return { ok: true, result: EMPTY_COLLABORATORS };
+  const epicId = parsed.data.epicId;
+  const input = parsed.data.input;
+  const now = Date.now();
+  await runtime.store.mutate((state) => {
+    if (input.kind === "team") {
+      upsertCollaborator(state.collaborators, {
+        epicId,
+        kind: "team",
+        id: input.teamId,
+        displayName: input.teamId,
+        email: "",
+        handle: "",
+        grantedAt: now,
+        grantedBy: LOCAL_USER_ID,
+        role: localRole(input.role),
+      });
+      return;
+    }
+    for (const invite of input.invites) {
+      const identifier = invite.identifier.trim();
+      if (identifier.length === 0) {
+        continue;
+      }
+      upsertCollaborator(state.collaborators, {
+        epicId,
+        kind: "user",
+        id: `local:${identifier.toLowerCase()}`,
+        displayName: identifier,
+        email: invite.identifierType === "email" ? identifier : "",
+        handle: invite.identifierType === "github_handle" ? identifier : "",
+        grantedAt: now,
+        grantedBy: LOCAL_USER_ID,
+        role: localRole(invite.role),
+      });
+    }
+  });
+  return { ok: true, result: collaboratorsOf(runtime, epicId) };
 };
 
-export const handleEpicBatchUpdateRoles: RpcHandler = (params) => {
+export const handleEpicBatchUpdateRoles: RpcHandler = async (
+  params,
+  runtime,
+) => {
   const parsed = batchUpdateEpicRolesRequestSchema.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
-  return { ok: true, result: EMPTY_COLLABORATORS };
+  const epicId = parsed.data.epicId;
+  await runtime.store.mutate((state) => {
+    for (const change of parsed.data.input.changes) {
+      const target = state.collaborators.find(
+        (row) =>
+          row.epicId === epicId &&
+          (row.id === change.userId || row.id === change.teamId),
+      );
+      if (target === undefined) {
+        continue;
+      }
+      target.role = localRole(change.newRole);
+    }
+  });
+  return { ok: true, result: collaboratorsOf(runtime, epicId) };
 };
 
-export const handleEpicRevokeCollaborator: RpcHandler = (params) => {
+export const handleEpicRevokeCollaborator: RpcHandler = async (
+  params,
+  runtime,
+) => {
   const parsed = revokeEpicCollaboratorRequestSchema.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
-  return { ok: true, result: EMPTY_COLLABORATORS };
+  const epicId = parsed.data.epicId;
+  const input = parsed.data.input;
+  const revokedId = input.kind === "team" ? input.teamId : input.userId;
+  await runtime.store.mutate((state) => {
+    state.collaborators = state.collaborators.filter(
+      (row) => !(row.epicId === epicId && row.id === revokedId),
+    );
+  });
+  return { ok: true, result: collaboratorsOf(runtime, epicId) };
 };
+
+/**
+ * The local plane has one account, so the owner is synthesized rather than
+ * stored: it cannot be revoked or demoted, and every grant below it is a
+ * local record with nothing on the other end to notify.
+ */
+function collaboratorsOf(
+  runtime: HostRuntime,
+  epicId: string,
+): ListEpicCollaboratorsResponse {
+  const epic = runtime.store.snapshot().epics.find((row) => row.id === epicId);
+  const owner: CollaboratorEntry = {
+    role: "owner",
+    accessType: "direct",
+    grantedAt: epic?.createdAt ?? Date.now(),
+    grantedBy: LOCAL_USER_ID,
+    user: { userId: LOCAL_USER_ID, profile: localOwnerProfile() },
+  };
+  const granted = runtime.store
+    .snapshot()
+    .collaborators.filter((row) => row.epicId === epicId)
+    .map((row): CollaboratorEntry => {
+      const shared = {
+        role: row.role,
+        accessType: "direct" as const,
+        grantedAt: row.grantedAt,
+        grantedBy: row.grantedBy,
+      };
+      if (row.kind === "team") {
+        return {
+          ...shared,
+          team: { teamId: row.id, teamName: row.displayName, teamMembers: [] },
+        };
+      }
+      return {
+        ...shared,
+        user: {
+          userId: row.id,
+          profile: {
+            displayName: row.displayName,
+            avatarUrl: "",
+            email: row.email,
+            handle: row.handle,
+          },
+        },
+      };
+    });
+  return {
+    collaborators: [owner, ...granted],
+    collaboratorsAvailable: true,
+  };
+}
+
+function localOwnerProfile(): CollaboratorProfile {
+  let name = LOCAL_USER_ID;
+  try {
+    name = userInfo().username;
+  } catch {
+    // No OS user record (a sandboxed uid); the id stands in for a name.
+  }
+  return { displayName: name, avatarUrl: "", email: "", handle: name };
+}
+
+/** The owner role is reserved for the local account. */
+function localRole(role: PermissionRole): "editor" | "viewer" {
+  return role === "viewer" ? "viewer" : "editor";
+}
+
+function upsertCollaborator(
+  rows: StoredCollaborator[],
+  row: StoredCollaborator,
+): void {
+  const existing = rows.find(
+    (candidate) => candidate.epicId === row.epicId && candidate.id === row.id,
+  );
+  if (existing === undefined) {
+    rows.push(row);
+    return;
+  }
+  existing.role = row.role;
+}
 
 export const handleEpicRemoveRepo: RpcHandler = async (params, runtime) => {
   const parsed = removeEpicRepoRequestSchema.safeParse(params);

@@ -73,6 +73,23 @@ export type StoredTokenUsage = {
 };
 
 /**
+ * A local access grant. The signed-in owner is never stored - it is
+ * synthesized per epic, so an epic always has exactly one owner and no grant
+ * can delete it.
+ */
+export type StoredCollaborator = {
+  readonly epicId: string;
+  readonly kind: "user" | "team";
+  readonly id: string;
+  readonly displayName: string;
+  readonly email: string;
+  readonly handle: string;
+  readonly grantedAt: number;
+  readonly grantedBy: string;
+  role: "owner" | "editor" | "viewer";
+};
+
+/**
  * One completed GUI turn, the local stand-in for a cloud usage fact. Written
  * whether or not the provider reported tokens: `usageCompleteness` says which.
  */
@@ -222,6 +239,7 @@ export type HostState = {
   artifacts: StoredArtifact[];
   commentThreads: StoredCommentThread[];
   usageFacts: StoredUsageFact[];
+  collaborators: StoredCollaborator[];
 };
 
 const EMPTY_STATE: HostState = {
@@ -236,6 +254,7 @@ const EMPTY_STATE: HostState = {
   artifacts: [],
   commentThreads: [],
   usageFacts: [],
+  collaborators: [],
 };
 
 export class HostStore {
@@ -256,6 +275,7 @@ export class HostStore {
       artifacts: [],
       commentThreads: [],
       usageFacts: [],
+      collaborators: [],
     };
     this.writeTail = Promise.resolve();
     this.closed = false;
@@ -280,6 +300,7 @@ export class HostStore {
           artifacts: normalizeArtifacts(parsed.artifacts),
           commentThreads: normalizeCommentThreads(parsed.commentThreads),
           usageFacts: normalizeUsageFacts(parsed.usageFacts),
+          collaborators: normalizeCollaborators(parsed.collaborators),
         };
       }
     } catch {
@@ -343,6 +364,7 @@ type PersistedHostState = Omit<
   | "artifacts"
   | "commentThreads"
   | "usageFacts"
+  | "collaborators"
 > & {
   readonly providers?: unknown;
   readonly agents?: unknown;
@@ -351,6 +373,7 @@ type PersistedHostState = Omit<
   readonly artifacts?: unknown;
   readonly commentThreads?: unknown;
   readonly usageFacts?: unknown;
+  readonly collaborators?: unknown;
 };
 
 function isPersistedHostState(value: unknown): value is PersistedHostState {
@@ -916,4 +939,41 @@ export function countOf(value: unknown): number {
     return 0;
   }
   return Math.max(0, Math.round(value));
+}
+
+const COLLABORATOR_ROLES = ["owner", "editor", "viewer"] as const;
+
+function normalizeCollaborators(value: unknown): StoredCollaborator[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const rows: StoredCollaborator[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    if (
+      typeof record.epicId !== "string" ||
+      typeof record.id !== "string" ||
+      typeof record.grantedAt !== "number"
+    ) {
+      continue;
+    }
+    const role = COLLABORATOR_ROLES.find((row) => row === record.role);
+    rows.push({
+      epicId: record.epicId,
+      kind: record.kind === "team" ? "team" : "user",
+      id: record.id,
+      displayName:
+        typeof record.displayName === "string" ? record.displayName : record.id,
+      email: typeof record.email === "string" ? record.email : "",
+      handle: typeof record.handle === "string" ? record.handle : "",
+      grantedAt: record.grantedAt,
+      grantedBy:
+        typeof record.grantedBy === "string" ? record.grantedBy : "local",
+      role: role ?? "viewer",
+    });
+  }
+  return rows;
 }
