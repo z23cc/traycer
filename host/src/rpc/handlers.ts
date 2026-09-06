@@ -143,6 +143,8 @@ import {
   handleProvidersSetSelection,
   handleProvidersSetTerminalAgentArgs,
   handleProvidersStartLogin,
+  handleProvidersSubmitLoginCode,
+  handleProvidersTouchLogin,
 } from "./handlers/provider-handlers";
 import {
   handleTerminalCreate,
@@ -215,6 +217,8 @@ const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "providers.startLogin": handleProvidersStartLogin,
   "providers.awaitLogin": handleProvidersAwaitLogin,
   "providers.cancelLogin": handleProvidersCancelLogin,
+  "providers.submitLoginCode": handleProvidersSubmitLoginCode,
+  "providers.touchLogin": handleProvidersTouchLogin,
   "snapshots.getLocalStorageSize": handleSnapshotSize,
   "snapshots.clearLocalSnapshots": handleSnapshotClear,
   "snapshots.readSnapshotDiff": handleSnapshotReadDiff,

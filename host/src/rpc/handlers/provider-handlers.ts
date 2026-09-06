@@ -12,6 +12,8 @@ import {
   providersSetSelectionRequestSchema,
   providersSetTerminalAgentArgsRequestSchema,
   providersStartLoginRequestSchemaV11,
+  providersSubmitLoginCodeRequestSchema,
+  providersTouchLoginRequestSchema,
 } from "@traycer/protocol/host/provider-schemas";
 import { probeCandidateVersion } from "../../providers/catalog";
 import {
@@ -30,6 +32,8 @@ import {
   awaitProviderLogin,
   cancelProviderLogin,
   startProviderLogin,
+  submitProviderLoginCode,
+  touchProviderLogin,
 } from "../../providers/login";
 import type { RpcHandler } from "./types";
 
@@ -231,6 +235,33 @@ export const handleProvidersCancelLogin: RpcHandler = (params) => {
   return {
     ok: true,
     result: { cancelled: cancelProviderLogin(parsed.data.providerId) },
+  };
+};
+
+export const handleProvidersSubmitLoginCode: RpcHandler = (params) => {
+  const parsed = providersSubmitLoginCodeRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  return {
+    ok: true,
+    result: {
+      outcome: submitProviderLoginCode(
+        parsed.data.providerId,
+        parsed.data.code,
+      ),
+    },
+  };
+};
+
+export const handleProvidersTouchLogin: RpcHandler = (params) => {
+  const parsed = providersTouchLoginRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  return {
+    ok: true,
+    result: { extended: touchProviderLogin(parsed.data.providerId) },
   };
 };
 

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -204,14 +204,15 @@ describe("providers and terminal", () => {
       }[];
     };
     expect(
-      capabilityRecord.providers.find(
-        (row) => row.providerId === "claude-code",
-      )?.loginCapability,
+      capabilityRecord.providers.find((row) => row.providerId === "claude-code")
+        ?.loginCapability,
     ).toMatchObject({
       oauthArgs: ["auth", "login"],
       token: {
         vars: ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
       },
+      codePaste: {},
+      terminalLogin: null,
     });
     const login = await call(
       started.rpcUrl,
@@ -235,6 +236,87 @@ describe("providers and terminal", () => {
       started: false,
       profileId: null,
     });
+  });
+
+  it("pastes a login code onto a codePaste-capable child's stdin", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "traycer-host-"));
+    started = await startHost({
+      argv: ["--host-data-dir", tempDir],
+      listenHost: "127.0.0.1",
+      listenPort: 0,
+    });
+    const idle = await call(
+      started.rpcUrl,
+      "providers.submitLoginCode",
+      { major: 1, minor: 0 },
+      { providerId: "claude-code", profileId: null, code: "idle" },
+    );
+    expect(idle).toEqual({ outcome: "noActiveLogin" });
+    const untouched = await call(
+      started.rpcUrl,
+      "providers.touchLogin",
+      { major: 1, minor: 0 },
+      { providerId: "claude-code", profileId: null },
+    );
+    expect(untouched).toEqual({ extended: false });
+    const script = join(tempDir, "fake-claude");
+    const codeFile = join(tempDir, "code.txt");
+    await writeFile(
+      script,
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [ "\${1-}" = "auth" ] && [ "\${2-}" = "login" ]; then
+  IFS= read -r line || true
+  printf '%s\\n' "$line" > "${codeFile}"
+  exit 0
+fi
+exit 1
+`,
+    );
+    await chmod(script, 0o755);
+    await call(
+      started.rpcUrl,
+      "providers.addCustomPath",
+      { major: 2, minor: 1 },
+      { providerId: "claude-code", path: script },
+    );
+    const startedLogin = await call(
+      started.rpcUrl,
+      "providers.startLogin",
+      { major: 1, minor: 1 },
+      { providerId: "claude-code" },
+    );
+    expect(startedLogin).toEqual({
+      url: null,
+      started: true,
+      profileId: null,
+    });
+    const touched = await call(
+      started.rpcUrl,
+      "providers.touchLogin",
+      { major: 1, minor: 0 },
+      { providerId: "claude-code", profileId: null },
+    );
+    expect(touched).toEqual({ extended: true });
+    const submitted = await call(
+      started.rpcUrl,
+      "providers.submitLoginCode",
+      { major: 1, minor: 0 },
+      {
+        providerId: "claude-code",
+        profileId: null,
+        code: "paste-code-1",
+      },
+    );
+    expect(submitted).toEqual({ outcome: "accepted" });
+    const awaited = await call(
+      started.rpcUrl,
+      "providers.awaitLogin",
+      { major: 2, minor: 1 },
+      { providerId: "claude-code" },
+    );
+    expect(awaited).toMatchObject({ codeRejected: false });
+    expect(await readFile(codeFile, "utf8")).toBe("paste-code-1\n");
   });
 
   it("spawns a PTY and answers terminal.subscribe with a snapshot", async () => {

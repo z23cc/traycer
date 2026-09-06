@@ -4,10 +4,14 @@ import type { ProviderLoginCapability } from "@traycer/protocol/host/provider-sc
 export const PROVIDER_LOGIN_CAPABILITY: {
   readonly [id in ProviderId]: ProviderLoginCapability | null;
 } = {
-  "claude-code": capability(
-    ["auth", "login"],
-    ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
-  ),
+  "claude-code": {
+    oauthArgs: ["auth", "login"],
+    token: {
+      vars: ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
+    },
+    codePaste: {},
+    terminalLogin: null,
+  },
   codex: capability(["login"], null),
   opencode: null,
   cursor: null,
