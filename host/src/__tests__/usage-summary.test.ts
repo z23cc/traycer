@@ -11,6 +11,7 @@ import {
 import { hostRpcRegistry } from "@traycer/protocol/host/registry";
 import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-floor";
 import { hostUsageSummaryResponseSchemaV10 } from "@traycer/protocol/host/usage-analytics/schemas";
+import { recordUsageFact } from "../gui/usage";
 import { startHost, type StartedHost } from "../start-host";
 
 const MS_PER_DAY = 86_400_000;
@@ -144,6 +145,92 @@ describe("host.usage.summary", () => {
     );
   });
 
+  it("counts locally recorded turns instead of answering all zeros", async () => {
+    const setup = await boot();
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await recordUsageFact(started.runtime, {
+      epicId: "epic-1",
+      chatId: "chat-1",
+      harnessId: "claude",
+      model: "claude-opus-5",
+      usage: {
+        inputTokens: 120,
+        outputTokens: 30,
+        totalTokens: 150,
+        cacheReadInputTokens: 900,
+        contextTokens: undefined,
+        contextWindow: undefined,
+        costUsd: 0.25,
+      },
+      outcome: "completed",
+      toolCallCount: 3,
+    });
+    await recordUsageFact(started.runtime, {
+      epicId: "epic-1",
+      chatId: "chat-2",
+      harnessId: "codex",
+      model: null,
+      usage: null,
+      outcome: "abnormal_exit",
+      toolCallCount: 0,
+    });
+    const result = await call(
+      started.rpcUrl,
+      "host.usage.summary",
+      { major: 1, minor: 0 },
+      { timezone: "UTC", windowDays: 7, epicId: "epic-1", chatId: "chat-1" },
+    );
+    expect(hostUsageSummaryResponseSchemaV10.safeParse(result).success).toBe(
+      true,
+    );
+    expect(result).toMatchObject({
+      summary: {
+        totals: {
+          factCount: 1,
+          tokens: {
+            uncachedInputTokens: 120,
+            cacheReadInputTokens: 900,
+            outputTokens: 30,
+          },
+          knownCostUsd: 0.25,
+          costProvenance: "providerReported",
+        },
+        chatBuckets: [{ chatId: "chat-1", epicId: "epic-1", factCount: 1 }],
+        distinctChatCount: 1,
+        turnRowsTruncated: false,
+      },
+    });
+    const rows = readTurnRows(result);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      harnessId: "claude",
+      model: "claude-opus-5",
+      outcome: "completed",
+      usageCompleteness: "measured",
+      toolCallCount: 3,
+    });
+    const epicWide = await call(
+      started.rpcUrl,
+      "host.usage.summary",
+      { major: 1, minor: 0 },
+      { timezone: "UTC", windowDays: 7, epicId: "epic-1" },
+    );
+    expect(epicWide).toMatchObject({
+      summary: {
+        totals: { factCount: 2, costProvenance: "unpriced" },
+        distinctChatCount: 2,
+        outcomeBreakdown: { completed: 1, abnormal_exit: 1 },
+        usageCompletenessBreakdown: { measured: 1, absent: 1 },
+        turnRows: null,
+      },
+    });
+    const unknownModel = readBuckets(epicWide).find(
+      (bucket) => bucket.harnessId === "codex",
+    );
+    expect(unknownModel?.model).toBe("unknown");
+  });
+
   it("rejects a malformed request without the unimplemented stub", async () => {
     const setup = await boot();
     tempDir = setup.tempDir;
@@ -251,4 +338,15 @@ async function rpcExchange(
   }
   const record = response as Record<string, unknown>;
   return { result: record.result, error: record.error };
+}
+
+function readTurnRows(result: unknown): readonly Record<string, unknown>[] {
+  const parsed = hostUsageSummaryResponseSchemaV10.parse(result);
+  return parsed.summary.turnRows ?? [];
+}
+
+function readBuckets(
+  result: unknown,
+): readonly { readonly harnessId: string; readonly model: string }[] {
+  return hostUsageSummaryResponseSchemaV10.parse(result).summary.buckets;
 }

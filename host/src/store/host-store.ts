@@ -72,6 +72,29 @@ export type StoredTokenUsage = {
   readonly costUsd: number | undefined;
 };
 
+/**
+ * One completed GUI turn, the local stand-in for a cloud usage fact. Written
+ * whether or not the provider reported tokens: `usageCompleteness` says which.
+ */
+export type StoredUsageFact = {
+  readonly factId: string;
+  readonly epicId: string;
+  readonly chatId: string;
+  readonly hostId: string;
+  readonly harnessId: string;
+  readonly model: string;
+  readonly occurredAt: number;
+  readonly uncachedInputTokens: number;
+  readonly cacheReadInputTokens: number;
+  readonly cacheCreationTokens: number;
+  readonly outputTokens: number;
+  readonly costUsd: number | null;
+  readonly outcome: "completed" | "stopped" | "interrupted" | "abnormal_exit";
+  readonly usageCompleteness: "measured" | "partial" | "absent";
+  readonly toolCallCount: number;
+  readonly toolCallErrorCount: number;
+};
+
 export type StoredChat = {
   readonly epicId: string;
   readonly chatId: string;
@@ -198,6 +221,7 @@ export type HostState = {
   tuiAgents: StoredTuiAgent[];
   artifacts: StoredArtifact[];
   commentThreads: StoredCommentThread[];
+  usageFacts: StoredUsageFact[];
 };
 
 const EMPTY_STATE: HostState = {
@@ -211,6 +235,7 @@ const EMPTY_STATE: HostState = {
   tuiAgents: [],
   artifacts: [],
   commentThreads: [],
+  usageFacts: [],
 };
 
 export class HostStore {
@@ -230,6 +255,7 @@ export class HostStore {
       tuiAgents: [],
       artifacts: [],
       commentThreads: [],
+      usageFacts: [],
     };
     this.writeTail = Promise.resolve();
     this.closed = false;
@@ -253,6 +279,7 @@ export class HostStore {
           tuiAgents: normalizeTuiAgents(parsed.tuiAgents),
           artifacts: normalizeArtifacts(parsed.artifacts),
           commentThreads: normalizeCommentThreads(parsed.commentThreads),
+          usageFacts: normalizeUsageFacts(parsed.usageFacts),
         };
       }
     } catch {
@@ -315,6 +342,7 @@ type PersistedHostState = Omit<
   | "tuiAgents"
   | "artifacts"
   | "commentThreads"
+  | "usageFacts"
 > & {
   readonly providers?: unknown;
   readonly agents?: unknown;
@@ -322,6 +350,7 @@ type PersistedHostState = Omit<
   readonly tuiAgents?: unknown;
   readonly artifacts?: unknown;
   readonly commentThreads?: unknown;
+  readonly usageFacts?: unknown;
 };
 
 function isPersistedHostState(value: unknown): value is PersistedHostState {
@@ -818,4 +847,73 @@ function stringArrayOrNull(value: unknown): string[] | null {
     return null;
   }
   return value.filter((entry): entry is string => typeof entry === "string");
+}
+
+// ponytail: newest USAGE_FACT_LIMIT facts only - state.json is rewritten
+// whole on every mutation, so the ledger is capped rather than paged. Move it
+// to its own append-only file if a window longer than this is ever wanted.
+export const USAGE_FACT_LIMIT = 5000;
+
+const USAGE_OUTCOMES = [
+  "completed",
+  "stopped",
+  "interrupted",
+  "abnormal_exit",
+] as const;
+
+const USAGE_COMPLETENESS = ["measured", "partial", "absent"] as const;
+
+function normalizeUsageFacts(value: unknown): StoredUsageFact[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const rows: StoredUsageFact[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    if (
+      typeof record.factId !== "string" ||
+      typeof record.epicId !== "string" ||
+      typeof record.chatId !== "string" ||
+      typeof record.hostId !== "string" ||
+      typeof record.harnessId !== "string" ||
+      typeof record.model !== "string" ||
+      typeof record.occurredAt !== "number"
+    ) {
+      continue;
+    }
+    const outcome = USAGE_OUTCOMES.find((row) => row === record.outcome);
+    const completeness = USAGE_COMPLETENESS.find(
+      (row) => row === record.usageCompleteness,
+    );
+    rows.push({
+      factId: record.factId,
+      epicId: record.epicId,
+      chatId: record.chatId,
+      hostId: record.hostId,
+      harnessId: record.harnessId,
+      model: record.model,
+      occurredAt: record.occurredAt,
+      uncachedInputTokens: countOf(record.uncachedInputTokens),
+      cacheReadInputTokens: countOf(record.cacheReadInputTokens),
+      cacheCreationTokens: countOf(record.cacheCreationTokens),
+      outputTokens: countOf(record.outputTokens),
+      costUsd: typeof record.costUsd === "number" ? record.costUsd : null,
+      outcome: outcome ?? "completed",
+      usageCompleteness: completeness ?? "absent",
+      toolCallCount: countOf(record.toolCallCount),
+      toolCallErrorCount: countOf(record.toolCallErrorCount),
+    });
+  }
+  return rows.slice(-USAGE_FACT_LIMIT);
+}
+
+/** Every token field on the wire is a non-negative integer. */
+export function countOf(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(0, Math.round(value));
 }

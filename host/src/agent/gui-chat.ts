@@ -6,7 +6,11 @@ import { LOCAL_USER_ID } from "../local-user";
 import type { HostRuntime } from "../runtime";
 import type { StoredAgent, StoredChat, StoredTurn } from "../store/host-store";
 import { bumpChatIndex } from "../store/host-store";
-import type { ProviderStreamEvent } from "../gui/provider-stream";
+import type {
+  ProviderStreamEvent,
+  ProviderTokenUsage,
+} from "../gui/provider-stream";
+import { recordUsageFact } from "../gui/usage";
 import {
   assistantReasoningBlockId,
   assistantTextBlockId,
@@ -395,6 +399,8 @@ async function runAndPersistAssistant(
   let assembled = "";
   let sawReasoning = false;
   let announcedSession = false;
+  let lastUsage: ProviderTokenUsage | null = null;
+  let toolCallCount = 0;
   const openTools = new Map<string, string>();
   const print = runtime.guiRuns.printState(input.chatId);
   const handleEvent = (event: ProviderStreamEvent): void => {
@@ -458,6 +464,7 @@ async function runAndPersistAssistant(
       return;
     }
     if (event.kind === "tool_start") {
+      toolCallCount += 1;
       openTools.set(event.toolId, event.toolName);
       broadcastBlockDelta(runtime, input.epicId, input.chatId, {
         type: "tool_call.started",
@@ -541,6 +548,7 @@ async function runAndPersistAssistant(
         turnId: input.turnId,
         usage: event.usage,
       });
+      lastUsage = event.usage;
       void runtime.store.mutate((state) => {
         const row = state.chats.find(
           (chatRow) => chatRow.chatId === input.chatId,
@@ -590,7 +598,25 @@ async function runAndPersistAssistant(
       messageId: input.assistantMessageId,
       turnId: input.turnId,
     });
+    await recordUsageFact(runtime, {
+      epicId: input.epicId,
+      chatId: input.chatId,
+      harnessId: input.harnessId,
+      model: input.model,
+      usage: lastUsage,
+      outcome: "completed",
+      toolCallCount,
+    });
   } catch (error) {
+    await recordUsageFact(runtime, {
+      epicId: input.epicId,
+      chatId: input.chatId,
+      harnessId: input.harnessId,
+      model: input.model,
+      usage: lastUsage,
+      outcome: "abnormal_exit",
+      toolCallCount,
+    });
     await persistProviderSession(runtime, {
       chatId: input.chatId,
       harnessId: input.harnessId,

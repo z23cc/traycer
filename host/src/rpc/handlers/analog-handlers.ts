@@ -4,10 +4,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { migratePhaseToEpicRequestSchema } from "@traycer/protocol/host/migration/unary-schemas";
-import {
-  hostUsageSummaryRequestSchemaV10,
-  type HostUsageSummaryResponseV10,
-} from "@traycer/protocol/host/usage-analytics/schemas";
+import { hostUsageSummaryRequestSchemaV10 } from "@traycer/protocol/host/usage-analytics/schemas";
 import { chatBackupStatusRequestSchema } from "@traycer/protocol/host/epic/chat-backup-status";
 import { listChatPublicationTargetsRequestSchema } from "@traycer/protocol/host/epic/chat-publication-identity";
 import { listCloudChatsRequestSchema } from "@traycer/protocol/host/epic/cloud-chat";
@@ -34,6 +31,7 @@ import {
   hostUpdateCheckRequestSchemaV11,
 } from "@traycer/protocol/host/maintenance/schemas";
 import { hostInstallRecordSchema } from "@traycer/protocol/config/installation-records";
+import { summarizeUsage } from "../../gui/usage";
 import { earlyMetaForEpic } from "../../stream/epic-hub";
 import type { RpcHandler } from "./types";
 
@@ -80,112 +78,13 @@ export const handlePhaseMigrateToEpic: RpcHandler = async (params, runtime) => {
   return { ok: true, result: { epicId: parsed.data.phaseId } };
 };
 
-const EMPTY_TOKENS = {
-  uncachedInputTokens: 0,
-  cacheReadInputTokens: 0,
-  cacheCreationTokens: 0,
-  outputTokens: 0,
-};
-
-const EMPTY_PROVENANCE_ENTRY = {
-  costUsd: 0,
-  factCount: 0,
-  tokenCount: 0,
-};
-
-const EMPTY_PROVENANCE_SPLIT = {
-  unpriced: EMPTY_PROVENANCE_ENTRY,
-  modelPriced: EMPTY_PROVENANCE_ENTRY,
-  providerReported: EMPTY_PROVENANCE_ENTRY,
-};
-
-const MS_PER_DAY = 86_400_000;
-
 export const handleHostUsageSummary: RpcHandler = (params, runtime) => {
   const parsed = hostUsageSummaryRequestSchemaV10.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
-  const now = Date.now();
-  const chatId = parsed.data.chatId === undefined ? null : parsed.data.chatId;
-  const epic =
-    parsed.data.epicId === null
-      ? null
-      : (runtime.store
-          .snapshot()
-          .epics.find((row) => row.id === parsed.data.epicId) ?? null);
-  const startAtInclusive =
-    parsed.data.window === "epic" && epic !== null
-      ? epic.createdAt
-      : now - parsed.data.windowDays * MS_PER_DAY;
-  return {
-    ok: true,
-    result: emptyUsageSummary(parsed.data.timezone, parsed.data.windowDays, {
-      epicId: parsed.data.epicId,
-      chatId,
-      now,
-      startAtInclusive,
-    }),
-  };
+  return { ok: true, result: summarizeUsage(runtime, parsed.data, Date.now()) };
 };
-
-function emptyUsageSummary(
-  timezone: string,
-  windowDays: number,
-  bounds: {
-    readonly epicId: string | null;
-    readonly chatId: string | null;
-    readonly now: number;
-    readonly startAtInclusive: number;
-  },
-): HostUsageSummaryResponseV10 {
-  return {
-    servedBy: "local" as const,
-    summary: {
-      window: {
-        timezone,
-        windowDays,
-        startAtInclusive: bounds.startAtInclusive,
-        endAtExclusive: bounds.now,
-      },
-      epicId: bounds.epicId,
-      chatId: bounds.chatId,
-      totals: {
-        factCount: 0,
-        tokens: EMPTY_TOKENS,
-        knownCostUsd: 0,
-        knownCacheSavingsUsd: 0,
-        knownReasoningTokens: 0,
-        costProvenance: null,
-        provenanceSplit: EMPTY_PROVENANCE_SPLIT,
-      },
-      buckets: [],
-      chatBuckets: [],
-      hostBuckets: [],
-      distinctEpicCount: 0,
-      distinctChatCount: 0,
-      outcomeBreakdown: {
-        completed: 0,
-        stopped: 0,
-        interrupted: 0,
-        abnormal_exit: 0,
-      },
-      usageCompletenessBreakdown: {
-        measured: 0,
-        partial: 0,
-        absent: 0,
-      },
-      turnRows: bounds.chatId === null ? null : [],
-      turnRowsTruncated: false,
-    },
-    coverage: {
-      pricedFactCount: 0,
-      unpricedFactCount: 0,
-      pricedTokenCount: 0,
-      unpricedTokenCount: 0,
-    },
-  };
-}
 
 export const handleHostChatForkGet: RpcHandler = () => {
   return { ok: true, result: { event: null } };
