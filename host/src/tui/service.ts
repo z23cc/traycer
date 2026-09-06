@@ -20,6 +20,7 @@ import {
   TUI_HARNESS_ID_TO_PROVIDER_ID,
 } from "@traycer/protocol/host/provider-schemas";
 import { providerCliIdentity } from "../providers/service";
+import { isReservedAgentId } from "@traycer/protocol/host/agent/roles";
 import type { HostRuntime } from "../runtime";
 import type { StoredTuiAgent } from "../store/host-store";
 import { findBinding } from "../worktree/service";
@@ -177,6 +178,13 @@ export async function createTuiAgent(
     requestedId.length === 0
       ? randomUUID()
       : requestedId;
+  // See `reservedIdRefusal` in the epic handlers: an agent that could be named
+  // `traycer:system` could forge every system notice this host sends.
+  if (isReservedAgentId(tuiAgentId)) {
+    throw new Error(
+      `'${tuiAgentId}' is a reserved agent id and may not be created.`,
+    );
+  }
   const workspaceMode =
     request.workspaceMode === undefined ? null : request.workspaceMode;
   const now = Date.now();

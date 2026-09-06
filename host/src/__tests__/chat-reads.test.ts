@@ -62,6 +62,26 @@ describe("chat reads", () => {
     expect(transcript.skeleton[ordinal]?.rowId).toBe("m-2");
   });
 
+  it("keeps the epoch across an append, and moves only the index revision", async () => {
+    await boot();
+    const host = requireHost();
+    await seedChat(host, 3);
+    const before = chatWindowedTranscript(host.runtime, "epic-1", "chat-1");
+    await host.runtime.store.mutate((state) => {
+      const chat = state.chats.find((row) => row.chatId === "chat-1");
+      if (chat === undefined) {
+        throw new Error("seed missing");
+      }
+      chat.turns.push(turn("m-3", 3, "user"));
+      chat.indexRevision += 1;
+    });
+    const after = chatWindowedTranscript(host.runtime, "epic-1", "chat-1");
+    // Appending renumbers no existing ordinal, so it is NOT a rebase: an epoch
+    // bump here would make the client re-hydrate its whole window every turn.
+    expect(after.epoch).toBe(before.epoch);
+    expect(after.skeleton).toHaveLength(before.skeleton.length + 1);
+  });
+
   it("refuses an unknown row, chat and epic with the one opaque answer", async () => {
     await boot();
     const host = requireHost();

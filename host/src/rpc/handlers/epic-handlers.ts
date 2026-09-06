@@ -52,6 +52,7 @@ import type {
   StoredCollaborator,
   StoredEpic,
 } from "../../store/host-store";
+import { isReservedAgentId } from "@traycer/protocol/host/agent/roles";
 import type { RpcHandler } from "./types";
 
 const EPIC_VERSION = "2.0.0";
@@ -90,6 +91,13 @@ export const handleEpicCreate: RpcHandler = async (params, runtime) => {
     lastViewedAt: now,
   };
   const chatSeed = parsed.data.chat;
+  if (
+    chatSeed !== undefined &&
+    chatSeed !== null &&
+    isReservedAgentId(chatSeed.chatId)
+  ) {
+    return reservedIdRefusal(chatSeed.chatId);
+  }
   const seedHarness =
     chatSeed === undefined || chatSeed === null
       ? "claude"
@@ -246,6 +254,9 @@ export const handleEpicCreateChat: RpcHandler = async (params, runtime) => {
   const parsed = createChatRequestSchema.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  if (isReservedAgentId(parsed.data.chatId)) {
+    return reservedIdRefusal(parsed.data.chatId);
   }
   const epic = runtime.store
     .snapshot()
@@ -963,5 +974,25 @@ function toTaskLight(epic: StoredEpic, hostId: string) {
       roomInfo: null,
     },
     phase: null,
+  };
+}
+
+/**
+ * `traycer:system` is the sender identity every platform notice is attributed
+ * to, and the persisted sender envelope is agent-shaped - there is no `system`
+ * variant of it. So the reservation IS the provenance: an agent allowed to
+ * take that id could forge any system message this host sends, including the
+ * role-awareness notices. Refused before persistence, which is the only place
+ * the guarantee can live.
+ */
+function reservedIdRefusal(id: string): {
+  readonly ok: false;
+  readonly code: "RPC_ERROR";
+  readonly message: string;
+} {
+  return {
+    ok: false,
+    code: "RPC_ERROR",
+    message: `'${id}' is a reserved agent id and may not be created.`,
   };
 }

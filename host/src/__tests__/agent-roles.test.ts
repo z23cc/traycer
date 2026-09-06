@@ -7,6 +7,8 @@ import {
   handleAgentRolesList,
   handleAgentRolesRelinquish,
 } from "../rpc/handlers/role-handlers";
+import { TRAYCER_SYSTEM_SENDER_AGENT_ID } from "@traycer/protocol/host/agent/roles";
+import { handleEpicCreate } from "../rpc/handlers/epic-handlers";
 import { startHost, type StartedHost } from "../start-host";
 import type { StoredChat, StoredTuiAgent } from "../store/host-store";
 
@@ -210,3 +212,62 @@ function tuiAgent(host: StartedHost): StoredTuiAgent {
     archivedAt: null,
   };
 }
+
+describe("reserved agent id", () => {
+  let started: StartedHost | null = null;
+  let tempDir: string | null = null;
+
+  afterEach(async () => {
+    if (started !== null) {
+      await started.close();
+      started = null;
+    }
+    if (tempDir !== null) {
+      await rm(tempDir, { recursive: true, force: true });
+      tempDir = null;
+    }
+  });
+
+  it("refuses to persist an agent named traycer:system", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "traycer-host-"));
+    started = await startHost({
+      argv: ["--host-data-dir", tempDir],
+      listenHost: "127.0.0.1",
+      listenPort: 0,
+    });
+    const host = started;
+    const seedEpic = {
+      id: "epic-1",
+      title: "Reserved",
+      initialUserPrompt: "go",
+      ticketCount: 0,
+      specCount: 0,
+      storyCount: 0,
+      reviewCount: 0,
+      status: "active",
+      createdAt: 1,
+      updatedAt: 1,
+      createdBy: "local",
+      version: "2.0.0",
+    };
+    const created = await handleEpicCreate(
+      {
+        epic: seedEpic,
+        repoIdentifiers: [],
+        workspaces: [],
+        chat: {
+          chatId: TRAYCER_SYSTEM_SENDER_AGENT_ID,
+          parentId: null,
+          hostId: host.runtime.hostId,
+          title: "Root",
+          worktreeIntent: null,
+          initialMessage: null,
+        },
+      },
+      host.runtime,
+    );
+    expect(created.ok).toBe(false);
+    // The refusal happens BEFORE persistence: nothing landed, not even the epic.
+    expect(host.runtime.store.snapshot().epics).toEqual([]);
+  });
+});
