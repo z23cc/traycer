@@ -1,0 +1,166 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { epicCommunicationGraphSubscribeServerFrameSchema } from "@traycer/protocol/host/epic/communication-graph";
+import {
+  CommunicationGraphSubscriber,
+  graphEvents,
+} from "../stream/communication-graph";
+import { startHost, type StartedHost } from "../start-host";
+import type { StoredChat, StoredTurn } from "../store/host-store";
+
+type Frame = { readonly kind: string; readonly [key: string]: unknown };
+
+class FakeSocket {
+  readonly OPEN = 1;
+  readyState = 1;
+  readonly frames: Frame[] = [];
+
+  send(payload: string): void {
+    this.frames.push(
+      epicCommunicationGraphSubscribeServerFrameSchema.parse(
+        JSON.parse(payload),
+      ) as Frame,
+    );
+  }
+}
+
+describe("epic.communicationGraph.subscribe", () => {
+  let started: StartedHost | null = null;
+  let tempDir: string | null = null;
+
+  afterEach(async () => {
+    if (started !== null) {
+      await started.close();
+      started = null;
+    }
+    if (tempDir !== null) {
+      await rm(tempDir, { recursive: true, force: true });
+      tempDir = null;
+    }
+  });
+
+  it("projects only turns that came from another agent", async () => {
+    const host = await boot();
+    await seed(host);
+    const events = graphEvents(host.runtime, "epic-1");
+    // The chat's own turns are not A2A traffic; the one from `chat-2` is.
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      id: 1,
+      kind: "a2a_message",
+      senderAgentId: "chat-2",
+      receiverAgentId: "chat-1",
+      responseId: "thread-1",
+      inReplyTo: null,
+      expectReply: true,
+      messageText: "please review",
+      originKind: "gui_message",
+      originChatId: "chat-1",
+      originRefId: "m-2",
+    });
+    expect(graphEvents(host.runtime, "epic-other")).toEqual([]);
+  });
+
+  it("seeds above the cursor and reports the boundary at open", async () => {
+    const host = await boot();
+    await seed(host);
+    const socket = new FakeSocket();
+    new CommunicationGraphSubscriber(
+      socket as never,
+      host.runtime,
+      "epic-1",
+      0,
+    ).seed();
+    expect(socket.frames[0]).toMatchObject({
+      kind: "snapshot",
+      epicId: "epic-1",
+      headId: 1,
+    });
+    expect((socket.frames[0].events as unknown[]).length).toBe(1);
+
+    // A resume above the last row delivers nothing, but `headId` is still the
+    // log's boundary rather than the snapshot's own last row.
+    const resumed = new FakeSocket();
+    new CommunicationGraphSubscriber(
+      resumed as never,
+      host.runtime,
+      "epic-1",
+      1,
+    ).seed();
+    expect(resumed.frames[0]).toMatchObject({ events: [], headId: 1 });
+  });
+
+  it("reports an empty log with a null boundary", async () => {
+    const host = await boot();
+    const socket = new FakeSocket();
+    new CommunicationGraphSubscriber(
+      socket as never,
+      host.runtime,
+      "epic-1",
+      0,
+    ).seed();
+    expect(socket.frames[0]).toMatchObject({ events: [], headId: null });
+  });
+
+  async function boot(): Promise<StartedHost> {
+    tempDir = await mkdtemp(join(tmpdir(), "traycer-host-"));
+    started = await startHost({
+      argv: ["--host-data-dir", tempDir],
+      listenHost: "127.0.0.1",
+      listenPort: 0,
+    });
+    return started;
+  }
+});
+
+async function seed(host: StartedHost): Promise<void> {
+  const chat: StoredChat = {
+    epicId: "epic-1",
+    chatId: "chat-1",
+    parentId: null,
+    hostId: host.runtime.hostId,
+    title: "Root",
+    createdAt: 1,
+    runSettings: null,
+    fastMode: false,
+    providerSession: null,
+    turns: [
+      turn("m-1", 1, "chat-1", null, false),
+      turn("m-2", 2, "chat-2", "thread-1", true),
+    ],
+    events: [],
+    transcriptEpoch: 0,
+    indexRevision: 0,
+    fileChangeCount: 0,
+    lastUsage: null,
+    archivedAt: null,
+  };
+  await host.runtime.store.mutate((state) => {
+    state.chats.push(chat);
+  });
+}
+
+function turn(
+  messageId: string,
+  timestamp: number,
+  fromAgentId: string,
+  responseId: string | null,
+  expectReply: boolean,
+): StoredTurn {
+  return {
+    messageId,
+    timestamp,
+    role: "user",
+    prompt: fromAgentId === "chat-1" ? "own turn" : "please review",
+    fromAgentId,
+    fromTitle: "",
+    fromHarnessId: null,
+    expectReply,
+    responseId,
+    userId: "local",
+    content: null,
+    turnId: null,
+  };
+}

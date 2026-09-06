@@ -11,7 +11,11 @@ import {
 import { hostStreamRpcRegistry } from "@traycer/protocol/host/registry";
 import { authenticateOpenToken } from "../auth";
 import { epochRejectionReason, evaluateClientEpoch } from "../epoch-gate";
-import { clientStreamManifestOverlap, hostStreamManifest } from "../manifest";
+import {
+  clientStreamManifestOverlap,
+  hostStreamManifest,
+  UNSERVED_STREAM_METHOD_NAMES,
+} from "../manifest";
 import type { HostRuntime } from "../runtime";
 import { snapshotFrame } from "../gui/notifications";
 import { listState } from "../rpc/handlers/plain-terminal-handlers";
@@ -31,6 +35,8 @@ import { WorkspaceFileListSession } from "../workspace/file-list-stream";
 import { agentInboxSubscribeOpenRequestSchema } from "@traycer/protocol/host/agent/inbox";
 import { InboxMonitor } from "./inbox";
 import { ChatRecordsSubscriber } from "./chat-records";
+import { CommunicationGraphSubscriber } from "./communication-graph";
+import { epicCommunicationGraphSubscribeOpenRequestSchema } from "@traycer/protocol/host/epic/communication-graph";
 
 const SUBSCRIBE_TIMEOUT_MS = 30_000;
 const POLICY_VIOLATION = 1008;
@@ -65,6 +71,7 @@ export function attachStreamConnection(
     runtime.plainTerminals.remove(socket);
     runtime.inboxMonitors.remove(socket);
     runtime.chatRecords.remove(socket);
+    runtime.graphs.remove(socket);
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
@@ -79,6 +86,7 @@ export function attachStreamConnection(
     runtime.plainTerminals.remove(socket);
     runtime.inboxMonitors.remove(socket);
     runtime.chatRecords.remove(socket);
+    runtime.graphs.remove(socket);
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
@@ -312,6 +320,49 @@ export function attachStreamConnection(
       sendJson(snapshotFrame(runtime));
       return;
     }
+    if (subscribe.data.method === "epic.communicationGraph.subscribe") {
+      const opened = epicCommunicationGraphSubscribeOpenRequestSchema.safeParse(
+        subscribe.data.params,
+      );
+      if (!opened.success) {
+        reject(
+          unauthorized("epic.communicationGraph.subscribe requires an epicId"),
+          "missing-epic",
+        );
+        return;
+      }
+      const subscriber = new CommunicationGraphSubscriber(
+        socket,
+        runtime,
+        opened.data.epicId,
+        opened.data.sinceCursor ?? 0,
+      );
+      runtime.graphs.add(socket, subscriber);
+      subscriber.seed();
+      return;
+    }
+    if (subscribe.data.method === "pr.subscribeListForEpic") {
+      // No `gh` sweep runs here, so the list is empty because nothing was
+      // fetched - `gh-unavailable`, not the `ok` that claims a sweep found
+      // this epic has no pull requests.
+      sendJson({
+        kind: "snapshot",
+        hasBinaryPayload: false,
+        sourceStatus: "gh-unavailable",
+        notice: null,
+        items: [],
+      });
+      return;
+    }
+    if (
+      subscribe.data.method === "worktree.changed" ||
+      subscribe.data.method === "providers.changed"
+    ) {
+      // Change PINGS, not snapshots: nothing is waiting on a first frame, and
+      // the analog's fabricated one made every subscriber refetch immediately
+      // for a change that never happened. The socket is simply held open.
+      return;
+    }
     if (subscribe.data.method === "host.chatRecords.subscribe") {
       const subscriber = new ChatRecordsSubscriber(socket, runtime);
       runtime.chatRecords.add(socket, subscriber);
@@ -355,6 +406,29 @@ export function attachStreamConnection(
       void fileListStream.open(opened.data.workspacePath);
       return;
     }
+    if (UNSERVED_STREAM_METHOD_NAMES.includes(subscribe.data.method)) {
+      reject(
+        {
+          code: "INCOMPATIBLE",
+          reason: `This host does not serve ${subscribe.data.method}.`,
+          incompatibleMethods: [
+            {
+              method: subscribe.data.method,
+              clientCanonical: subscribe.data.schemaVersion,
+              hostCanonical: null,
+              blocking: "host-missing-method",
+            },
+          ],
+          upgradeGuidance: {
+            clientShouldUpgrade: false,
+            hostShouldUpgrade: true,
+          },
+          retryable: false,
+        },
+        "unserved-method",
+      );
+      return;
+    }
     sendAnalogStreamSnapshot(socket, subscribe.data.method);
   }
 
@@ -370,6 +444,9 @@ export function attachStreamConnection(
       return;
     }
     if (runtime.chatRecords.handleFrame(socket, parsed)) {
+      return;
+    }
+    if (runtime.graphs.handleFrame(socket, parsed)) {
       return;
     }
     if (parsed === null || typeof parsed !== "object" || !("kind" in parsed)) {
