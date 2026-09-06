@@ -172,6 +172,21 @@ export type StoredChat = {
   archivedAt: number | null;
 };
 
+/**
+ * A role an agent designated ITSELF with, over a Task-local scope. Grants no
+ * permission - it is how peers avoid duplicating responsibility, which is why
+ * overlap is allowed and only reported.
+ */
+export type StoredRoleClaim = {
+  readonly claimId: string;
+  readonly epicId: string;
+  readonly agentId: string;
+  readonly userId: string;
+  readonly role: string;
+  readonly scope: string;
+  readonly claimedAt: number;
+};
+
 export type StoredAgent = {
   readonly id: string;
   readonly epicId: string;
@@ -286,6 +301,7 @@ export type HostState = {
   collaborators: StoredCollaborator[];
   notifications: StoredNotification[];
   plainTerminals: StoredPlainTerminal[];
+  roleClaims: StoredRoleClaim[];
 };
 
 const EMPTY_STATE: HostState = {
@@ -303,6 +319,7 @@ const EMPTY_STATE: HostState = {
   collaborators: [],
   notifications: [],
   plainTerminals: [],
+  roleClaims: [],
 };
 
 export class HostStore {
@@ -326,6 +343,7 @@ export class HostStore {
       collaborators: [],
       notifications: [],
       plainTerminals: [],
+      roleClaims: [],
     };
     this.writeTail = Promise.resolve();
     this.closed = false;
@@ -353,6 +371,7 @@ export class HostStore {
           collaborators: normalizeCollaborators(parsed.collaborators),
           notifications: normalizeNotifications(parsed.notifications),
           plainTerminals: normalizePlainTerminals(parsed.plainTerminals),
+          roleClaims: normalizeRoleClaims(parsed.roleClaims),
         };
       }
     } catch {
@@ -419,6 +438,7 @@ type PersistedHostState = Omit<
   | "collaborators"
   | "notifications"
   | "plainTerminals"
+  | "roleClaims"
 > & {
   readonly providers?: unknown;
   readonly agents?: unknown;
@@ -430,6 +450,7 @@ type PersistedHostState = Omit<
   readonly collaborators?: unknown;
   readonly notifications?: unknown;
   readonly plainTerminals?: unknown;
+  readonly roleClaims?: unknown;
 };
 
 function isPersistedHostState(value: unknown): value is PersistedHostState {
@@ -1098,6 +1119,40 @@ function normalizeNotifications(value: unknown): StoredNotification[] {
     });
   }
   return rows.slice(-NOTIFICATION_LIMIT);
+}
+
+function normalizeRoleClaims(value: unknown): StoredRoleClaim[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const rows: StoredRoleClaim[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    if (
+      typeof record.claimId !== "string" ||
+      typeof record.epicId !== "string" ||
+      typeof record.agentId !== "string" ||
+      typeof record.userId !== "string" ||
+      typeof record.role !== "string" ||
+      typeof record.scope !== "string" ||
+      typeof record.claimedAt !== "number"
+    ) {
+      continue;
+    }
+    rows.push({
+      claimId: record.claimId,
+      epicId: record.epicId,
+      agentId: record.agentId,
+      userId: record.userId,
+      role: record.role,
+      scope: record.scope,
+      claimedAt: record.claimedAt,
+    });
+  }
+  return rows;
 }
 
 function normalizePlainTerminals(value: unknown): StoredPlainTerminal[] {

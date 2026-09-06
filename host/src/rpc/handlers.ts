@@ -18,6 +18,11 @@ import {
   hostUpdateCheckV11,
 } from "@traycer/protocol/host/maintenance/contracts";
 import {
+  handleAgentRolesClaim,
+  handleAgentRolesList,
+  handleAgentRolesRelinquish,
+} from "./handlers/role-handlers";
+import {
   handleChatLocateRow,
   handleChatReadAccumulatedFileChange,
   handleReadChatAttachment,
@@ -464,6 +469,9 @@ const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "chat.locateRow": handleChatLocateRow,
   "chat.readAccumulatedFileChange": handleChatReadAccumulatedFileChange,
   "epic.readChatAttachment": handleReadChatAttachment,
+  "agent.roles.claim": handleAgentRolesClaim,
+  "agent.roles.list": handleAgentRolesList,
+  "agent.roles.relinquish": handleAgentRolesRelinquish,
 };
 
 const HANDLERS: { readonly [method: string]: RpcHandler } =
