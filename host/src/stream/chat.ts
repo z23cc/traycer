@@ -36,6 +36,14 @@ import { resolveChatWorktreeBinding } from "../worktree/service";
 type ChatWindowedTranscript = {
   readonly epicId: string;
   readonly chatId: string;
+  /**
+   * The coordinate space every ordinal in this transcript is numbered in. It
+   * is `transcriptEpoch` and nothing else: the client seats its window on the
+   * snapshot's `transcriptEpoch` and discards any skeleton chunk, range or
+   * locate answer stamped with a different one, so a frame that hard-coded 0
+   * went unread from the first turn that advanced the epoch.
+   */
+  readonly epoch: number;
   readonly messages: readonly Message[];
   readonly skeleton: readonly RowSkeletonEntry[];
   readonly snapshot: unknown;
@@ -237,13 +245,18 @@ export function broadcastWorktreeStateChanged(
   }
 }
 
-function chatWindowedTranscript(
+export function chatWindowedTranscript(
   runtime: HostRuntime,
   epicId: string,
   chatId: string,
 ): ChatWindowedTranscript {
+  // Keyed by `(epicId, chatId)`, which is how every chat-scoped frame and
+  // socket set on this host is keyed: a chat id alone does not address a chat,
+  // and matching on it would serve one epic's transcript under another's id.
   const chat =
-    runtime.store.snapshot().chats.find((row) => row.chatId === chatId) ??
+    runtime.store
+      .snapshot()
+      .chats.find((row) => row.chatId === chatId && row.epicId === epicId) ??
     emptyChat(runtime.hostId, epicId, chatId);
   const messages = protocolMessages(chat.turns);
   const skeleton = rowSkeleton(chatId, messages);
@@ -255,6 +268,7 @@ function chatWindowedTranscript(
   return {
     epicId,
     chatId,
+    epoch: chat.transcriptEpoch,
     messages,
     skeleton,
     snapshot: {
@@ -318,7 +332,7 @@ function chatWindowedTranscript(
       epicId,
       chatId,
       chunk: {
-        epoch: 0,
+        epoch: chat.transcriptEpoch,
         fromOrdinal: 0,
         entries: skeleton,
         isFinal: true,
@@ -357,7 +371,7 @@ function chatRangeFrame(
     chatId: request.chatId,
     range: {
       requestId: request.requestId,
-      epoch: 0,
+      epoch: transcript.epoch,
       fromOrdinal,
       rowIds: served.map((entry) => entry.rowId),
       messages,
@@ -369,7 +383,7 @@ function chatRangeFrame(
   };
 }
 
-function protocolMessages(turns: readonly StoredTurn[]): Message[] {
+export function protocolMessages(turns: readonly StoredTurn[]): Message[] {
   const messages: Message[] = [];
   for (const turn of turns) {
     const parsed = messageSchema.safeParse(turnToMessage(turn));
@@ -380,7 +394,7 @@ function protocolMessages(turns: readonly StoredTurn[]): Message[] {
   return messages;
 }
 
-function rowSkeleton(
+export function rowSkeleton(
   chatId: string,
   messages: readonly Message[],
 ): readonly RowSkeletonEntry[] {

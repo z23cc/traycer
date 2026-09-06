@@ -27,6 +27,11 @@ const IMAGE_TYPES: readonly {
   { mediaType: "image/svg+xml", extension: "svg" },
 ];
 
+/** Every extension this host ever writes an image under. */
+export const IMAGE_EXTENSIONS: readonly string[] = IMAGE_TYPES.map(
+  (row) => row.extension,
+);
+
 export type StagedImage = {
   readonly operationId: string;
   readonly epicId: string;

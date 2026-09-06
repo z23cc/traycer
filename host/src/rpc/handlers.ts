@@ -18,6 +18,11 @@ import {
   hostUpdateCheckV11,
 } from "@traycer/protocol/host/maintenance/contracts";
 import {
+  handleChatLocateRow,
+  handleChatReadAccumulatedFileChange,
+  handleReadChatAttachment,
+} from "./handlers/chat-read-handlers";
+import {
   handleDiagnosticsLogsList,
   handleDiagnosticsLogsTail,
   handleHostDoctor,
@@ -456,6 +461,9 @@ const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "host.doctor": handleHostDoctor,
   "diagnostics.logs.list": handleDiagnosticsLogsList,
   "diagnostics.logs.tail": handleDiagnosticsLogsTail,
+  "chat.locateRow": handleChatLocateRow,
+  "chat.readAccumulatedFileChange": handleChatReadAccumulatedFileChange,
+  "epic.readChatAttachment": handleReadChatAttachment,
 };
 
 const HANDLERS: { readonly [method: string]: RpcHandler } =
