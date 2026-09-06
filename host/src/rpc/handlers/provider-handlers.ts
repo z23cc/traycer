@@ -1,21 +1,30 @@
 import {
   providersAddCustomPathRequestSchema,
+  providersAwaitLoginRequestSchema,
+  providersCancelLoginRequestSchemaV11,
   providersClearApiKeyRequestSchema,
+  providersDeleteEnvOverrideRequestSchema,
   providersDetectVersionRequestSchema,
   providersRemoveCustomPathRequestSchema,
   providersSetApiKeyRequestSchema,
   providersSetEnabledRequestSchemaV21,
+  providersSetEnvOverrideRequestSchema,
   providersSetSelectionRequestSchema,
+  providersSetTerminalAgentArgsRequestSchema,
+  providersStartLoginRequestSchemaV11,
 } from "@traycer/protocol/host/provider-schemas";
 import { probeCandidateVersion } from "../../providers/catalog";
 import {
   addCustomPath,
   clearProviderApiKey,
+  deleteProviderEnvOverride,
   listProviderCliStates,
   removeCustomPath,
   setProviderApiKey,
   setProviderEnabled,
+  setProviderEnvOverride,
   setProviderSelection,
+  setProviderTerminalAgentArgs,
 } from "../../providers/service";
 import type { RpcHandler } from "./types";
 
@@ -124,6 +133,94 @@ export const handleProvidersClearApiKey: RpcHandler = async (
     return { ok: false, code: "RPC_ERROR", message: "Provider catalog miss" };
   }
   return { ok: true, result: { state } };
+};
+
+export const handleProvidersSetTerminalAgentArgs: RpcHandler = async (
+  params,
+  runtime,
+) => {
+  const parsed = providersSetTerminalAgentArgsRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const state = await setProviderTerminalAgentArgs(
+    runtime.store,
+    parsed.data.providerId,
+    parsed.data.terminalAgentArgs,
+  );
+  if (state === null) {
+    return { ok: false, code: "RPC_ERROR", message: "Provider catalog miss" };
+  }
+  return { ok: true, result: { state } };
+};
+
+export const handleProvidersSetEnvOverride: RpcHandler = async (
+  params,
+  runtime,
+) => {
+  const parsed = providersSetEnvOverrideRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const state = await setProviderEnvOverride(
+    runtime.store,
+    parsed.data.providerId,
+    parsed.data.key,
+    parsed.data.value,
+  );
+  if (state === null) {
+    return { ok: false, code: "RPC_ERROR", message: "Provider catalog miss" };
+  }
+  return { ok: true, result: { state } };
+};
+
+export const handleProvidersDeleteEnvOverride: RpcHandler = async (
+  params,
+  runtime,
+) => {
+  const parsed = providersDeleteEnvOverrideRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const state = await deleteProviderEnvOverride(
+    runtime.store,
+    parsed.data.providerId,
+    parsed.data.key,
+  );
+  if (state === null) {
+    return { ok: false, code: "RPC_ERROR", message: "Provider catalog miss" };
+  }
+  return { ok: true, result: { state } };
+};
+
+export const handleProvidersStartLogin: RpcHandler = (params) => {
+  const parsed = providersStartLoginRequestSchemaV11.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  return {
+    ok: true,
+    result: { url: null, started: false, profileId: null },
+  };
+};
+
+export const handleProvidersAwaitLogin: RpcHandler = (params) => {
+  const parsed = providersAwaitLoginRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  return {
+    ok: true,
+    result: { state: null, existingProfileId: null, codeRejected: false },
+  };
+};
+
+export const handleProvidersCancelLogin: RpcHandler = (params) => {
+  const parsed = providersCancelLoginRequestSchemaV11.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  return { ok: true, result: { cancelled: false } };
 };
 
 export const handleProvidersRemoveCustomPath: RpcHandler = async (

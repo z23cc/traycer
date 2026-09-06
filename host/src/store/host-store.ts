@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type { JsonContent } from "@traycer/protocol/common/registry";
 import type { TaskRepoIdentifier } from "@traycer/protocol/host/epic/unary-schemas";
 import type {
   WorktreeBinding,
@@ -12,13 +13,13 @@ export type StoredEpic = {
   readonly initialUserPrompt: string;
   readonly status: string;
   readonly createdAt: number;
-  readonly updatedAt: number;
+  updatedAt: number;
   readonly createdBy: string;
   readonly version: string;
-  readonly ticketCount: number;
-  readonly specCount: number;
-  readonly storyCount: number;
-  readonly reviewCount: number;
+  ticketCount: number;
+  specCount: number;
+  storyCount: number;
+  reviewCount: number;
   readonly repos: readonly TaskRepoIdentifier[];
   readonly workspaces: readonly string[];
   readonly pinned: boolean;
@@ -142,6 +143,47 @@ export type StoredProviderOverride = {
   selectedPath: string | null;
   customPaths: string[];
   apiKey: string | null;
+  terminalAgentArgs: string;
+  envOverrides: StoredEnvOverride[];
+};
+
+export type StoredEnvOverride = {
+  readonly key: string;
+  readonly value: string | null;
+};
+
+export type StoredArtifact = {
+  readonly epicId: string;
+  readonly artifactId: string;
+  readonly kind: string;
+  title: string;
+  parentId: string | null;
+  readonly folderName: string;
+  readonly createdAt: number;
+  updatedAt: number;
+  status: number | null;
+  assignee: string | null;
+};
+
+export type StoredComment = {
+  readonly commentId: string;
+  content: JsonContent;
+  readonly createdAt: number;
+  updatedAt: number | null;
+  readonly authorUserId: string;
+  readonly authorHandle: string | null;
+};
+
+export type StoredCommentThread = {
+  readonly epicId: string;
+  readonly artifactType: string;
+  readonly artifactId: string;
+  readonly threadId: string;
+  readonly createdAt: number;
+  readonly createdByUserId: string;
+  readonly quotedText: string;
+  resolved: boolean;
+  comments: StoredComment[];
 };
 
 export type HostState = {
@@ -153,6 +195,8 @@ export type HostState = {
   providers: StoredProviderOverride[];
   agents: StoredAgent[];
   tuiAgents: StoredTuiAgent[];
+  artifacts: StoredArtifact[];
+  commentThreads: StoredCommentThread[];
 };
 
 const EMPTY_STATE: HostState = {
@@ -164,6 +208,8 @@ const EMPTY_STATE: HostState = {
   providers: [],
   agents: [],
   tuiAgents: [],
+  artifacts: [],
+  commentThreads: [],
 };
 
 export class HostStore {
@@ -181,6 +227,8 @@ export class HostStore {
       providers: [],
       agents: [],
       tuiAgents: [],
+      artifacts: [],
+      commentThreads: [],
     };
     this.writeTail = Promise.resolve();
     this.closed = false;
@@ -202,6 +250,8 @@ export class HostStore {
           providers: normalizeProviders(parsed.providers),
           agents: normalizeAgents(parsed.agents),
           tuiAgents: normalizeTuiAgents(parsed.tuiAgents),
+          artifacts: normalizeArtifacts(parsed.artifacts),
+          commentThreads: normalizeCommentThreads(parsed.commentThreads),
         };
       }
     } catch {
@@ -258,12 +308,19 @@ function cloneState(state: HostState): HostState {
 
 type PersistedHostState = Omit<
   HostState,
-  "providers" | "agents" | "chats" | "tuiAgents"
+  | "providers"
+  | "agents"
+  | "chats"
+  | "tuiAgents"
+  | "artifacts"
+  | "commentThreads"
 > & {
   readonly providers?: unknown;
   readonly agents?: unknown;
   readonly chats: unknown;
   readonly tuiAgents?: unknown;
+  readonly artifacts?: unknown;
+  readonly commentThreads?: unknown;
 };
 
 function isPersistedHostState(value: unknown): value is PersistedHostState {
@@ -318,6 +375,139 @@ function normalizeProviders(value: unknown): StoredProviderOverride[] {
         typeof record.apiKey === "string" && record.apiKey.length > 0
           ? record.apiKey
           : null,
+      terminalAgentArgs:
+        typeof record.terminalAgentArgs === "string"
+          ? record.terminalAgentArgs
+          : "",
+      envOverrides: normalizeEnvOverrides(record.envOverrides),
+    });
+  }
+  return rows;
+}
+
+function normalizeEnvOverrides(value: unknown): StoredEnvOverride[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const rows: StoredEnvOverride[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    if (typeof record.key !== "string" || record.key.length === 0) {
+      continue;
+    }
+    rows.push({
+      key: record.key,
+      value: typeof record.value === "string" ? record.value : null,
+    });
+  }
+  return rows;
+}
+
+function normalizeArtifacts(value: unknown): StoredArtifact[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const rows: StoredArtifact[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    if (
+      typeof record.epicId !== "string" ||
+      typeof record.artifactId !== "string" ||
+      typeof record.kind !== "string" ||
+      typeof record.title !== "string" ||
+      typeof record.folderName !== "string" ||
+      typeof record.createdAt !== "number"
+    ) {
+      continue;
+    }
+    rows.push({
+      epicId: record.epicId,
+      artifactId: record.artifactId,
+      kind: record.kind,
+      title: record.title,
+      parentId: typeof record.parentId === "string" ? record.parentId : null,
+      folderName: record.folderName,
+      createdAt: record.createdAt,
+      updatedAt:
+        typeof record.updatedAt === "number"
+          ? record.updatedAt
+          : record.createdAt,
+      status: typeof record.status === "number" ? record.status : null,
+      assignee: typeof record.assignee === "string" ? record.assignee : null,
+    });
+  }
+  return rows;
+}
+
+function normalizeCommentThreads(value: unknown): StoredCommentThread[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const rows: StoredCommentThread[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    if (
+      typeof record.epicId !== "string" ||
+      typeof record.artifactType !== "string" ||
+      typeof record.artifactId !== "string" ||
+      typeof record.threadId !== "string" ||
+      typeof record.createdAt !== "number" ||
+      typeof record.createdByUserId !== "string"
+    ) {
+      continue;
+    }
+    rows.push({
+      epicId: record.epicId,
+      artifactType: record.artifactType,
+      artifactId: record.artifactId,
+      threadId: record.threadId,
+      createdAt: record.createdAt,
+      createdByUserId: record.createdByUserId,
+      quotedText:
+        typeof record.quotedText === "string" ? record.quotedText : "",
+      resolved: record.resolved === true,
+      comments: normalizeComments(record.comments),
+    });
+  }
+  return rows;
+}
+
+function normalizeComments(value: unknown): StoredComment[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const rows: StoredComment[] = [];
+  for (const entry of value) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    if (
+      typeof record.commentId !== "string" ||
+      typeof record.createdAt !== "number" ||
+      typeof record.authorUserId !== "string"
+    ) {
+      continue;
+    }
+    rows.push({
+      commentId: record.commentId,
+      content: isJsonContent(record.content)
+        ? record.content
+        : { type: "doc", content: [] },
+      createdAt: record.createdAt,
+      updatedAt: typeof record.updatedAt === "number" ? record.updatedAt : null,
+      authorUserId: record.authorUserId,
+      authorHandle:
+        typeof record.authorHandle === "string" ? record.authorHandle : null,
     });
   }
   return rows;
@@ -601,6 +791,10 @@ function normalizeTuiAgents(value: unknown): StoredTuiAgent[] {
     });
   }
   return rows;
+}
+
+function isJsonContent(value: unknown): value is JsonContent {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function stringArray(value: unknown): string[] {

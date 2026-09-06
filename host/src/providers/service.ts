@@ -3,6 +3,7 @@ import type { ProviderId } from "@traycer/protocol/host/provider-ids";
 import type {
   ProviderCliCandidate,
   ProviderCliState,
+  ProviderEnvOverride,
   ProviderSelection,
 } from "@traycer/protocol/host/provider-schemas";
 import type { HostStore, StoredProviderOverride } from "../store/host-store";
@@ -113,6 +114,78 @@ export async function setProviderApiKey(
   return findProvider(store, providerId);
 }
 
+export async function setProviderTerminalAgentArgs(
+  store: HostStore,
+  providerId: ProviderId,
+  terminalAgentArgs: string,
+): Promise<ProviderCliState | null> {
+  await upsertOverride(store, providerId, (current) => ({
+    ...current,
+    terminalAgentArgs,
+  }));
+  return findProvider(store, providerId);
+}
+
+export async function setProviderEnvOverride(
+  store: HostStore,
+  providerId: ProviderId,
+  key: string,
+  value: string | null,
+): Promise<ProviderCliState | null> {
+  await upsertOverride(store, providerId, (current) => ({
+    ...current,
+    envOverrides: upsertEnvOverride(current.envOverrides, key, value),
+  }));
+  return findProvider(store, providerId);
+}
+
+export async function deleteProviderEnvOverride(
+  store: HostStore,
+  providerId: ProviderId,
+  key: string,
+): Promise<ProviderCliState | null> {
+  await upsertOverride(store, providerId, (current) => ({
+    ...current,
+    envOverrides: current.envOverrides.filter((row) => row.key !== key),
+  }));
+  return findProvider(store, providerId);
+}
+
+export function spawnEnvForProvider(
+  store: HostStore,
+  providerId: ProviderId,
+): NodeJS.ProcessEnv {
+  const override = overrideFor(store.snapshot().providers, providerId);
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  const rows = override === null ? [] : override.envOverrides;
+  const win32 = process.platform === "win32";
+  for (const row of rows) {
+    const existing = win32
+      ? Object.keys(env).find(
+          (name) => name.toLowerCase() === row.key.toLowerCase(),
+        )
+      : row.key;
+    const target = existing === undefined ? row.key : existing;
+    if (row.value === null) {
+      delete env[target];
+    } else {
+      env[target] = row.value;
+    }
+  }
+  return env;
+}
+
+function upsertEnvOverride(
+  current: readonly ProviderEnvOverride[],
+  key: string,
+  value: string | null,
+): ProviderEnvOverride[] {
+  const without = current.filter((row) => row.key !== key);
+  return [...without, { key, value }].sort((left, right) =>
+    left.key.localeCompare(right.key),
+  );
+}
+
 export async function clearProviderApiKey(
   store: HostStore,
   providerId: ProviderId,
@@ -210,8 +283,8 @@ function buildState(
     authPending: false,
     checkedAt: now,
     apiKey: apiKeyStateForProvider(providerId, storedApiKey),
-    terminalAgentArgs: "",
-    envOverrides: [],
+    terminalAgentArgs: override === null ? "" : override.terminalAgentArgs,
+    envOverrides: override === null ? [] : [...override.envOverrides],
     loginCapability: null,
     availabilityPending: false,
     profiles: [],
@@ -335,6 +408,8 @@ async function upsertOverride(
             selectedPath: null,
             customPaths: [],
             apiKey: null,
+            terminalAgentArgs: "",
+            envOverrides: [],
           }
         : current;
     const next = update(base);

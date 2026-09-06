@@ -11,6 +11,7 @@ import {
 import { hostRpcRegistry } from "@traycer/protocol/host/registry";
 import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-floor";
 import { providerIdSchema } from "@traycer/protocol/host/provider-ids";
+import { spawnEnvForProvider } from "../providers/service";
 import { startHost, type StartedHost } from "../start-host";
 
 describe("providers and terminal", () => {
@@ -121,6 +122,85 @@ describe("providers and terminal", () => {
         providerId: "openrouter",
         apiKey: { supported: true, configured: false, source: null },
       },
+    });
+
+    const args = await call(
+      started.rpcUrl,
+      "providers.setTerminalAgentArgs",
+      { major: 2, minor: 1 },
+      {
+        providerId: "claude-code",
+        terminalAgentArgs: "--permission-mode acceptEdits",
+      },
+    );
+    expect(args).toMatchObject({
+      state: {
+        providerId: "claude-code",
+        terminalAgentArgs: "--permission-mode acceptEdits",
+      },
+    });
+    const envSet = await call(
+      started.rpcUrl,
+      "providers.setEnvOverride",
+      { major: 2, minor: 1 },
+      {
+        providerId: "claude-code",
+        key: "ANTHROPIC_API_KEY",
+        value: "sk-ant-test",
+      },
+    );
+    expect(envSet).toMatchObject({
+      state: {
+        providerId: "claude-code",
+        envOverrides: [{ key: "ANTHROPIC_API_KEY", value: "sk-ant-test" }],
+      },
+    });
+    expect(
+      spawnEnvForProvider(started.runtime.store, "claude-code")
+        .ANTHROPIC_API_KEY,
+    ).toBe("sk-ant-test");
+    const unset = await call(
+      started.rpcUrl,
+      "providers.setEnvOverride",
+      { major: 2, minor: 1 },
+      {
+        providerId: "claude-code",
+        key: "ANTHROPIC_API_KEY",
+        value: null,
+      },
+    );
+    expect(unset).toMatchObject({
+      state: {
+        providerId: "claude-code",
+        envOverrides: [{ key: "ANTHROPIC_API_KEY", value: null }],
+      },
+    });
+    expect(
+      spawnEnvForProvider(started.runtime.store, "claude-code")
+        .ANTHROPIC_API_KEY,
+    ).toBeUndefined();
+    const deletedEnv = await call(
+      started.rpcUrl,
+      "providers.deleteEnvOverride",
+      { major: 2, minor: 1 },
+      {
+        providerId: "claude-code",
+        key: "ANTHROPIC_API_KEY",
+      },
+    );
+    expect(deletedEnv).toMatchObject({
+      state: { providerId: "claude-code", envOverrides: [] },
+    });
+    const login = await call(
+      started.rpcUrl,
+      "providers.startLogin",
+      { major: 1, minor: 1 },
+      { providerId: "claude-code" },
+    );
+    expect(login).toEqual({
+      url: null,
+      started: false,
+      profileId: null,
     });
   });
 

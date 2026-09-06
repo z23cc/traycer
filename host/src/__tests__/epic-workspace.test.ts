@@ -34,15 +34,20 @@ describe("epic and workspace RPCs", () => {
       listenHost: "127.0.0.1",
       listenPort: 0,
     });
-    const home = await call(started.rpcUrl, "workspace.prepareFolders", {
-      major: 1,
-      minor: 4,
-    }, {
-      operation: "getHomeDir",
-      folderPaths: null,
-      path: null,
-      bumpRecency: null,
-    });
+    const home = await call(
+      started.rpcUrl,
+      "workspace.prepareFolders",
+      {
+        major: 1,
+        minor: 4,
+      },
+      {
+        operation: "getHomeDir",
+        folderPaths: null,
+        path: null,
+        bumpRecency: null,
+      },
+    );
     expect(home).toMatchObject({
       operation: "getHomeDir",
       homeDir: expect.any(String),
@@ -52,69 +57,89 @@ describe("epic and workspace RPCs", () => {
     await mkdir(workspace);
     await writeFile(join(workspace, "README.md"), "hello\n");
     const canonical = await realpath(workspace);
-    const prepared = await call(started.rpcUrl, "workspace.prepareFolders", {
-      major: 1,
-      minor: 4,
-    }, {
-      operation: "prepare",
-      folderPaths: [workspace],
-      path: null,
-      bumpRecency: true,
-    });
+    const prepared = await call(
+      started.rpcUrl,
+      "workspace.prepareFolders",
+      {
+        major: 1,
+        minor: 4,
+      },
+      {
+        operation: "prepare",
+        folderPaths: [workspace],
+        path: null,
+        bumpRecency: true,
+      },
+    );
     expect(prepared).toMatchObject({
       operation: "prepare",
       folders: [{ workspacePath: canonical, workspaceName: "proj" }],
     });
 
-    const created = await call(started.rpcUrl, "epic.create", { major: 1, minor: 0 }, {
-      epic: {
-        id: "epic-1",
-        title: "First task",
-        initialUserPrompt: "do the thing",
-        ticketCount: 0,
-        specCount: 0,
-        storyCount: 0,
-        reviewCount: 0,
-        status: "active",
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        createdBy: "local",
-        version: "2.0.0",
+    const created = await call(
+      started.rpcUrl,
+      "epic.create",
+      { major: 1, minor: 0 },
+      {
+        epic: {
+          id: "epic-1",
+          title: "First task",
+          initialUserPrompt: "do the thing",
+          ticketCount: 0,
+          specCount: 0,
+          storyCount: 0,
+          reviewCount: 0,
+          status: "active",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          createdBy: "local",
+          version: "2.0.0",
+        },
+        repoIdentifiers: [],
+        workspaces: [{ workspacePath: workspace }],
+        chat: {
+          chatId: "chat-1",
+          parentId: null,
+          hostId: started.runtime.hostId,
+          title: "Chat",
+          worktreeIntent: null,
+          initialMessage: null,
+        },
       },
-      repoIdentifiers: [],
-      workspaces: [{ workspacePath: workspace }],
-      chat: {
-        chatId: "chat-1",
-        parentId: null,
-        hostId: started.runtime.hostId,
-        title: "Chat",
-        worktreeIntent: null,
-        initialMessage: null,
-      },
-    });
+    );
     expect(created).toMatchObject({
       roomInfo: null,
       task: { epic: { light: { id: "epic-1", title: "First task" } } },
     });
 
-    const listed = await call(started.rpcUrl, "epic.listTasks", { major: 1, minor: 3 }, {
-      limit: 20,
-      filters: null,
-      extensionPhaseVersion: "1.0.0",
-      extensionEpicVersion: "2.0.0",
-    });
+    const listed = await call(
+      started.rpcUrl,
+      "epic.listTasks",
+      { major: 1, minor: 3 },
+      {
+        limit: 20,
+        filters: null,
+        extensionPhaseVersion: "1.0.0",
+        extensionEpicVersion: "2.0.0",
+      },
+    );
     expect(listed).toMatchObject({
       hasMore: false,
       tasks: [{ epic: { light: { id: "epic-1" } } }],
     });
 
-    const tree = await call(started.rpcUrl, "workspace.listDirectory", {
-      major: 1,
-      minor: 0,
-    }, {
-      workspacePath: workspace,
-      directoryPath: ".",
-    });
+    const tree = await call(
+      started.rpcUrl,
+      "workspace.listDirectory",
+      {
+        major: 1,
+        minor: 0,
+      },
+      {
+        workspacePath: workspace,
+        directoryPath: ".",
+      },
+    );
     expect(tree).toMatchObject({
       workspacePath: workspace,
       entries: expect.arrayContaining([
@@ -122,36 +147,60 @@ describe("epic and workspace RPCs", () => {
       ]),
     });
 
-    const binding = await call(started.rpcUrl, "worktree.getBinding", {
-      major: 1,
-      minor: 0,
-    }, {
-      epicId: "epic-1",
-      ownerId: "chat-1",
-      ownerKind: "chat",
-    });
+    const binding = await call(
+      started.rpcUrl,
+      "worktree.getBinding",
+      {
+        major: 1,
+        minor: 0,
+      },
+      {
+        epicId: "epic-1",
+        ownerId: "chat-1",
+        ownerKind: "chat",
+      },
+    );
     expect(binding).toMatchObject({
       binding: {
-        entries: [expect.objectContaining({ workspacePath: canonical, mode: "local" })],
+        entries: [
+          expect.objectContaining({ workspacePath: canonical, mode: "local" }),
+        ],
       },
     });
 
-    const renamed = await call(started.rpcUrl, "epic.renameChat", {
-      major: 1,
-      minor: 0,
-    }, { epicId: "epic-1", chatId: "chat-1", title: "Renamed chat" });
+    const renamed = await call(
+      started.rpcUrl,
+      "epic.renameChat",
+      {
+        major: 1,
+        minor: 0,
+      },
+      { epicId: "epic-1", chatId: "chat-1", title: "Renamed chat" },
+    );
     expect(renamed).toEqual({ updated: true });
-    const records = await call(started.rpcUrl, "epic.listChatRecords", {
-      major: 1,
-      minor: 0,
-    }, { epicId: "epic-1" });
+    const records = await call(
+      started.rpcUrl,
+      "epic.listChatRecords",
+      {
+        major: 1,
+        minor: 0,
+      },
+      { epicId: "epic-1" },
+    );
     expect(records).toMatchObject({
-      chats: [expect.objectContaining({ chatId: "chat-1", title: "Renamed chat" })],
+      chats: [
+        expect.objectContaining({ chatId: "chat-1", title: "Renamed chat" }),
+      ],
     });
-    const deleted = await call(started.rpcUrl, "epic.deleteChat", {
-      major: 1,
-      minor: 0,
-    }, { epicId: "epic-1", chatId: "chat-1" });
+    const deleted = await call(
+      started.rpcUrl,
+      "epic.deleteChat",
+      {
+        major: 1,
+        minor: 0,
+      },
+      { epicId: "epic-1", chatId: "chat-1" },
+    );
     expect(deleted).toEqual({ deleted: true });
   });
 
@@ -166,38 +215,48 @@ describe("epic and workspace RPCs", () => {
     await mkdir(workspace);
     await writeFile(join(workspace, "README.md"), "hello\n");
     const canonical = await realpath(workspace);
-    await call(started.rpcUrl, "epic.create", { major: 1, minor: 0 }, {
-      epic: {
-        id: "epic-2",
-        title: "",
-        initialUserPrompt: "你是啥大模型",
-        ticketCount: 0,
-        specCount: 0,
-        storyCount: 0,
-        reviewCount: 0,
-        status: "active",
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        createdBy: "local",
-        version: "2.0.0",
+    await call(
+      started.rpcUrl,
+      "epic.create",
+      { major: 1, minor: 0 },
+      {
+        epic: {
+          id: "epic-2",
+          title: "",
+          initialUserPrompt: "你是啥大模型",
+          ticketCount: 0,
+          specCount: 0,
+          storyCount: 0,
+          reviewCount: 0,
+          status: "active",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          createdBy: "local",
+          version: "2.0.0",
+        },
+        repoIdentifiers: [],
+        workspaces: [{ workspacePath: canonical }],
+        chat: {
+          chatId: "chat-2",
+          parentId: null,
+          hostId: started.runtime.hostId,
+          title: "",
+          worktreeIntent: null,
+          initialMessage: null,
+        },
       },
-      repoIdentifiers: [],
-      workspaces: [{ workspacePath: canonical }],
-      chat: {
-        chatId: "chat-2",
-        parentId: null,
-        hostId: started.runtime.hostId,
-        title: "",
-        worktreeIntent: null,
-        initialMessage: null,
+    );
+    const listed = await call(
+      started.rpcUrl,
+      "epic.listTasks",
+      { major: 1, minor: 3 },
+      {
+        limit: 20,
+        filters: null,
+        extensionPhaseVersion: "1.0.0",
+        extensionEpicVersion: "2.0.0",
       },
-    });
-    const listed = await call(started.rpcUrl, "epic.listTasks", { major: 1, minor: 3 }, {
-      limit: 20,
-      filters: null,
-      extensionPhaseVersion: "1.0.0",
-      extensionEpicVersion: "2.0.0",
-    });
+    );
     expect(listed).toMatchObject({
       tasks: [{ epic: { light: { id: "epic-2", title: "你是啥大模型" } } }],
     });
@@ -229,6 +288,188 @@ describe("epic and workspace RPCs", () => {
     expect(settings).toMatchObject({
       settings: { harnessId: "codex", model: "default" },
     });
+  });
+
+  it("round-trips local artifacts, mentions, and comment threads", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "traycer-host-"));
+    started = await startHost({
+      argv: ["--host-data-dir", tempDir],
+      listenHost: "127.0.0.1",
+      listenPort: 0,
+    });
+    await call(
+      started.rpcUrl,
+      "epic.create",
+      { major: 1, minor: 0 },
+      {
+        epic: {
+          id: "epic-art",
+          title: "Artifact epic",
+          initialUserPrompt: "plan it",
+          ticketCount: 0,
+          specCount: 0,
+          storyCount: 0,
+          reviewCount: 0,
+          status: "active",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          createdBy: "local",
+          version: "2.0.0",
+        },
+        repoIdentifiers: [],
+        workspaces: [],
+        chat: null,
+      },
+    );
+    const created = (await call(
+      started.rpcUrl,
+      "epic.createArtifact",
+      { major: 1, minor: 0 },
+      {
+        epicId: "epic-art",
+        parentId: null,
+        artifactType: "spec",
+        title: "Overview",
+      },
+    )) as { artifactId: string };
+    expect(created.artifactId.length).toBeGreaterThan(0);
+    const mentions = await call(
+      started.rpcUrl,
+      "epic.mentionSpecs",
+      { major: 1, minor: 0 },
+      { query: "over", limit: 10 },
+    );
+    expect(mentions).toMatchObject({
+      entries: [
+        expect.objectContaining({
+          kind: "epic-artifact",
+          artifactType: "spec",
+          artifactId: created.artifactId,
+          label: "Overview",
+        }),
+      ],
+    });
+    const resolved = await call(
+      started.rpcUrl,
+      "epic.resolveArtifactByPath",
+      { major: 1, minor: 0 },
+      {
+        epicId: "epic-art",
+        filePath: `${tempDir}/epics/epic-art/artifacts/overview/index.md`,
+      },
+    );
+    expect(resolved).toEqual({
+      artifact: { artifactId: created.artifactId, kind: "spec" },
+    });
+    const renamed = await call(
+      started.rpcUrl,
+      "epic.renameArtifact",
+      { major: 1, minor: 0 },
+      {
+        epicId: "epic-art",
+        artifactId: created.artifactId,
+        title: "Project overview",
+      },
+    );
+    expect(renamed).toEqual({ updated: true });
+    const comment = {
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [{ type: "text", text: "looks good" }],
+        },
+      ],
+    };
+    const thread = (await call(
+      started.rpcUrl,
+      "epic.createCommentThread",
+      { major: 1, minor: 0 },
+      {
+        epicId: "epic-art",
+        artifactType: "spec",
+        artifactId: created.artifactId,
+        content: comment,
+        quotedText: "Overview",
+      },
+    )) as { threadId: string };
+    const listed = await call(
+      started.rpcUrl,
+      "epic.listCommentThreads",
+      { major: 1, minor: 0 },
+      {
+        epicId: "epic-art",
+        artifactType: "spec",
+        artifactId: created.artifactId,
+      },
+    );
+    expect(listed).toMatchObject({
+      threads: [
+        expect.objectContaining({
+          threadId: thread.threadId,
+          resolved: false,
+          data: expect.objectContaining({ quotedText: "Overview" }),
+        }),
+      ],
+    });
+    const commentsListed = await call(
+      started.rpcUrl,
+      "comments.listThreads",
+      { major: 1, minor: 0 },
+      {
+        epicId: "epic-art",
+        artifactPaths: ["artifacts/overview/index.md"],
+        status: "all",
+      },
+    );
+    expect(commentsListed).toMatchObject({
+      artifacts: [
+        expect.objectContaining({
+          artifactPath: "artifacts/overview/index.md",
+          kind: "spec",
+          title: "Project overview",
+        }),
+      ],
+    });
+    const resolvedThread = await call(
+      started.rpcUrl,
+      "comments.setThreadStatus",
+      { major: 1, minor: 0 },
+      {
+        epicId: "epic-art",
+        updates: [
+          {
+            artifactPath: "artifacts/overview/index.md",
+            threadIds: [thread.threadId],
+            status: "resolved",
+          },
+        ],
+      },
+    );
+    expect(resolvedThread).toMatchObject({
+      updated: [
+        {
+          artifactPath: "artifacts/overview/index.md",
+          threadId: thread.threadId,
+          status: "resolved",
+        },
+      ],
+      failed: [],
+    });
+    const deleted = await call(
+      started.rpcUrl,
+      "epic.deleteArtifact",
+      { major: 1, minor: 0 },
+      { epicId: "epic-art", artifactId: created.artifactId },
+    );
+    expect(deleted).toEqual({ deleted: true });
+    const emptyMentions = await call(
+      started.rpcUrl,
+      "epic.mentionSpecs",
+      { major: 1, minor: 0 },
+      { query: "", limit: 10 },
+    );
+    expect(emptyMentions).toEqual({ entries: [] });
   });
 });
 

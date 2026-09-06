@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { providerCliIdentity } from "../providers/service";
+import { providerCliIdentity, spawnEnvForProvider } from "../providers/service";
 import type { HostRuntime } from "../runtime";
 import { providerIdForHarness } from "./harness-map";
 import {
@@ -152,6 +152,7 @@ export async function runGuiPrintTurn(
     try {
       child = spawn(binaryPath, args, {
         cwd: input.cwd,
+        env: spawnEnvForProvider(runtime.store, providerId),
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
       });

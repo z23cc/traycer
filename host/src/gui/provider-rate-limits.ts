@@ -9,7 +9,7 @@ import { rateLimitCapableProviderIdSchema } from "@traycer/protocol/host/rate-li
 import type { HostRuntime } from "../runtime";
 import type { StoredProviderOverride } from "../store/host-store";
 import { HOST_VERSION } from "../version";
-import { providerCliIdentity } from "../providers/service";
+import { providerCliIdentity, spawnEnvForProvider } from "../providers/service";
 
 const RATE_LIMIT_TIMEOUT_MS = 60_000;
 const CLAUDE_FIVE_HOUR_MINUTES = 300;
@@ -93,20 +93,32 @@ export async function readProviderRateLimits(
   }
   if (capable.data === "grok") {
     const identity = providerCliIdentity(runtime.store, "grok");
-    return readGrokRateLimits(identity.path);
+    return readGrokRateLimits(
+      identity.path,
+      overlaySpawnEnv(runtime, "grok", {
+        GROK_OAUTH2_REFERRER: "traycer",
+        GROK_DISABLE_AUTOUPDATER: "1",
+        GROK_AUTO_UPDATE: "0",
+      }),
+    );
   }
   if (capable.data === "codex" || capable.data === "claude-code") {
-    const identity = providerCliIdentity(
-      runtime.store,
-      capable.data as ProviderId,
-    );
+    const identity = providerCliIdentity(runtime.store, capable.data);
     if (identity.path === null) {
       return unavailableRateLimits(capable.data, "cli_not_found");
     }
     if (capable.data === "codex") {
-      return readCodexRateLimits(identity.path);
+      return readCodexRateLimits(
+        identity.path,
+        overlaySpawnEnv(runtime, "codex", {}),
+      );
     }
-    return readClaudeRateLimits(identity.path);
+    return readClaudeRateLimits(
+      identity.path,
+      overlaySpawnEnv(runtime, "claude-code", {
+        CLAUDE_CODE_ENTRYPOINT: "sdk-ts",
+      }),
+    );
   }
   return unavailableRateLimits(capable.data, "rate_limits_not_available");
 }
@@ -1211,8 +1223,17 @@ function readCursorKeychainAccessToken(): string | null {
   }
 }
 
+function overlaySpawnEnv(
+  runtime: HostRuntime,
+  providerId: ProviderId,
+  extra: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  return { ...spawnEnvForProvider(runtime.store, providerId), ...extra };
+}
+
 function readCodexRateLimits(
   binaryPath: string,
+  env: NodeJS.ProcessEnv,
 ): Promise<ProviderRateLimitSnapshot> {
   return jsonRpcCall(
     binaryPath,
@@ -1229,7 +1250,7 @@ function readCodexRateLimits(
       { method: "account/rateLimits/read", params: {} },
     ],
     {
-      env: process.env,
+      env,
       cwd: process.cwd(),
       timeoutMs: RATE_LIMIT_TIMEOUT_MS,
     },
@@ -1249,6 +1270,7 @@ function readCodexRateLimits(
 
 function readGrokRateLimits(
   binaryPath: string | null,
+  env: NodeJS.ProcessEnv,
 ): Promise<ProviderRateLimitSnapshot> {
   const mode = classifyGrokAuthMode();
   if (mode !== "oauth") {
@@ -1267,12 +1289,7 @@ function readGrokRateLimits(
       { method: GROK_BILLING_METHOD, params: {} },
     ],
     {
-      env: {
-        ...process.env,
-        GROK_OAUTH2_REFERRER: "traycer",
-        GROK_DISABLE_AUTOUPDATER: "1",
-        GROK_AUTO_UPDATE: "0",
-      },
+      env,
       cwd: process.cwd(),
       timeoutMs: RATE_LIMIT_TIMEOUT_MS,
     },
@@ -1295,6 +1312,7 @@ function readGrokRateLimits(
 
 function readClaudeRateLimits(
   binaryPath: string,
+  env: NodeJS.ProcessEnv,
 ): Promise<ProviderRateLimitSnapshot> {
   return new Promise((resolve) => {
     let child: ChildProcess;
@@ -1313,7 +1331,7 @@ function readClaudeRateLimits(
           cwd: homedir(),
           stdio: ["pipe", "pipe", "pipe"],
           windowsHide: true,
-          env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: "sdk-ts" },
+          env,
         },
       );
     } catch {

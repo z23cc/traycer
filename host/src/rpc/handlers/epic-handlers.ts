@@ -8,11 +8,14 @@ import {
   createChatRequestSchema,
   deleteChatRequestSchema,
   createEpicRequestSchema,
-  epicMentionArtifactsRequestSchema,
+  batchUpdateEpicRolesRequestSchema,
   epicMentionEpicsRequestSchema,
   getTaskContextsRequestSchema,
-  listCommentThreadsRequestSchema,
+  grantEpicAccessRequestSchema,
   listEpicCollaboratorsRequestSchema,
+  reparentChatRequestSchema,
+  removeEpicRepoRequestSchema,
+  revokeEpicCollaboratorRequestSchema,
   listTasksRequestSchema,
   recordEpicViewedRequestSchema,
   renameChatRequestSchema,
@@ -47,7 +50,9 @@ export const handleEpicCreate: RpcHandler = async (params, runtime) => {
   }
   const now = Date.now();
   const createdBy =
-    parsed.data.epic.createdBy.length > 0 ? parsed.data.epic.createdBy : "local";
+    parsed.data.epic.createdBy.length > 0
+      ? parsed.data.epic.createdBy
+      : "local";
   const epic: StoredEpic = {
     id: parsed.data.epic.id,
     title: parsed.data.epic.title,
@@ -56,13 +61,18 @@ export const handleEpicCreate: RpcHandler = async (params, runtime) => {
     createdAt: parsed.data.epic.createdAt || now,
     updatedAt: now,
     createdBy,
-    version: parsed.data.epic.version.length > 0 ? parsed.data.epic.version : EPIC_VERSION,
+    version:
+      parsed.data.epic.version.length > 0
+        ? parsed.data.epic.version
+        : EPIC_VERSION,
     ticketCount: parsed.data.epic.ticketCount,
     specCount: parsed.data.epic.specCount,
     storyCount: parsed.data.epic.storyCount,
     reviewCount: parsed.data.epic.reviewCount,
     repos: parsed.data.repoIdentifiers,
-    workspaces: parsed.data.workspaces.map((workspace) => workspace.workspacePath),
+    workspaces: parsed.data.workspaces.map(
+      (workspace) => workspace.workspacePath,
+    ),
     pinned: false,
     lastViewedAt: now,
   };
@@ -205,7 +215,13 @@ export const handleEpicBatchDelete: RpcHandler = async (params, runtime) => {
       state.chats = state.chats.filter((chat) => chat.epicId !== id);
       state.agents = state.agents.filter((agent) => agent.epicId !== id);
       state.tuiAgents = state.tuiAgents.filter((agent) => agent.epicId !== id);
-      state.bindings = state.bindings.filter((binding) => binding.epicId !== id);
+      state.bindings = state.bindings.filter(
+        (binding) => binding.epicId !== id,
+      );
+      state.artifacts = state.artifacts.filter((row) => row.epicId !== id);
+      state.commentThreads = state.commentThreads.filter(
+        (row) => row.epicId !== id,
+      );
       return { taskId: id, success: existed };
     }),
   );
@@ -365,7 +381,9 @@ export const handleEpicRecordViewed: RpcHandler = async (params, runtime) => {
   }
   const viewedAt = Date.now();
   const updated = await runtime.store.mutate((state) => {
-    const index = state.epics.findIndex((epic) => epic.id === parsed.data.epicId);
+    const index = state.epics.findIndex(
+      (epic) => epic.id === parsed.data.epicId,
+    );
     if (index < 0) {
       return false;
     }
@@ -474,20 +492,106 @@ export const handleEpicMentionEpics: RpcHandler = (params, runtime) => {
   return { ok: true, result: { entries } };
 };
 
-export const handleEpicListCommentThreads: RpcHandler = (params) => {
-  const parsed = listCommentThreadsRequestSchema.safeParse(params);
+const EMPTY_COLLABORATORS = {
+  collaborators: [],
+  collaboratorsAvailable: false,
+} as const;
+
+export const handleEpicGrantAccess: RpcHandler = (params) => {
+  const parsed = grantEpicAccessRequestSchema.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
-  return { ok: true, result: { threads: [] } };
+  return { ok: true, result: EMPTY_COLLABORATORS };
 };
 
-export const handleEpicMentionArtifacts: RpcHandler = (params) => {
-  const parsed = epicMentionArtifactsRequestSchema.safeParse(params);
+export const handleEpicBatchUpdateRoles: RpcHandler = (params) => {
+  const parsed = batchUpdateEpicRolesRequestSchema.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
-  return { ok: true, result: { entries: [] } };
+  return { ok: true, result: EMPTY_COLLABORATORS };
+};
+
+export const handleEpicRevokeCollaborator: RpcHandler = (params) => {
+  const parsed = revokeEpicCollaboratorRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  return { ok: true, result: EMPTY_COLLABORATORS };
+};
+
+export const handleEpicRemoveRepo: RpcHandler = async (params, runtime) => {
+  const parsed = removeEpicRepoRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const success = await runtime.store.mutate((state) => {
+    const index = state.epics.findIndex(
+      (epic) => epic.id === parsed.data.epicId,
+    );
+    if (index < 0) {
+      return false;
+    }
+    const epic = state.epics[index];
+    if (epic === undefined) {
+      return false;
+    }
+    const before = epic.repos.length;
+    state.epics[index] = {
+      ...epic,
+      repos: epic.repos.filter(
+        (repo) =>
+          repo.owner !== parsed.data.repoIdentifier.owner ||
+          repo.repo !== parsed.data.repoIdentifier.repo,
+      ),
+    };
+    return state.epics[index]?.repos.length !== before;
+  });
+  return { ok: true, result: { success } };
+};
+
+export const handleEpicReparentChat: RpcHandler = async (params, runtime) => {
+  const parsed = reparentChatRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const updated = await runtime.store.mutate((state) => {
+    const tuiIndex = state.tuiAgents.findIndex(
+      (row) =>
+        row.epicId === parsed.data.epicId &&
+        row.tuiAgentId === parsed.data.chatId,
+    );
+    if (tuiIndex >= 0) {
+      const agent = state.tuiAgents[tuiIndex];
+      if (agent === undefined) {
+        return false;
+      }
+      state.tuiAgents[tuiIndex] = {
+        ...agent,
+        parentId: parsed.data.newParentId,
+        updatedAt: Date.now(),
+      };
+      return true;
+    }
+    const chatIndex = state.chats.findIndex(
+      (row) =>
+        row.epicId === parsed.data.epicId && row.chatId === parsed.data.chatId,
+    );
+    if (chatIndex < 0) {
+      return false;
+    }
+    const chat = state.chats[chatIndex];
+    if (chat === undefined) {
+      return false;
+    }
+    state.chats[chatIndex] = {
+      ...chat,
+      parentId: parsed.data.newParentId,
+    };
+    return true;
+  });
+  return { ok: true, result: { updated } };
 };
 
 async function bindEpicWorkspacesToChat(
