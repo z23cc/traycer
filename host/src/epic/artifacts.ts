@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
+import {
+  readArtifactMarkdown,
+  splitFrontMatter,
+  writeArtifactMarkdownFile,
+} from "./artifact-body";
 import type { HostRuntime } from "../runtime";
 import type { StoredArtifact, StoredEpic } from "../store/host-store";
 
@@ -348,9 +353,9 @@ async function writeArtifactMarkdown(
   runtime: HostRuntime,
   artifact: StoredArtifact,
 ): Promise<void> {
-  const dir = artifactDir(runtime, artifact.epicId, artifact.folderName);
-  await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, "index.md"), renderFrontMatter(artifact), "utf8");
+  const existing = await readArtifactMarkdown(runtime, artifact);
+  const body = splitFrontMatter(existing).body;
+  await writeArtifactMarkdownFile(runtime, artifact, body);
 }
 
 async function removeArtifactDir(
@@ -362,9 +367,4 @@ async function removeArtifactDir(
     recursive: true,
     force: true,
   });
-}
-
-function renderFrontMatter(artifact: StoredArtifact): string {
-  const title = artifact.title.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
-  return `---\ntitle: "${title}"\nkind: ${artifact.kind}\n---\n`;
 }

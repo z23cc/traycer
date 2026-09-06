@@ -1,4 +1,11 @@
-import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -15,6 +22,8 @@ import {
   hostStreamRpcRegistry,
 } from "@traycer/protocol/host/registry";
 import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-floor";
+import { artifactBodyFragmentName } from "@traycer/protocol/persistence/epic/artifacts";
+import { xmlFragmentToMarkdown } from "../epic/artifact-body";
 import { startHost, type StartedHost } from "../start-host";
 
 describe("epic and workspace RPCs", () => {
@@ -551,6 +560,109 @@ describe("epic and workspace RPCs", () => {
     expect(frames.some((frame) => frame.kind === "artifactRoomState")).toBe(
       true,
     );
+  });
+
+  it("loads index.md into the artifact room and writes a room update back", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "traycer-host-"));
+    started = await startHost({
+      argv: ["--host-data-dir", tempDir],
+      listenHost: "127.0.0.1",
+      listenPort: 0,
+    });
+    await call(
+      started.rpcUrl,
+      "epic.create",
+      { major: 1, minor: 0 },
+      {
+        epic: {
+          id: "epic-body",
+          title: "Body epic",
+          initialUserPrompt: "",
+          ticketCount: 0,
+          specCount: 0,
+          storyCount: 0,
+          reviewCount: 0,
+          status: "active",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          createdBy: "local",
+          version: "2.0.0",
+        },
+        repoIdentifiers: [],
+        workspaces: [],
+        chat: null,
+      },
+    );
+    const created = (await call(
+      started.rpcUrl,
+      "epic.createArtifact",
+      { major: 1, minor: 0 },
+      {
+        epicId: "epic-body",
+        parentId: null,
+        artifactType: "spec",
+        title: "Live spec",
+      },
+    )) as { artifactId: string };
+    const indexPath = join(
+      tempDir,
+      "epics",
+      "epic-body",
+      "artifacts",
+      "live-spec",
+      "index.md",
+    );
+    await writeFile(
+      indexPath,
+      `---\ntitle: "Live spec"\nkind: spec\n---\n\nOSS body\n`,
+      "utf8",
+    );
+    const frames = await subscribeEpic(started.rpcUrl, "epic-body");
+    const roomSnapshot = frames.find(
+      (frame) => frame.kind === "artifactRoomSnapshot" && frame.binary !== null,
+    );
+    expect(roomSnapshot?.binary).toBeDefined();
+    const room = new Y.Doc();
+    Y.applyUpdate(room, roomSnapshot?.binary ?? new Uint8Array());
+    const fragment = room.getXmlFragment(
+      artifactBodyFragmentName(created.artifactId),
+    );
+    expect(xmlFragmentToMarkdown(fragment)).toBe("OSS body");
+    const paragraph = new Y.XmlElement("paragraph");
+    const text = new Y.XmlText();
+    text.insert(0, "Edited locally");
+    paragraph.insert(0, [text]);
+    fragment.insert(fragment.length, [paragraph]);
+    const seeded = new Y.Doc();
+    Y.applyUpdate(seeded, roomSnapshot?.binary ?? new Uint8Array());
+    const before = Y.encodeStateVector(seeded);
+    seeded.destroy();
+    const update = Y.encodeStateAsUpdate(room, before);
+    const root = new Y.Doc();
+    const rootSnapshot = frames.find(
+      (frame) => frame.kind === "snapshot" && frame.binary !== null,
+    );
+    Y.applyUpdate(root, rootSnapshot?.binary ?? new Uint8Array());
+    const artifacts = root.getMap("epic").get("artifacts");
+    const entry =
+      artifacts instanceof Y.Map ? artifacts.get(created.artifactId) : null;
+    const roomId = entry instanceof Y.Map ? entry.get("artifactRoomId") : null;
+    expect(typeof roomId).toBe("string");
+    if (typeof roomId !== "string") {
+      return;
+    }
+    started.runtime.epics.applyRoomUpdate(
+      started.runtime,
+      "epic-body",
+      roomId,
+      update,
+    );
+    await new Promise<void>((resolve) => {
+      setTimeout(() => resolve(), 50);
+    });
+    const written = await readFile(indexPath, "utf8");
+    expect(written).toContain("OSS body");
+    expect(written).toContain("Edited locally");
   });
 });
 

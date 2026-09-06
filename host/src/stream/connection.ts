@@ -330,6 +330,7 @@ export function attachStreamConnection(
       pendingBinary.artifactRoomId !== null
     ) {
       runtime.epics.applyRoomUpdate(
+        runtime,
         pendingBinary.epicId,
         pendingBinary.artifactRoomId,
         bytes,

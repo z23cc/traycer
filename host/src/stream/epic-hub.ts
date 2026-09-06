@@ -3,6 +3,12 @@ import type { WebSocket } from "ws";
 import * as Y from "yjs";
 import { artifactBodyFragmentName } from "@traycer/protocol/persistence/epic/artifacts";
 import type { EarlyMetaEpic } from "@traycer/protocol/host/epic/snapshot-meta";
+import {
+  readArtifactMarkdown,
+  seedXmlFragmentFromMarkdown,
+  writeArtifactMarkdownFile,
+  xmlFragmentToMarkdown,
+} from "../epic/artifact-body";
 import { LOCAL_USER_ID } from "../local-user";
 import type { HostRuntime } from "../runtime";
 import type {
@@ -30,7 +36,7 @@ export class EpicHub {
   ): Promise<void> {
     await assignRoomIds(runtime, epicId);
     this.add(epicId, socket);
-    this.syncFromStore(runtime, epicId);
+    await this.syncFromStore(runtime, epicId);
     this.sendBootstrap(socket, runtime, epicId);
   }
 
@@ -45,7 +51,7 @@ export class EpicHub {
     }
   }
 
-  syncFromStore(runtime: HostRuntime, epicId: string): void {
+  async syncFromStore(runtime: HostRuntime, epicId: string): Promise<void> {
     const session = this.session(epicId);
     const before = Y.encodeStateVector(session.doc);
     seedRoot(session.doc, runtime, epicId);
@@ -61,7 +67,7 @@ export class EpicHub {
         update,
       );
     }
-    const added = ensureRooms(session, runtime, epicId);
+    const added = await ensureRooms(session, runtime, epicId);
     for (const roomId of added) {
       for (const socket of session.sockets) {
         sendRoomBootstrap(socket, epicId, roomId, session.rooms.get(roomId));
@@ -117,6 +123,7 @@ export class EpicHub {
   }
 
   applyRoomUpdate(
+    runtime: HostRuntime,
     epicId: string,
     artifactRoomId: string,
     bytes: Uint8Array,
@@ -143,6 +150,7 @@ export class EpicHub {
       },
       bytes,
     );
+    void persistRoomMarkdown(runtime, epicId, artifactRoomId, room);
   }
 
   private session(epicId: string): EpicSession {
@@ -166,7 +174,7 @@ export async function publishEpic(
   epicId: string,
 ): Promise<void> {
   await assignRoomIds(runtime, epicId);
-  runtime.epics.syncFromStore(runtime, epicId);
+  await runtime.epics.syncFromStore(runtime, epicId);
 }
 
 async function assignRoomIds(
@@ -208,19 +216,19 @@ function seedRoot(doc: Y.Doc, runtime: HostRuntime, epicId: string): void {
   });
 }
 
-function ensureRooms(
+async function ensureRooms(
   session: EpicSession,
   runtime: HostRuntime,
   epicId: string,
-): readonly string[] {
-  const wanted = new Map<string, string>();
+): Promise<readonly string[]> {
+  const wanted = new Map<string, StoredArtifact>();
   for (const row of runtime.store.snapshot().artifacts) {
     if (row.epicId !== epicId) {
       continue;
     }
     const roomId =
       row.artifactRoomId.length > 0 ? row.artifactRoomId : randomUUID();
-    wanted.set(roomId, row.artifactId);
+    wanted.set(roomId, row);
   }
   for (const roomId of [...session.rooms.keys()]) {
     if (!wanted.has(roomId)) {
@@ -229,16 +237,47 @@ function ensureRooms(
     }
   }
   const added: string[] = [];
-  for (const [roomId, artifactId] of wanted) {
-    if (session.rooms.has(roomId)) {
+  for (const [roomId, artifact] of wanted) {
+    let room = session.rooms.get(roomId);
+    if (room === undefined) {
+      room = new Y.Doc();
+      session.rooms.set(roomId, room);
+      added.push(roomId);
+    }
+    const fragment = room.getXmlFragment(
+      artifactBodyFragmentName(artifact.artifactId),
+    );
+    if (fragment.length > 0) {
       continue;
     }
-    const room = new Y.Doc();
-    room.getXmlFragment(artifactBodyFragmentName(artifactId));
-    session.rooms.set(roomId, room);
-    added.push(roomId);
+    const markdown = await readArtifactMarkdown(runtime, artifact);
+    seedXmlFragmentFromMarkdown(fragment, markdown);
   }
   return added;
+}
+
+async function persistRoomMarkdown(
+  runtime: HostRuntime,
+  epicId: string,
+  artifactRoomId: string,
+  room: Y.Doc,
+): Promise<void> {
+  const artifact = runtime.store
+    .snapshot()
+    .artifacts.find(
+      (row) => row.epicId === epicId && row.artifactRoomId === artifactRoomId,
+    );
+  if (artifact === undefined) {
+    return;
+  }
+  const fragment = room.getXmlFragment(
+    artifactBodyFragmentName(artifact.artifactId),
+  );
+  await writeArtifactMarkdownFile(
+    runtime,
+    artifact,
+    xmlFragmentToMarkdown(fragment),
+  );
 }
 
 function artifactMap(rows: readonly StoredArtifact[]): Y.Map<unknown> {
