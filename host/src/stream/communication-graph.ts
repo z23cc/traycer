@@ -12,10 +12,17 @@ import type { StoredChat, StoredTurn } from "../store/host-store";
  * kept: the transcript already records every A2A delivery, sender and thread
  * id included, so a second table could only drift from it.
  *
- * `id` is an ordering cursor, not an identity: rows are numbered by their
- * position in one deterministic sort, so the same history numbers the same way
- * on every subscription. It is only comparable within this host, which is what
- * the contract says a cursor is.
+ * A turn older than the chat holding it was COPIED there, not delivered:
+ * `agent.fork` clones the source transcript verbatim, so every inherited row
+ * names an agent other than the fork and would otherwise be republished as
+ * traffic that never happened - the sender's own turns as a fake conversation
+ * with the fork, and each real delivery a second time under the wrong
+ * receiver. A delivery cannot predate its receiver.
+ *
+ * ponytail: `id` is positional, so an inserted row below the head renumbers
+ * everything above it and a resumed client re-learns those rows. Every turn is
+ * stamped `Date.now()` at append and copies are excluded above, so the sort is
+ * append-only in practice; number by a persisted counter if that stops holding.
  */
 export function graphEvents(
   runtime: HostRuntime,
@@ -27,7 +34,11 @@ export function graphEvents(
       continue;
     }
     for (const turn of chat.turns) {
-      if (turn.fromAgentId !== chat.chatId && turn.fromAgentId.length > 0) {
+      if (
+        turn.fromAgentId !== chat.chatId &&
+        turn.fromAgentId.length > 0 &&
+        turn.timestamp >= chat.createdAt
+      ) {
         rows.push({ chat, turn });
       }
     }

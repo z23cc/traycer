@@ -92,6 +92,35 @@ describe("epic.communicationGraph.subscribe", () => {
     expect(resumed.frames[0]).toMatchObject({ events: [], headId: 1 });
   });
 
+  it("ignores a transcript the chat inherited instead of received", async () => {
+    const host = await boot();
+    await seed(host);
+    // `agent.fork` clones the source turns verbatim into a chat with a new id,
+    // so every inherited row names some other agent. None of it was delivered
+    // here, and the fork is younger than all of it.
+    await host.runtime.store.mutate((state) => {
+      const source = state.chats[0];
+      state.chats.push({
+        ...source,
+        chatId: "chat-1-fork",
+        createdAt: 10,
+        turns: source.turns.map((turn) => ({ ...turn })),
+      });
+    });
+    const events = graphEvents(host.runtime, "epic-1");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ receiverAgentId: "chat-1" });
+
+    // What the fork is actually sent afterwards is still real traffic.
+    await host.runtime.store.mutate((state) => {
+      const fork = state.chats.find((row) => row.chatId === "chat-1-fork");
+      fork?.turns.push(turn("m-3", 11, "chat-2", "thread-2", false));
+    });
+    expect(
+      graphEvents(host.runtime, "epic-1").map((event) => event.originRefId),
+    ).toEqual(["m-2", "m-3"]);
+  });
+
   it("reports an empty log with a null boundary", async () => {
     const host = await boot();
     const socket = new FakeSocket();
