@@ -122,6 +122,53 @@ describe("artifact.subscribe", () => {
     });
   });
 
+  it("relays one tile's edit to the others on that body, never back", async () => {
+    const host = await boot();
+    await seed(host);
+    const first = new FakeSocket();
+    const second = new FakeSocket();
+    const editor = await attach(host, first, "a-1");
+    await attach(host, second, "a-1");
+    // A third tile on a different body must not hear this at all.
+    const elsewhere = new FakeSocket();
+    await attach(host, elsewhere, "a-2");
+
+    const guid = String(first.frames[0].docGuid);
+    const before = first.frames.length;
+    editor.applyUpdate(guid, update("shared"));
+
+    // The sender already applied its own edit; echoing it back is the round
+    // trip `docAck` exists to avoid.
+    expect(first.frames.slice(before).map((f) => f.kind)).toEqual(["docAck"]);
+    expect(second.frames.at(-1)).toMatchObject({
+      kind: "docUpdate",
+      docGuid: guid,
+      hasBinaryPayload: true,
+    });
+    expect(second.binaries).toHaveLength(2);
+    expect(elsewhere.frames.map((f) => f.kind)).toEqual(["doc"]);
+  });
+
+  async function attach(
+    host: StartedHost,
+    socket: FakeSocket,
+    artifactId: string,
+  ): Promise<ArtifactDocLane> {
+    const lane = new ArtifactDocLane(
+      socket as never,
+      host.runtime,
+      "epic-1",
+      artifactId,
+    );
+    host.runtime.artifactDocs.add(socket as never, lane);
+    await lane.open({
+      epicId: "epic-1",
+      artifactId,
+      authorityEpoch: host.runtime.authorityEpoch,
+    });
+    return lane;
+  }
+
   async function boot(): Promise<StartedHost> {
     tempDir = await mkdtemp(join(tmpdir(), "traycer-host-"));
     started = await startHost({
@@ -160,6 +207,19 @@ async function seed(host: StartedHost): Promise<void> {
       workspaces: [],
       pinned: false,
       lastViewedAt: null,
+    });
+    state.artifacts.push({
+      epicId: "epic-1",
+      artifactId: "a-2",
+      kind: "spec",
+      title: "Other body",
+      parentId: null,
+      folderName: "other",
+      artifactRoomId: "",
+      createdAt: 1,
+      updatedAt: 1,
+      status: null,
+      assignee: null,
     });
     state.artifacts.push({
       epicId: "epic-1",
