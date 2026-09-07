@@ -434,6 +434,7 @@ function chatOf(
     fileChangeCount: 0,
     lastUsage: null,
     archivedAt: null,
+    lastAuthFailureTurnId: null,
     fastMode: false,
   };
 }

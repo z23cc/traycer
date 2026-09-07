@@ -148,6 +148,7 @@ async function seed(host: StartedHost): Promise<void> {
     fileChangeCount: 0,
     lastUsage: null,
     archivedAt: null,
+    lastAuthFailureTurnId: null,
   };
   await host.runtime.store.mutate((state) => {
     state.chats.push(chat);

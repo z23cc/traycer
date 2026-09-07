@@ -171,12 +171,19 @@ export async function runGuiPrintTurn(
       return;
     }
     runtime.guiRuns.set(input.agentId, child);
+    // Declared before `emit`, which arms it when the provider rejects the
+    // credential.
+    const killTimer: { current: NodeJS.Timeout | null } = { current: null };
     let stdout = "";
     let stderr = "";
     let streamed = "";
     let structured = false;
     let pendingPlain = "";
     let timedOut = false;
+    let authFailure: {
+      readonly status: number;
+      readonly detail: string;
+    } | null = null;
     let flushTimer: NodeJS.Timeout | null = null;
     const emit = (event: ProviderStreamEvent): void => {
       if (event.kind === "delta") {
@@ -184,6 +191,19 @@ export async function runGuiPrintTurn(
           return;
         }
         streamed += event.text;
+      }
+      if (event.kind === "auth_failure" && authFailure === null) {
+        // Stop rather than wait it out. The provider retries a rejected
+        // credential ten times behind exponential backoff, and none of those
+        // attempts can succeed - left alone this run holds the chat until
+        // PRINT_TIMEOUT_MS and then reports a timeout, which names the symptom
+        // and hides the cause. Killing here costs the retries and buys an
+        // error the GUI can act on.
+        authFailure = { status: event.status, detail: event.detail };
+        child.kill("SIGTERM");
+        killTimer.current = setTimeout(() => {
+          child.kill("SIGKILL");
+        }, KILL_GRACE_MS);
       }
       input.onEvent(event);
     };
@@ -250,7 +270,6 @@ export async function runGuiPrintTurn(
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
     });
-    const killTimer: { current: NodeJS.Timeout | null } = { current: null };
     const timer: NodeJS.Timeout = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
@@ -283,6 +302,17 @@ export async function runGuiPrintTurn(
       const errText = stderr.trim();
       if (runtime.guiRuns.wasStopped(input.agentId)) {
         resolve(text.length > 0 ? text : "Stopped.");
+        return;
+      }
+      // Ahead of the text check: a rejected credential can still have
+      // produced a line or two of output, and resolving on that would file the
+      // turn as a normal reply.
+      if (authFailure !== null) {
+        reject(
+          new Error(
+            `agent.sendMessage: harness '${input.harnessId}' rejected the credential (${String(authFailure.status)} ${authFailure.detail})${errText.length > 0 ? `: ${errText}` : ""}`,
+          ),
+        );
         return;
       }
       if (timedOut) {

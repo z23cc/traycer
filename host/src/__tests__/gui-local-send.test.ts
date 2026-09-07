@@ -1,4 +1,11 @@
-import { chmod, mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  mkdir,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -31,62 +38,77 @@ describe("local GUI send without cloud login", () => {
     const setup = await boot();
     tempDir = setup.tempDir;
     started = setup.started;
-    const created = await call(started.rpcUrl, "epic.create", { major: 1, minor: 0 }, {
-      epic: {
-        id: "epic-1",
-        title: "Local send",
-        initialUserPrompt: "你好呀你好",
-        ticketCount: 0,
-        specCount: 0,
-        storyCount: 0,
-        reviewCount: 0,
-        status: "active",
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        createdBy: "local",
-        version: "2.0.0",
-      },
-      repoIdentifiers: [],
-      workspaces: [{ workspacePath: setup.workspace }],
-      chat: {
-        chatId: "chat-1",
-        parentId: null,
-        hostId: started.runtime.hostId,
-        title: "",
-        worktreeIntent: null,
-        initialMessage: {
-          messageId: "msg-user-1",
-          clientActionId: "action-1",
-          content: promptDoc("你好呀你好"),
-          sender: {
-            type: "user",
-            userId: "b6c080e5-7ae0-405b-8195-7b09ff6c55b8",
+    const created = await call(
+      started.rpcUrl,
+      "epic.create",
+      { major: 1, minor: 0 },
+      {
+        epic: {
+          id: "epic-1",
+          title: "Local send",
+          initialUserPrompt: "你好呀你好",
+          ticketCount: 0,
+          specCount: 0,
+          storyCount: 0,
+          reviewCount: 0,
+          status: "active",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          createdBy: "local",
+          version: "2.0.0",
+        },
+        repoIdentifiers: [],
+        workspaces: [{ workspacePath: setup.workspace }],
+        chat: {
+          chatId: "chat-1",
+          parentId: null,
+          hostId: started.runtime.hostId,
+          title: "",
+          worktreeIntent: null,
+          initialMessage: {
+            messageId: "msg-user-1",
+            clientActionId: "action-1",
+            content: promptDoc("你好呀你好"),
+            sender: {
+              type: "user",
+              userId: "b6c080e5-7ae0-405b-8195-7b09ff6c55b8",
+            },
+            settings: {
+              harnessId: "claude",
+              model: "default",
+              permissionMode: "full_access",
+              reasoningEffort: null,
+              serviceTier: null,
+              agentMode: "regular",
+              profileId: null,
+            },
+            accountContext: { type: "PERSONAL" },
           },
-          settings: {
-            harnessId: "claude",
-            model: "default",
-            permissionMode: "full_access",
-            reasoningEffort: null,
-            serviceTier: null,
-            agentMode: "regular",
-            profileId: null,
-          },
-          accountContext: { type: "PERSONAL" },
         },
       },
-    });
+    );
     expect(created).toMatchObject({ initialTurnStarted: true });
 
-    const viewed = await call(started.rpcUrl, "epic.recordViewed", {
-      major: 1,
-      minor: 0,
-    }, { epicId: "epic-1" });
+    const viewed = await call(
+      started.rpcUrl,
+      "epic.recordViewed",
+      {
+        major: 1,
+        minor: 0,
+      },
+      { epicId: "epic-1" },
+    );
     expect(viewed).toMatchObject({ viewedAt: expect.any(Number) });
 
-    const contexts = await call(started.rpcUrl, "epic.getTaskContexts", {
-      major: 1,
-      minor: 2,
-    }, { taskIds: ["epic-1", "missing"] });
+    const contexts = await call(
+      started.rpcUrl,
+      "epic.getTaskContexts",
+      {
+        major: 1,
+        minor: 2,
+      },
+      { taskIds: ["epic-1", "missing"] },
+    );
     expect(contexts).toMatchObject({
       tasks: {
         "epic-1": { status: "found" },
@@ -94,10 +116,15 @@ describe("local GUI send without cloud login", () => {
       },
     });
 
-    const records = await call(started.rpcUrl, "epic.listChatRecords", {
-      major: 1,
-      minor: 0,
-    }, { epicId: "epic-1" });
+    const records = await call(
+      started.rpcUrl,
+      "epic.listChatRecords",
+      {
+        major: 1,
+        minor: 0,
+      },
+      { epicId: "epic-1" },
+    );
     expect(records).toMatchObject({
       chats: [
         expect.objectContaining({
@@ -108,25 +135,45 @@ describe("local GUI send without cloud login", () => {
         }),
       ],
     });
-    const tui = await call(started.rpcUrl, "epic.listTuiAgents", {
-      major: 1,
-      minor: 0,
-    }, { epicId: "epic-1" });
+    const tui = await call(
+      started.rpcUrl,
+      "epic.listTuiAgents",
+      {
+        major: 1,
+        minor: 0,
+      },
+      { epicId: "epic-1" },
+    );
     expect(tui).toEqual({ tuiAgents: [] });
-    const cloud = await call(started.rpcUrl, "epic.listCloudChats", {
-      major: 1,
-      minor: 0,
-    }, { taskId: "epic-1" });
+    const cloud = await call(
+      started.rpcUrl,
+      "epic.listCloudChats",
+      {
+        major: 1,
+        minor: 0,
+      },
+      { taskId: "epic-1" },
+    );
     expect(cloud).toEqual({ chats: [] });
-    const fork = await call(started.rpcUrl, "host.chatFork.get", {
-      major: 1,
-      minor: 0,
-    }, {});
+    const fork = await call(
+      started.rpcUrl,
+      "host.chatFork.get",
+      {
+        major: 1,
+        minor: 0,
+      },
+      {},
+    );
     expect(fork).toEqual({ event: null });
-    const bindings = await call(started.rpcUrl, "worktree.listBindingsForEpic", {
-      major: 1,
-      minor: 2,
-    }, { epicId: "epic-1" });
+    const bindings = await call(
+      started.rpcUrl,
+      "worktree.listBindingsForEpic",
+      {
+        major: 1,
+        minor: 2,
+      },
+      { epicId: "epic-1" },
+    );
     expect(bindings).toMatchObject({
       rows: [expect.objectContaining({ workspacePath: setup.workspace })],
     });
@@ -156,32 +203,37 @@ describe("local GUI send without cloud login", () => {
     const setup = await boot();
     tempDir = setup.tempDir;
     started = setup.started;
-    await call(started.rpcUrl, "epic.create", { major: 1, minor: 0 }, {
-      epic: {
-        id: "epic-2",
-        title: "Follow-up",
-        initialUserPrompt: "",
-        ticketCount: 0,
-        specCount: 0,
-        storyCount: 0,
-        reviewCount: 0,
-        status: "active",
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        createdBy: "local",
-        version: "2.0.0",
+    await call(
+      started.rpcUrl,
+      "epic.create",
+      { major: 1, minor: 0 },
+      {
+        epic: {
+          id: "epic-2",
+          title: "Follow-up",
+          initialUserPrompt: "",
+          ticketCount: 0,
+          specCount: 0,
+          storyCount: 0,
+          reviewCount: 0,
+          status: "active",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          createdBy: "local",
+          version: "2.0.0",
+        },
+        repoIdentifiers: [],
+        workspaces: [{ workspacePath: setup.workspace }],
+        chat: {
+          chatId: "chat-2",
+          parentId: null,
+          hostId: started.runtime.hostId,
+          title: "Root",
+          worktreeIntent: null,
+          initialMessage: null,
+        },
       },
-      repoIdentifiers: [],
-      workspaces: [{ workspacePath: setup.workspace }],
-      chat: {
-        chatId: "chat-2",
-        parentId: null,
-        hostId: started.runtime.hostId,
-        title: "Root",
-        worktreeIntent: null,
-        initialMessage: null,
-      },
-    });
+    );
     const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
     const frames = await sendOnChat(streamUrl, {
       epicId: "epic-2",
@@ -207,50 +259,55 @@ describe("local GUI send without cloud login", () => {
     const setup = await boot();
     tempDir = setup.tempDir;
     started = setup.started;
-    await call(started.rpcUrl, "epic.create", { major: 1, minor: 0 }, {
-      epic: {
-        id: "epic-3",
-        title: "Windowed index",
-        initialUserPrompt: "",
-        ticketCount: 0,
-        specCount: 0,
-        storyCount: 0,
-        reviewCount: 0,
-        status: "active",
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        createdBy: "local",
-        version: "2.0.0",
-      },
-      repoIdentifiers: [],
-      workspaces: [{ workspacePath: setup.workspace }],
-      chat: {
-        chatId: "chat-3",
-        parentId: null,
-        hostId: started.runtime.hostId,
-        title: "Root",
-        worktreeIntent: null,
-        initialMessage: {
-          messageId: "msg-user-3",
-          clientActionId: "action-3",
-          content: promptDoc("skeleton please"),
-          sender: {
-            type: "user",
-            userId: "b6c080e5-7ae0-405b-8195-7b09ff6c55b8",
+    await call(
+      started.rpcUrl,
+      "epic.create",
+      { major: 1, minor: 0 },
+      {
+        epic: {
+          id: "epic-3",
+          title: "Windowed index",
+          initialUserPrompt: "",
+          ticketCount: 0,
+          specCount: 0,
+          storyCount: 0,
+          reviewCount: 0,
+          status: "active",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          createdBy: "local",
+          version: "2.0.0",
+        },
+        repoIdentifiers: [],
+        workspaces: [{ workspacePath: setup.workspace }],
+        chat: {
+          chatId: "chat-3",
+          parentId: null,
+          hostId: started.runtime.hostId,
+          title: "Root",
+          worktreeIntent: null,
+          initialMessage: {
+            messageId: "msg-user-3",
+            clientActionId: "action-3",
+            content: promptDoc("skeleton please"),
+            sender: {
+              type: "user",
+              userId: "b6c080e5-7ae0-405b-8195-7b09ff6c55b8",
+            },
+            settings: {
+              harnessId: "claude",
+              model: "default",
+              permissionMode: "full_access",
+              reasoningEffort: null,
+              serviceTier: null,
+              agentMode: "regular",
+              profileId: null,
+            },
+            accountContext: { type: "PERSONAL" },
           },
-          settings: {
-            harnessId: "claude",
-            model: "default",
-            permissionMode: "full_access",
-            reasoningEffort: null,
-            serviceTier: null,
-            agentMode: "regular",
-            profileId: null,
-          },
-          accountContext: { type: "PERSONAL" },
         },
       },
-    });
+    );
     await waitForChatText(
       started.rpcUrl.replace(/\/rpc$/u, "/stream"),
       "epic-3",
@@ -269,7 +326,9 @@ describe("local GUI send without cloud login", () => {
         rowCount: number;
         indexRevision: number | null;
         tail: { rowIds: readonly string[] };
-        worktreeBinding: { entries: readonly { workspacePath: string }[] } | null;
+        worktreeBinding: {
+          entries: readonly { workspacePath: string }[];
+        } | null;
         chat: { title: string; isTitleEditedByUser: boolean };
       };
     };
@@ -299,32 +358,37 @@ describe("local GUI send without cloud login", () => {
     const setup = await boot();
     tempDir = setup.tempDir;
     started = setup.started;
-    await call(started.rpcUrl, "epic.create", { major: 1, minor: 0 }, {
-      epic: {
-        id: "epic-4",
-        title: "Edit",
-        initialUserPrompt: "",
-        ticketCount: 0,
-        specCount: 0,
-        storyCount: 0,
-        reviewCount: 0,
-        status: "active",
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        createdBy: "local",
-        version: "2.0.0",
+    await call(
+      started.rpcUrl,
+      "epic.create",
+      { major: 1, minor: 0 },
+      {
+        epic: {
+          id: "epic-4",
+          title: "Edit",
+          initialUserPrompt: "",
+          ticketCount: 0,
+          specCount: 0,
+          storyCount: 0,
+          reviewCount: 0,
+          status: "active",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          createdBy: "local",
+          version: "2.0.0",
+        },
+        repoIdentifiers: [],
+        workspaces: [{ workspacePath: setup.workspace }],
+        chat: {
+          chatId: "chat-4",
+          parentId: null,
+          hostId: started.runtime.hostId,
+          title: "Root",
+          worktreeIntent: null,
+          initialMessage: null,
+        },
       },
-      repoIdentifiers: [],
-      workspaces: [{ workspacePath: setup.workspace }],
-      chat: {
-        chatId: "chat-4",
-        parentId: null,
-        hostId: started.runtime.hostId,
-        title: "Root",
-        worktreeIntent: null,
-        initialMessage: null,
-      },
-    });
+    );
     const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
     await sendOnChat(streamUrl, {
       epicId: "epic-4",
@@ -333,7 +397,14 @@ describe("local GUI send without cloud login", () => {
       messageId: "msg-user-4a",
       text: "keep this",
     });
-    await waitForChatText(streamUrl, "epic-4", "chat-4", "assistant-ok", 40, 50);
+    await waitForChatText(
+      streamUrl,
+      "epic-4",
+      "chat-4",
+      "assistant-ok",
+      40,
+      50,
+    );
     await sendOnChat(streamUrl, {
       epicId: "epic-4",
       chatId: "chat-4",
@@ -342,7 +413,14 @@ describe("local GUI send without cloud login", () => {
       text: "drop this",
     });
     await waitForChatText(streamUrl, "epic-4", "chat-4", "drop this", 40, 50);
-    await waitForChatText(streamUrl, "epic-4", "chat-4", "assistant-ok", 40, 50);
+    await waitForChatText(
+      streamUrl,
+      "epic-4",
+      "chat-4",
+      "assistant-ok",
+      40,
+      50,
+    );
     const deleted = await sendChatAction(streamUrl, {
       kind: "deleteMessageSuffix",
       epicId: "epic-4",
@@ -398,35 +476,42 @@ describe("local GUI send without cloud login", () => {
   });
 
   it("queues a follow-up send while a print is running", async () => {
-    const setup = await bootWithCli("#!/bin/sh\nsleep 0.4\nprintf 'slow-ok\\n'\n");
+    const setup = await bootWithCli(
+      "#!/bin/sh\nsleep 0.4\nprintf 'slow-ok\\n'\n",
+    );
     tempDir = setup.tempDir;
     started = setup.started;
-    await call(started.rpcUrl, "epic.create", { major: 1, minor: 0 }, {
-      epic: {
-        id: "epic-5",
-        title: "Queue",
-        initialUserPrompt: "",
-        ticketCount: 0,
-        specCount: 0,
-        storyCount: 0,
-        reviewCount: 0,
-        status: "active",
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        createdBy: "local",
-        version: "2.0.0",
+    await call(
+      started.rpcUrl,
+      "epic.create",
+      { major: 1, minor: 0 },
+      {
+        epic: {
+          id: "epic-5",
+          title: "Queue",
+          initialUserPrompt: "",
+          ticketCount: 0,
+          specCount: 0,
+          storyCount: 0,
+          reviewCount: 0,
+          status: "active",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          createdBy: "local",
+          version: "2.0.0",
+        },
+        repoIdentifiers: [],
+        workspaces: [{ workspacePath: setup.workspace }],
+        chat: {
+          chatId: "chat-5",
+          parentId: null,
+          hostId: started.runtime.hostId,
+          title: "Root",
+          worktreeIntent: null,
+          initialMessage: null,
+        },
       },
-      repoIdentifiers: [],
-      workspaces: [{ workspacePath: setup.workspace }],
-      chat: {
-        chatId: "chat-5",
-        parentId: null,
-        hostId: started.runtime.hostId,
-        title: "Root",
-        worktreeIntent: null,
-        initialMessage: null,
-      },
-    });
+    );
     const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
     const frames = await sendTwoOnChat(streamUrl, {
       epicId: "epic-5",
@@ -445,6 +530,88 @@ describe("local GUI send without cloud login", () => {
     expect(blob).toContain("first-turn");
     expect(blob).toContain("queued-followup");
     expect(blob).toContain("slow-ok");
+  });
+  /**
+   * A failing tool call, in the record shapes a real `claude -p
+   * --output-format stream-json --include-partial-messages` run emits.
+   *
+   * Two things are locked here, and both were wrong before. The tool RESULT
+   * rides a `user` record this parser used to drop entirely, so a call that
+   * exited 1 was reported as one that completed - the usage fact is the
+   * durable trace of the fix. And the call itself arrives TWICE (the partial
+   * `content_block_start` with an empty input, then the complete `assistant`
+   * record), which the counter used to charge twice.
+   */
+  it("records a failed tool call once, as a failure", async () => {
+    const stdout = [
+      '{"type":"system","subtype":"init","session_id":"sess-err"}',
+      '{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","id":"toolu_e1","name":"Bash","input":{}}}}',
+      '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_e1","name":"Bash","input":{"command":"cat /nope"}}]}}',
+      '{"type":"user","message":{"content":[{"type":"tool_result","content":"Exit code 1","is_error":true,"tool_use_id":"toolu_e1"}]}}',
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"tool-failed-ok"}]}}',
+      '{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}',
+    ];
+    const setup = await bootWithCli(
+      [
+        "#!/bin/sh",
+        ...stdout.map((line) => `printf '%s\\n' '${line}'`),
+        "",
+      ].join("\n"),
+    );
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await call(
+      started.rpcUrl,
+      "epic.create",
+      { major: 1, minor: 0 },
+      {
+        epic: {
+          id: "epic-6",
+          title: "Tool error",
+          initialUserPrompt: "",
+          ticketCount: 0,
+          specCount: 0,
+          storyCount: 0,
+          reviewCount: 0,
+          status: "active",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          createdBy: "local",
+          version: "2.0.0",
+        },
+        repoIdentifiers: [],
+        workspaces: [{ workspacePath: setup.workspace }],
+        chat: {
+          chatId: "chat-6",
+          parentId: null,
+          hostId: started.runtime.hostId,
+          title: "Root",
+          worktreeIntent: null,
+          initialMessage: null,
+        },
+      },
+    );
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-6",
+      chatId: "chat-6",
+      clientActionId: "action-6",
+      messageId: "msg-user-6",
+      text: "break something",
+    });
+    await waitForChatText(
+      streamUrl,
+      "epic-6",
+      "chat-6",
+      "tool-failed-ok",
+      80,
+      50,
+    );
+
+    const facts = started.runtime.store.snapshot().usageFacts;
+    const fact = facts.find((row) => row.chatId === "chat-6");
+    expect(fact?.toolCallCount).toBe(1);
+    expect(fact?.toolCallErrorCount).toBe(1);
   });
 });
 
@@ -473,10 +640,15 @@ async function bootWithCli(script: string): Promise<Booted> {
     listenHost: "127.0.0.1",
     listenPort: 0,
   });
-  await call(started.rpcUrl, "providers.addCustomPath", { major: 2, minor: 1 }, {
-    providerId: "claude-code",
-    path: await realpath(claudePath),
-  });
+  await call(
+    started.rpcUrl,
+    "providers.addCustomPath",
+    { major: 2, minor: 1 },
+    {
+      providerId: "claude-code",
+      path: await realpath(claudePath),
+    },
+  );
   return { tempDir, started, workspace: await realpath(workspace) };
 }
 
@@ -947,7 +1119,9 @@ async function sendTwoOnChat(
         sent === 1
       ) {
         sent = 2;
-        socket.send(JSON.stringify(sendFrame(input, "msg-b", "queued-followup")));
+        socket.send(
+          JSON.stringify(sendFrame(input, "msg-b", "queued-followup")),
+        );
         return;
       }
       if (

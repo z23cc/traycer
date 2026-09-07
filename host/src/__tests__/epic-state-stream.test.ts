@@ -220,6 +220,7 @@ describe("epic.state.subscribe", () => {
         fileChangeCount: 0,
         lastUsage: null,
         archivedAt: null,
+        lastAuthFailureTurnId: null,
       });
     });
     expect(socket.frames).toHaveLength(1);

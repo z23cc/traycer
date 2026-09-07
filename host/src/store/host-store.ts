@@ -172,6 +172,18 @@ export type StoredChat = {
   archivedAt: number | null;
   /** `agent.configure`'s fast-mode flag; no run-settings field carries it. */
   fastMode: boolean;
+  /**
+   * The turn whose assistant reply ended on a rejected provider credential,
+   * or null when the latest one did not.
+   *
+   * Durable because the failure has to outlive the socket: a turn can fail
+   * with nobody subscribed, and the re-auth banner is mounted from the
+   * SNAPSHOT (`derived.latestAssistantAuthFailureTurnKey`) when the user comes
+   * back. Set when a turn fails that way and cleared when a later one
+   * succeeds, which is what makes it a claim about the LATEST turn rather than
+   * a log of every failure.
+   */
+  lastAuthFailureTurnId: string | null;
 };
 
 /**
@@ -703,6 +715,10 @@ function normalizeChats(value: unknown): StoredChat[] {
       lastUsage: normalizeUsage(record.lastUsage),
       archivedAt:
         typeof record.archivedAt === "number" ? record.archivedAt : null,
+      lastAuthFailureTurnId:
+        typeof record.lastAuthFailureTurnId === "string"
+          ? record.lastAuthFailureTurnId
+          : null,
     });
   }
   return rows;

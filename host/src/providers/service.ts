@@ -200,6 +200,47 @@ export function spawnEnvForProvider(
   return env;
 }
 
+/**
+ * The environment variable whose credential a run of `providerId` would use,
+ * or null when the run authenticates with the CLI's own signed-in store.
+ *
+ * Asked at FAILURE time rather than remembered from the spawn, which is sound
+ * only because it reads the same two inputs `spawnEnvForProvider` reads and
+ * neither can change inside one turn: this host's own process env, and the
+ * user's stored overrides.
+ *
+ * It decides which of two auth error codes a rejection carries, and the
+ * distinction is the whole point - the provider CLI prefers an env key over
+ * the account the user signed into, so when one is set, the sign-in a re-auth
+ * banner would offer to repair is not the credential being rejected.
+ */
+const CREDENTIAL_ENV: { readonly [id in ProviderId]?: readonly string[] } = {
+  "claude-code": [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+  ],
+  codex: ["OPENAI_API_KEY"],
+};
+
+export function envCredentialVarForProvider(
+  store: HostStore,
+  providerId: ProviderId,
+): string | null {
+  const names = CREDENTIAL_ENV[providerId];
+  if (names === undefined) {
+    return null;
+  }
+  const env = spawnEnvForProvider(store, providerId);
+  for (const name of names) {
+    const value = env[name];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return name;
+    }
+  }
+  return null;
+}
+
 function upsertEnvOverride(
   current: readonly ProviderEnvOverride[],
   key: string,

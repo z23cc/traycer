@@ -165,6 +165,7 @@ describe("host.usage.summary", () => {
       },
       outcome: "completed",
       toolCallCount: 3,
+      toolCallErrorCount: 1,
     });
     await recordUsageFact(started.runtime, {
       epicId: "epic-1",
@@ -174,6 +175,7 @@ describe("host.usage.summary", () => {
       usage: null,
       outcome: "abnormal_exit",
       toolCallCount: 0,
+      toolCallErrorCount: 0,
     });
     const result = await call(
       started.rpcUrl,
@@ -209,6 +211,7 @@ describe("host.usage.summary", () => {
       outcome: "completed",
       usageCompleteness: "measured",
       toolCallCount: 3,
+      toolCallErrorCount: 1,
     });
     const epicWide = await call(
       started.rpcUrl,

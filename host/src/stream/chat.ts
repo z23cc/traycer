@@ -325,7 +325,11 @@ export function chatWindowedTranscript(
           latestForkableAssistantMessageId: lastAssistantMessageId(messages),
           restorableSetupInterruption: null,
           interviewAnswerability: [],
-          latestAssistantAuthFailureTurnKey: null,
+          // The host's answer is authoritative on this line: the client reads
+          // it from the snapshot rather than scanning `messages`, because the
+          // window it holds is a subset and a failure a few user rows back
+          // falls outside it.
+          latestAssistantAuthFailureTurnKey: chat.lastAuthFailureTurnId,
           setupCardWindows: [],
         },
       },
@@ -546,6 +550,7 @@ function emptyChat(hostId: string, epicId: string, chatId: string): StoredChat {
     fileChangeCount: 0,
     lastUsage: null,
     archivedAt: null,
+    lastAuthFailureTurnId: null,
     fastMode: false,
   };
 }

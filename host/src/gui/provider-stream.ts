@@ -18,10 +18,25 @@ export type ProviderStreamEvent =
       readonly toolName: string;
       readonly input: unknown;
     }
+  /**
+   * The tool's RESULT came back. Carries no name: the name was on the call,
+   * and the caller already holds it against this id.
+   */
+  | { readonly kind: "tool_end"; readonly toolId: string }
   | {
-      readonly kind: "tool_end";
+      readonly kind: "tool_error";
       readonly toolId: string;
-      readonly toolName: string;
+      readonly error: string;
+    }
+  /**
+   * The provider rejected the run's credential. Claude Code announces this on
+   * stdout as a retry record with a status, and it retries ten times before
+   * giving up - which is a ten-minute wait on a condition that cannot clear.
+   */
+  | {
+      readonly kind: "auth_failure";
+      readonly status: number;
+      readonly detail: string;
     }
   | {
       readonly kind: "command_start";
@@ -87,7 +102,120 @@ function claudeEvents(record: object): ProviderStreamEvent[] {
   if (type === "assistant") {
     return claudeAssistantContent(Reflect.get(record, "message"));
   }
+  // The half this parser used to drop entirely. Tool RESULTS come back as a
+  // `user` record, and `is_error` on the block is the only place a failed tool
+  // call is reported - without it a Bash that exited 1 rendered as a tool call
+  // that completed.
+  if (type === "user") {
+    return claudeToolResults(Reflect.get(record, "message"));
+  }
+  if (type === "system") {
+    return claudeSystemEvent(record);
+  }
   return [];
+}
+
+/**
+ * `{"type":"system","subtype":"api_retry","error_status":401,"error":
+ * "authentication_failed"}` - the structured signal, rather than a match
+ * against prose. Only 401 counts: a 429 or a 500 on the same record IS
+ * transient and the retry is the right response to it.
+ */
+function claudeSystemEvent(record: object): ProviderStreamEvent[] {
+  if (readString(record, "subtype") !== "api_retry") {
+    return [];
+  }
+  const status = readNumber(record, "error_status");
+  if (status !== 401) {
+    return [];
+  }
+  return [
+    {
+      kind: "auth_failure",
+      status,
+      detail: readString(record, "error") ?? "authentication_failed",
+    },
+  ];
+}
+
+function claudeToolResults(message: unknown): ProviderStreamEvent[] {
+  if (
+    message === null ||
+    typeof message !== "object" ||
+    Array.isArray(message)
+  ) {
+    return [];
+  }
+  const content = Reflect.get(message, "content");
+  if (!Array.isArray(content)) {
+    return [];
+  }
+  const events: ProviderStreamEvent[] = [];
+  for (const entry of content) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+    if (readString(entry, "type") !== "tool_result") {
+      continue;
+    }
+    const toolId = readString(entry, "tool_use_id");
+    if (toolId === null) {
+      continue;
+    }
+    if (Reflect.get(entry, "is_error") !== true) {
+      events.push({ kind: "tool_end", toolId });
+      continue;
+    }
+    events.push({
+      kind: "tool_error",
+      toolId,
+      error: toolResultText(Reflect.get(entry, "content")),
+    });
+  }
+  return events;
+}
+
+/**
+ * A tool result is a string or a list of blocks, and either can be the whole
+ * output of a command.
+ *
+ * ponytail: truncated at a fixed ceiling rather than summarized - the field is
+ * an unbounded `z.string()` on a frame every subscriber receives, and a failed
+ * `cat` of a large file would otherwise put the file on the wire. Raise it if a
+ * real error is ever cut off mid-sentence.
+ */
+const MAX_TOOL_ERROR_CHARS = 4_000;
+
+function toolResultText(content: unknown): string {
+  if (typeof content === "string") {
+    return clampToolError(content);
+  }
+  if (!Array.isArray(content)) {
+    return "Tool call failed.";
+  }
+  const parts: string[] = [];
+  for (const entry of content) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+    const text = readString(entry, "text");
+    if (text !== null) {
+      parts.push(text);
+    }
+  }
+  return parts.length === 0
+    ? "Tool call failed."
+    : clampToolError(parts.join("\n"));
+}
+
+function clampToolError(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) {
+    return "Tool call failed.";
+  }
+  return trimmed.length <= MAX_TOOL_ERROR_CHARS
+    ? trimmed
+    : `${trimmed.slice(0, MAX_TOOL_ERROR_CHARS)}…`;
 }
 
 function claudeStreamEvent(event: object): ProviderStreamEvent[] {
@@ -100,7 +228,8 @@ function claudeStreamEvent(event: object): ProviderStreamEvent[] {
     if (readString(block, "type") !== "tool_use") {
       return [];
     }
-    const toolId = readString(block, "id") ?? readString(event, "index") ?? "tool";
+    const toolId =
+      readString(block, "id") ?? readString(event, "index") ?? "tool";
     const toolName = readString(block, "name") ?? "tool";
     return [
       {
@@ -142,7 +271,11 @@ function claudeStreamEvent(event: object): ProviderStreamEvent[] {
 }
 
 function claudeAssistantContent(message: unknown): ProviderStreamEvent[] {
-  if (message === null || typeof message !== "object" || Array.isArray(message)) {
+  if (
+    message === null ||
+    typeof message !== "object" ||
+    Array.isArray(message)
+  ) {
     return [];
   }
   const content = Reflect.get(message, "content");
@@ -173,13 +306,14 @@ function claudeAssistantContent(message: unknown): ProviderStreamEvent[] {
     if (entryType === "tool_use") {
       const toolId = readString(entry, "id") ?? "tool";
       const toolName = readString(entry, "name") ?? "tool";
+      // Opened only. It closes when its `tool_result` arrives, which is the
+      // only record that knows whether the call actually worked.
       events.push({
         kind: "tool_start",
         toolId,
         toolName,
         input: Reflect.get(entry, "input") ?? null,
       });
-      events.push({ kind: "tool_end", toolId, toolName });
     }
   }
   return events;
@@ -194,7 +328,11 @@ function codexEvents(record: object): ProviderStreamEvent[] {
     }
     return [];
   }
-  if (type !== "item.completed" && type !== "item.updated" && type !== "item.started") {
+  if (
+    type !== "item.completed" &&
+    type !== "item.updated" &&
+    type !== "item.started"
+  ) {
     return [];
   }
   const item = Reflect.get(record, "item");
@@ -228,7 +366,8 @@ function codexEvents(record: object): ProviderStreamEvent[] {
         },
       ];
     }
-    const exitCode = readNumber(item, "exit_code") ?? readNumber(item, "exitCode");
+    const exitCode =
+      readNumber(item, "exit_code") ?? readNumber(item, "exitCode");
     return [
       {
         kind: "command_end",
@@ -269,9 +408,7 @@ function parseUsage(value: unknown, record: object): ProviderTokenUsage | null {
     return null;
   }
   const inputTokens =
-    readNumber(value, "input_tokens") ??
-    readNumber(value, "inputTokens") ??
-    0;
+    readNumber(value, "input_tokens") ?? readNumber(value, "inputTokens") ?? 0;
   const outputTokens =
     readNumber(value, "output_tokens") ??
     readNumber(value, "outputTokens") ??
@@ -309,7 +446,11 @@ function fileChangeEvents(item: object): ProviderStreamEvent[] {
   if (Array.isArray(changes) && changes.length > 0) {
     const rows: ProviderStreamEvent[] = [];
     for (const change of changes) {
-      if (change === null || typeof change !== "object" || Array.isArray(change)) {
+      if (
+        change === null ||
+        typeof change !== "object" ||
+        Array.isArray(change)
+      ) {
         continue;
       }
       const path =

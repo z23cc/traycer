@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
+import {
+  AUTH_ERROR_CODE,
+  ENV_CREDENTIAL_AUTH_ERROR_CODE,
+} from "@traycer/protocol/host/agent/gui/agent-runtime";
 import { assistantRowId } from "@traycer/protocol/persistence/chat-transcript/row-projection";
+import { providerIdForHarness } from "../gui/harness-map";
+import { envCredentialVarForProvider } from "../providers/service";
 import { runGuiPrintTurn } from "../gui/deliver";
 import type { QueuedPrompt } from "../gui/queue";
 import { LOCAL_USER_ID } from "../local-user";
@@ -402,6 +408,9 @@ async function runAndPersistAssistant(
   let announcedSession = false;
   let lastUsage: ProviderTokenUsage | null = null;
   let toolCallCount = 0;
+  let toolCallErrorCount = 0;
+  let authFailure: { readonly status: number; readonly detail: string } | null =
+    null;
   const openTools = new Map<string, string>();
   const print = runtime.guiRuns.printState(input.chatId);
   const handleEvent = (event: ProviderStreamEvent): void => {
@@ -465,7 +474,13 @@ async function runAndPersistAssistant(
       return;
     }
     if (event.kind === "tool_start") {
-      toolCallCount += 1;
+      // The same call arrives twice under `--include-partial-messages`: once
+      // from `content_block_start` with an EMPTY input, then again on the
+      // complete `assistant` record with the real one. Both are broadcast, so
+      // the block ends up with the arguments; only the first one counts.
+      if (!openTools.has(event.toolId)) {
+        toolCallCount += 1;
+      }
       openTools.set(event.toolId, event.toolName);
       broadcastBlockDelta(runtime, input.epicId, input.chatId, {
         type: "tool_call.started",
@@ -486,16 +501,39 @@ async function runAndPersistAssistant(
       return;
     }
     if (event.kind === "tool_end") {
+      const toolName = openTools.get(event.toolId) ?? "tool";
       openTools.delete(event.toolId);
       broadcastBlockDelta(runtime, input.epicId, input.chatId, {
         type: "tool_call.completed",
         blockId: event.toolId,
         timestamp: now,
-        toolName: event.toolName,
+        toolName,
         // Empty for the reason given at `tool_call.started` above.
         agentMessageSend: null,
         imageResults: [],
       });
+      return;
+    }
+    if (event.kind === "tool_error") {
+      const toolName = openTools.get(event.toolId) ?? "tool";
+      openTools.delete(event.toolId);
+      toolCallErrorCount += 1;
+      broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+        type: "tool_call.errored",
+        blockId: event.toolId,
+        timestamp: now,
+        toolName,
+        error: event.error,
+        // The provider reported a failure, not a stop. A stop reaches this
+        // host as `guiRuns.wasStopped`, which never produces a tool result at
+        // all.
+        terminationReason: "error",
+        agentMessageSend: null,
+      });
+      return;
+    }
+    if (event.kind === "auth_failure") {
+      authFailure = event;
       return;
     }
     if (event.kind === "command_start") {
@@ -609,6 +647,10 @@ async function runAndPersistAssistant(
       messageId: input.assistantMessageId,
       turnId: input.turnId,
     });
+    // The marker describes the LATEST assistant turn, so a turn that got a
+    // reply clears it - otherwise the banner outlives the re-auth that fixed
+    // it.
+    await markAuthFailure(runtime, input.chatId, null);
     await recordUsageFact(runtime, {
       epicId: input.epicId,
       chatId: input.chatId,
@@ -617,6 +659,7 @@ async function runAndPersistAssistant(
       usage: lastUsage,
       outcome: "completed",
       toolCallCount,
+      toolCallErrorCount,
     });
     await notify(runtime, {
       id: `agent.stopped:${input.turnId}`,
@@ -637,6 +680,7 @@ async function runAndPersistAssistant(
       usage: lastUsage,
       outcome: "abnormal_exit",
       toolCallCount,
+      toolCallErrorCount,
     });
     await persistProviderSession(runtime, {
       chatId: input.chatId,
@@ -644,6 +688,20 @@ async function runAndPersistAssistant(
       sessionId: null,
     });
     const message = error instanceof Error ? error.message : String(error);
+    const authCode =
+      authFailure === null
+        ? null
+        : envCredentialVarForProvider(
+              runtime.store,
+              providerIdForHarness(input.harnessId),
+            ) === null
+          ? AUTH_ERROR_CODE
+          : ENV_CREDENTIAL_AUTH_ERROR_CODE;
+    await markAuthFailure(
+      runtime,
+      input.chatId,
+      authCode === null ? null : input.turnId,
+    );
     await notify(runtime, {
       id: `agent.stopped:${input.turnId}`,
       kind: "agent.stopped",
@@ -659,10 +717,42 @@ async function runAndPersistAssistant(
       blockId: input.turnId,
       timestamp: Date.now(),
       message,
-      recoverable: false,
+      // A rejected credential is the one failure here the user can repair, and
+      // `code` is what mounts the banner offering it. Everything else stays
+      // unrecoverable: there is no retry this host could offer for a harness
+      // that exited non-zero.
+      recoverable: authCode !== null,
+      ...(authCode === null ? {} : { code: authCode }),
     });
     throw error;
   }
+}
+
+/**
+ * Records (or clears) the chat's rejected-credential marker.
+ *
+ * Written to the store rather than only broadcast because the banner is
+ * mounted from the SNAPSHOT: a turn can fail with no subscriber attached - a
+ * headless A2A send, a tab that was closed - and the frame the user gets when
+ * they come back is the only place that failure can still be reported.
+ */
+async function markAuthFailure(
+  runtime: HostRuntime,
+  chatId: string,
+  turnId: string | null,
+): Promise<void> {
+  const chat = runtime.store
+    .snapshot()
+    .chats.find((row) => row.chatId === chatId);
+  if (chat === undefined || chat.lastAuthFailureTurnId === turnId) {
+    return;
+  }
+  await runtime.store.mutate((state) => {
+    const row = state.chats.find((entry) => entry.chatId === chatId);
+    if (row !== undefined) {
+      row.lastAuthFailureTurnId = turnId;
+    }
+  });
 }
 
 export function persistAssistantPrompt(

@@ -9,6 +9,7 @@ import {
   handleReadChatAttachment,
 } from "../rpc/handlers/chat-read-handlers";
 import { chatAttachmentsDir } from "../epic/chat-attachments";
+import { chatTranscriptDerivedSchema } from "@traycer/protocol/host/agent/gui/subscribe-windowed";
 import { chatWindowedTranscript } from "../stream/chat";
 import type { StoredChat, StoredTurn } from "../store/host-store";
 import { startHost, type StartedHost } from "../start-host";
@@ -165,6 +166,50 @@ describe("chat reads", () => {
     return started;
   }
 
+  /**
+   * The re-auth banner is mounted from the SNAPSHOT on this line - the client
+   * reads the host's scalar rather than scanning its window - so a failure
+   * that happened with nobody subscribed has to survive in the store to be
+   * reported at all.
+   */
+  it("reports a rejected credential on the snapshot, not only live", async () => {
+    await boot();
+    const host = started;
+    if (host === null) {
+      throw new Error("host not started");
+    }
+    await seedChat(host, 0);
+
+    expect(derivedAuthKey(host)).toBeNull();
+
+    await host.runtime.store.mutate((state) => {
+      const chat = state.chats.find((row) => row.chatId === "chat-1");
+      if (chat !== undefined) {
+        chat.lastAuthFailureTurnId = "turn-9";
+      }
+    });
+
+    expect(derivedAuthKey(host)).toBe("turn-9");
+  });
+
+  /**
+   * Read through the contract's own schema rather than by walking the frame:
+   * the transcript types its snapshot as `unknown`, and parsing is both the
+   * narrowing and a check that the block is still shaped the way the client
+   * reads it.
+   */
+  function derivedAuthKey(host: StartedHost): string | null {
+    const frame = chatWindowedTranscript(
+      host.runtime,
+      "epic-1",
+      "chat-1",
+    ).snapshot;
+    const inner = Reflect.get(Object(frame), "snapshot");
+    const derived = Reflect.get(Object(inner), "derived");
+    return chatTranscriptDerivedSchema.parse(derived)
+      .latestAssistantAuthFailureTurnKey;
+  }
+
   async function boot(): Promise<void> {
     tempDir = await mkdtemp(join(tmpdir(), "traycer-host-"));
     started = await startHost({
@@ -192,6 +237,7 @@ async function seedChat(host: StartedHost, epoch: number): Promise<void> {
     fileChangeCount: 0,
     lastUsage: null,
     archivedAt: null,
+    lastAuthFailureTurnId: null,
     fastMode: false,
   };
   await host.runtime.store.mutate((state) => {

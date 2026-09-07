@@ -204,6 +204,7 @@ async function seedBinding(host: StartedHost): Promise<void> {
     fileChangeCount: 0,
     lastUsage: null,
     archivedAt: null,
+    lastAuthFailureTurnId: null,
   };
   const binding: StoredBinding = {
     epicId: "epic-1",
