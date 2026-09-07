@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import {
   AUTH_ERROR_CODE,
   ENV_CREDENTIAL_AUTH_ERROR_CODE,
 } from "@traycer/protocol/host/agent/gui/agent-runtime";
 import { assistantRowId } from "@traycer/protocol/persistence/chat-transcript/row-projection";
+import type { CheckpointFileOperation } from "@traycer/protocol/persistence/epic/checkpoint-manifests";
 import { providerIdForHarness } from "../gui/harness-map";
 import { envCredentialVarForProvider } from "../providers/service";
 import { runGuiPrintTurn } from "../gui/deliver";
@@ -21,6 +23,7 @@ import { recordUsageFact } from "../gui/usage";
 import {
   assistantReasoningBlockId,
   assistantTextBlockId,
+  broadcastAccumulatedChanges,
   broadcastBlockDelta,
   broadcastChatSnapshot,
   broadcastEventAppended,
@@ -582,19 +585,29 @@ async function runAndPersistAssistant(
       return;
     }
     if (event.kind === "file_change") {
+      // Prefixed with the CALL's id when there is one, because that is what
+      // makes the GUI replace the suppressed edit tool call with this card
+      // rather than hiding the edit entirely. Codex reports changes with no
+      // call attached, so those keep the turn-scoped id they always had.
+      const blockId = `${event.toolId ?? input.turnId}:${event.path}`;
+      const operation = fileChangeOperation(event.operation, event.path);
       broadcastBlockDelta(runtime, input.epicId, input.chatId, {
         type: "file_change.started",
-        blockId: `${input.turnId}:${event.path}`,
+        blockId,
         timestamp: now,
         filePath: event.path,
-        operation: event.operation,
+        operation,
       });
       broadcastBlockDelta(runtime, input.epicId, input.chatId, {
         type: "file_change.completed",
-        blockId: `${input.turnId}:${event.path}`,
+        blockId,
         timestamp: now,
         filePath: event.path,
-        operation: event.operation,
+        operation,
+        // No before/after was captured, so there is nothing to diff and
+        // nothing to count. `not_intercepted` is the contract's word for
+        // exactly this host: the agent's CLI wrote the file directly and
+        // nothing here stood between the two.
         diffSource: "none",
         beforeHash: null,
         afterHash: null,
@@ -609,9 +622,10 @@ async function runAndPersistAssistant(
         if (row === undefined) {
           return;
         }
-        row.fileChangeCount += 1;
+        recordFileChange(row, event.path, operation);
         bumpChatIndex(row);
       });
+      broadcastAccumulatedChanges(runtime, input.epicId, input.chatId);
       return;
     }
     if (event.kind === "usage") {
@@ -752,6 +766,60 @@ async function runAndPersistAssistant(
     });
     throw error;
   }
+}
+
+/**
+ * One row per FILE, not per edit, because that is the unit the accumulated
+ * panel lists - and because the snapshot's count is this array's length, which
+ * the client checks against the summaries it received.
+ *
+ * A later edit does not overwrite an earlier `create`: the file did not exist
+ * when this chat started and still would not if the chat were undone, which is
+ * what the row describes. A `delete` does overwrite, for the same reason from
+ * the other end.
+ */
+function recordFileChange(
+  chat: StoredChat,
+  filePath: string,
+  operation: CheckpointFileOperation,
+): void {
+  const existing = chat.accumulatedChanges.findIndex(
+    (row) => row.filePath === filePath,
+  );
+  if (existing < 0) {
+    chat.accumulatedChanges.push({ filePath, operation });
+    return;
+  }
+  if (operation === "delete") {
+    chat.accumulatedChanges[existing] = { filePath, operation };
+  }
+}
+
+/**
+ * The provider's own word where it has one, and the file system where it does
+ * not: a Claude edit tool names a path and a payload, never whether the file
+ * was already there.
+ *
+ * Read at the moment the call OPENS, which is before the write lands - so an
+ * existing path means an edit and a missing one means a create. A path that
+ * appears between this read and the write is reported as a create, which is
+ * what it was when the agent decided to write it.
+ */
+function fileChangeOperation(
+  reported: string | null,
+  filePath: string,
+): CheckpointFileOperation {
+  if (reported === null) {
+    return existsSync(filePath) ? "edit" : "create";
+  }
+  const word = reported.toLowerCase();
+  if (word.includes("del") || word.includes("remove")) {
+    return "delete";
+  }
+  if (word.includes("add") || word.includes("create") || word.includes("new")) {
+    return "create";
+  }
+  return "edit";
 }
 
 /**

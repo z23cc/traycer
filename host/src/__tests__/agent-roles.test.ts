@@ -241,7 +241,7 @@ function chat(host: StartedHost, chatId: string): StoredChat {
     events: [],
     transcriptEpoch: 0,
     indexRevision: 0,
-    fileChangeCount: 0,
+    accumulatedChanges: [],
     lastUsage: null,
     archivedAt: null,
     lastAuthFailureTurnId: null,

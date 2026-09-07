@@ -228,7 +228,7 @@ async function seed(host: StartedHost): Promise<void> {
     events: [],
     transcriptEpoch: 4,
     indexRevision: 2,
-    fileChangeCount: 0,
+    accumulatedChanges: [],
     lastUsage: null,
     archivedAt: null,
     lastAuthFailureTurnId: null,

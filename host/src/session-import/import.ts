@@ -431,7 +431,7 @@ function chatOf(
     // a zero as "nothing indexed yet". This one is created holding a
     // transcript.
     indexRevision: 1,
-    fileChangeCount: 0,
+    accumulatedChanges: [],
     lastUsage: null,
     archivedAt: null,
     lastAuthFailureTurnId: null,

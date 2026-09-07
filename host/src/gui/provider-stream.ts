@@ -55,7 +55,19 @@ export type ProviderStreamEvent =
   | {
       readonly kind: "file_change";
       readonly path: string;
-      readonly operation: string;
+      /**
+       * The provider's own word for what happened, or null when only the file
+       * system can say - a Claude edit names no operation, so the reader
+       * decides from whether the path existed when the call opened.
+       */
+      readonly operation: string | null;
+      /**
+       * The tool call this change came out of, or null when the provider
+       * reports changes on their own (Codex). Load-bearing for the block id:
+       * the GUI replaces an edit TOOL CALL with the file card when the card's
+       * id starts with the call's, and shows both when it does not.
+       */
+      readonly toolId: string | null;
     }
   /**
    * The harness's own todo list, from a `TodoWrite` call's input. Carries the
@@ -149,6 +161,43 @@ function claudeSystemEvent(record: object): ProviderStreamEvent[] {
       detail: readString(record, "error") ?? "authentication_failed",
     },
   ];
+}
+
+/**
+ * Claude's file-editing tools, and the input key each names its target with.
+ *
+ * The GUI SUPPRESSES these tool calls in favour of the `file_change` card
+ * (`suppressEditToolCalls`) and drops their bulk inputs from the persisted
+ * detail (`tool-input-detail.ts`), so a host that never emits the card leaves
+ * an edit as a bare tool row with its arguments stripped. Emitted here from
+ * the same records that open the call.
+ */
+const CLAUDE_EDIT_TOOL_PATH_KEYS: ReadonlyMap<string, string> = new Map([
+  ["edit", "file_path"],
+  ["write", "file_path"],
+  ["multiedit", "file_path"],
+  ["notebookedit", "notebook_path"],
+]);
+
+function claudeFileChangeEvents(
+  toolId: string,
+  toolName: string,
+  input: unknown,
+): ProviderStreamEvent[] {
+  const key = CLAUDE_EDIT_TOOL_PATH_KEYS.get(toolName.toLowerCase());
+  if (key === undefined) {
+    return [];
+  }
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    return [];
+  }
+  const path = readString(input, key);
+  if (path === null) {
+    return [];
+  }
+  // `operation: null` on purpose: the input says what to write, never whether
+  // the file was already there.
+  return [{ kind: "file_change", path, operation: null, toolId }];
 }
 
 /**
@@ -370,6 +419,7 @@ function claudeAssistantContent(message: unknown): ProviderStreamEvent[] {
       const input = Reflect.get(entry, "input") ?? null;
       events.push({ kind: "tool_start", toolId, toolName, input });
       events.push(...todoEvents(toolId, toolName, input));
+      events.push(...claudeFileChangeEvents(toolId, toolName, input));
     }
   }
   return events;
@@ -520,9 +570,8 @@ function fileChangeEvents(item: object): ProviderStreamEvent[] {
         kind: "file_change",
         path,
         operation:
-          readString(change, "kind") ??
-          readString(change, "operation") ??
-          "update",
+          readString(change, "kind") ?? readString(change, "operation"),
+        toolId: null,
       });
     }
     return rows;
@@ -535,7 +584,8 @@ function fileChangeEvents(item: object): ProviderStreamEvent[] {
     {
       kind: "file_change",
       path,
-      operation: readString(item, "operation") ?? "update",
+      operation: readString(item, "operation"),
+      toolId: null,
     },
   ];
 }

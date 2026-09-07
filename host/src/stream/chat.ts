@@ -67,6 +67,70 @@ export function sendChatSnapshot(
   const transcript = chatWindowedTranscript(runtime, epicId, chatId);
   sendJson(socket, transcript.snapshot);
   sendJson(socket, transcript.skeletonChunk);
+  sendJson(socket, accumulatedChangesFrame(runtime, epicId, chatId));
+}
+
+/**
+ * The accumulated-change summaries, which the snapshot promises but does not
+ * carry: their count is a property of the chat's HISTORY - one entry per file
+ * ever touched - so they ride their own frame.
+ *
+ * Sent on every snapshot and after every change, always as ONE final chunk
+ * from index 0. The chunking protocol exists for a refactor that touched
+ * thousands of files; this host has no such volume to split, and a single
+ * final chunk is a valid stream of one.
+ *
+ * `hasContents: false` / `counts: null` is the honest half: no before/after
+ * was captured, so the panel must render a bare row rather than offering a
+ * diff that would come back empty, and `{0, 0}` would claim the file came
+ * back unchanged.
+ */
+function accumulatedChangesFrame(
+  runtime: HostRuntime,
+  epicId: string,
+  chatId: string,
+): unknown {
+  const chat = runtime.store
+    .snapshot()
+    .chats.find((row) => row.chatId === chatId && row.epicId === epicId);
+  const changes = chat === undefined ? [] : chat.accumulatedChanges;
+  return {
+    kind: "accumulatedChanges",
+    hasBinaryPayload: false,
+    epicId,
+    chatId,
+    chunk: {
+      epoch: chat === undefined ? 0 : chat.transcriptEpoch,
+      // Monotonic per chat and bumped by every change, so a re-stream after
+      // one is a new generation and the client rebuilds instead of extending.
+      generation: chat === undefined ? 0 : chat.indexRevision,
+      fromIndex: 0,
+      summaries: changes.map((row) => ({
+        filePath: row.filePath,
+        operation: row.operation,
+        diffSource: "none" as const,
+        reason: "not_intercepted" as const,
+        // Nothing here can restore a file: no snapshot was taken to restore
+        // it from.
+        undoable: false,
+        hasContents: false,
+        digest: `${String(chat === undefined ? 0 : chat.indexRevision)}:${row.filePath}`,
+        counts: null,
+      })),
+      isFinal: true,
+    },
+  };
+}
+
+export function broadcastAccumulatedChanges(
+  runtime: HostRuntime,
+  epicId: string,
+  chatId: string,
+): void {
+  const frame = accumulatedChangesFrame(runtime, epicId, chatId);
+  for (const socket of runtime.chats.sockets(epicId, chatId)) {
+    sendJson(socket, frame);
+  }
 }
 
 export function broadcastChatSnapshot(
@@ -75,9 +139,11 @@ export function broadcastChatSnapshot(
   chatId: string,
 ): void {
   const transcript = chatWindowedTranscript(runtime, epicId, chatId);
+  const changes = accumulatedChangesFrame(runtime, epicId, chatId);
   for (const socket of runtime.chats.sockets(epicId, chatId)) {
     sendJson(socket, transcript.snapshot);
     sendJson(socket, transcript.skeletonChunk);
+    sendJson(socket, changes);
   }
   // The chat-records table is the same fact at list granularity, so it moves
   // from the one place that already knows this chat changed rather than from
@@ -305,7 +371,10 @@ export function chatWindowedTranscript(
         worktreeBinding,
         missingWorktreePaths,
         pendingFileEditApprovals: [],
-        accumulatedFileChangeCount: chat.fileChangeCount,
+        // The array's length, never a running tally of edits: the client
+        // compares this against the summaries it received and treats a
+        // mismatch as a lost delivery worth re-requesting.
+        accumulatedFileChangeCount: chat.accumulatedChanges.length,
         managedCommands: [],
         heldUpdates: [],
         turnInProgress: print !== null,
@@ -553,7 +622,7 @@ function emptyChat(hostId: string, epicId: string, chatId: string): StoredChat {
     events: [],
     transcriptEpoch: 0,
     indexRevision: 0,
-    fileChangeCount: 0,
+    accumulatedChanges: [],
     lastUsage: null,
     archivedAt: null,
     lastAuthFailureTurnId: null,

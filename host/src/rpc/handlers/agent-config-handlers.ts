@@ -254,7 +254,7 @@ export const handleAgentFork: RpcHandler = async (params, runtime) => {
       // source's epoch numbers rows this copy no longer has.
       transcriptEpoch: 0,
       indexRevision: 0,
-      fileChangeCount: 0,
+      accumulatedChanges: [],
       runSettings: {
         ...before,
         permissionMode: request.permissionMode,

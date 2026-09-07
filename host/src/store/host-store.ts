@@ -5,6 +5,10 @@ import {
   todoItemSchema,
   type TodoItem,
 } from "@traycer/protocol/persistence/epic/content-blocks";
+import {
+  checkpointFileOperationSchema,
+  type CheckpointFileOperation,
+} from "@traycer/protocol/persistence/epic/checkpoint-manifests";
 import type { JsonContent } from "@traycer/protocol/common/registry";
 import type { TaskRepoIdentifier } from "@traycer/protocol/host/epic/unary-schemas";
 import type {
@@ -159,6 +163,12 @@ export type StoredUsageFact = {
   readonly toolCallErrorCount: number;
 };
 
+/** A file this chat's agent touched, with its net operation. */
+export type StoredFileChange = {
+  readonly filePath: string;
+  readonly operation: CheckpointFileOperation;
+};
+
 export type StoredChat = {
   readonly epicId: string;
   readonly chatId: string;
@@ -172,7 +182,14 @@ export type StoredChat = {
   events: StoredChatEvent[];
   transcriptEpoch: number;
   indexRevision: number;
-  fileChangeCount: number;
+  /**
+   * One entry per FILE the agent has touched in this chat, which is the unit
+   * the accumulated-change panel counts and lists - not one per edit. A file
+   * edited three times is one row, and `accumulatedFileChangeCount` on the
+   * snapshot is this array's length: the client treats a count that disagrees
+   * with the summaries it received as a lost delivery and re-requests.
+   */
+  accumulatedChanges: StoredFileChange[];
   lastUsage: StoredTokenUsage | null;
   archivedAt: number | null;
   /** `agent.configure`'s fast-mode flag; no run-settings field carries it. */
@@ -730,8 +747,7 @@ function normalizeChats(value: unknown): StoredChat[] {
         typeof record.transcriptEpoch === "number" ? record.transcriptEpoch : 0,
       indexRevision:
         typeof record.indexRevision === "number" ? record.indexRevision : 0,
-      fileChangeCount:
-        typeof record.fileChangeCount === "number" ? record.fileChangeCount : 0,
+      accumulatedChanges: normalizeFileChanges(record.accumulatedChanges),
       lastUsage: normalizeUsage(record.lastUsage),
       archivedAt:
         typeof record.archivedAt === "number" ? record.archivedAt : null,
@@ -741,6 +757,25 @@ function normalizeChats(value: unknown): StoredChat[] {
           : null,
       pinnedTodo: normalizePinnedTodo(record.pinnedTodo),
     });
+  }
+  return rows;
+}
+
+const storedFileChangeSchema = z.object({
+  filePath: z.string().min(1),
+  operation: checkpointFileOperationSchema,
+});
+
+function normalizeFileChanges(value: unknown): StoredFileChange[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const rows: StoredFileChange[] = [];
+  for (const entry of value) {
+    const parsed = storedFileChangeSchema.safeParse(entry);
+    if (parsed.success) {
+      rows.push(parsed.data);
+    }
   }
   return rows;
 }

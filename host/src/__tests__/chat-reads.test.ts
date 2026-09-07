@@ -234,7 +234,7 @@ async function seedChat(host: StartedHost, epoch: number): Promise<void> {
     events: [],
     transcriptEpoch: epoch,
     indexRevision: 0,
-    fileChangeCount: 0,
+    accumulatedChanges: [],
     lastUsage: null,
     archivedAt: null,
     lastAuthFailureTurnId: null,

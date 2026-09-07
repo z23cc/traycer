@@ -222,6 +222,51 @@ describe("parseProviderStdoutLine", () => {
     ]);
   });
 
+  /**
+   * The GUI hides an edit tool call in favour of the file card and strips the
+   * call's bulk input from the persisted detail, so a host that emits no card
+   * leaves the edit as a bare row. The card carries the CALL's id, which is
+   * what pairs the two.
+   */
+  it("turns an edit tool call into a file change that owns it", () => {
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_e9","name":"Edit","input":{"file_path":"/tmp/x.ts","old_string":"a","new_string":"b"}}]}}',
+      ),
+    ).toEqual([
+      {
+        kind: "tool_start",
+        toolId: "toolu_e9",
+        toolName: "Edit",
+        input: {
+          file_path: "/tmp/x.ts",
+          old_string: "a",
+          new_string: "b",
+        },
+      },
+      {
+        kind: "file_change",
+        path: "/tmp/x.ts",
+        // The input says what to write, never whether the file was there.
+        operation: null,
+        toolId: "toolu_e9",
+      },
+    ]);
+    // Codex reports its changes on their own, with no call to pair with.
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"item.completed","item":{"id":"item_9","type":"file_change","path":"/tmp/y.ts","operation":"add"}}',
+      ),
+    ).toEqual([
+      {
+        kind: "file_change",
+        path: "/tmp/y.ts",
+        operation: "add",
+        toolId: null,
+      },
+    ]);
+  });
+
   it("ignores unstructured CLI text so the plain-stdout path can take over", () => {
     expect(parseProviderStdoutLine("assistant-ok")).toEqual([]);
   });

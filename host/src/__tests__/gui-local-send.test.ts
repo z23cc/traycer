@@ -628,6 +628,100 @@ describe("local GUI send without cloud login", () => {
     expect(JSON.stringify(snapshot)).toContain("second pass");
   });
 
+  /**
+   * The count and the summaries are one fact told twice, and the client
+   * watchdogs the pair: a snapshot promising N changes with fewer summaries
+   * delivered reads as a lost stream, not as a small chat. This host used to
+   * publish a running tally of EDITS with no summaries at all.
+   */
+  it("streams a summary for every file it counts", async () => {
+    // Absolute, as every Claude edit input is, and deliberately a path that
+    // does not exist: the fake CLI writes nothing, so both calls describe a
+    // file that was never there - one accumulated row, created.
+    const target = join(tmpdir(), `traycer-edit-${String(Date.now())}.ts`);
+    const stdout = [
+      '{"type":"system","subtype":"init","session_id":"sess-edit"}',
+      `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_w1","name":"Write","input":{"file_path":"${target}","content":"one"}}]}}`,
+      '{"type":"user","message":{"content":[{"type":"tool_result","content":"ok","tool_use_id":"toolu_w1"}]}}',
+      `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_w2","name":"Edit","input":{"file_path":"${target}","old_string":"one","new_string":"two"}}]}}`,
+      '{"type":"user","message":{"content":[{"type":"tool_result","content":"ok","tool_use_id":"toolu_w2"}]}}',
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"edit-ok"}]}}',
+      '{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}',
+    ];
+    const setup = await bootWithCli(
+      [
+        "#!/bin/sh",
+        ...stdout.map((line) => `printf '%s\n' '${line}'`),
+        "",
+      ].join("\n"),
+    );
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await call(
+      started.rpcUrl,
+      "epic.create",
+      { major: 1, minor: 0 },
+      {
+        epic: {
+          id: "epic-8",
+          title: "Edits",
+          initialUserPrompt: "",
+          ticketCount: 0,
+          specCount: 0,
+          storyCount: 0,
+          reviewCount: 0,
+          status: "active",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          createdBy: "local",
+          version: "2.0.0",
+        },
+        repoIdentifiers: [],
+        workspaces: [{ workspacePath: setup.workspace }],
+        chat: {
+          chatId: "chat-8",
+          parentId: null,
+          hostId: started.runtime.hostId,
+          title: "Root",
+          worktreeIntent: null,
+          initialMessage: null,
+        },
+      },
+    );
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-8",
+      chatId: "chat-8",
+      clientActionId: "action-8",
+      messageId: "msg-user-8",
+      text: "edit it",
+    });
+    await waitForChatText(streamUrl, "epic-8", "chat-8", "edit-ok", 80, 50);
+
+    // Two edits, ONE file: the panel lists files, and the count is the length
+    // of the list it will be measured against.
+    const chat = started.runtime.store
+      .snapshot()
+      .chats.find((row) => row.chatId === "chat-8");
+    expect(chat?.accumulatedChanges).toHaveLength(1);
+    // Created by the first call and still a creation after the second: the
+    // file did not exist when this chat started.
+    expect(chat?.accumulatedChanges[0]?.operation).toBe("create");
+
+    const frames = await collectChatFrames(streamUrl, "epic-8", "chat-8");
+    const summaries = frames.flatMap((frame) =>
+      readSummaries(frame, "epic-8", "chat-8"),
+    );
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]).toMatchObject({
+      operation: "create",
+      diffSource: "none",
+      reason: "not_intercepted",
+      hasContents: false,
+      counts: null,
+    });
+  });
+
   it("records a failed tool call once, as a failure", async () => {
     const stdout = [
       '{"type":"system","subtype":"init","session_id":"sess-err"}',
@@ -700,6 +794,84 @@ describe("local GUI send without cloud login", () => {
     expect(fact?.toolCallErrorCount).toBe(1);
   });
 });
+
+/**
+ * Every frame a fresh subscribe produces, collected for a moment rather than
+ * until an expected one: the accumulated-change chunk rides AFTER the snapshot
+ * and skeleton, so a helper that settles on those two never sees it.
+ */
+async function collectChatFrames(
+  url: string,
+  epicId: string,
+  chatId: string,
+): Promise<readonly unknown[]> {
+  const socket = new WebSocket(url);
+  await new Promise<void>((resolve, reject) => {
+    socket.once("open", () => resolve());
+    socket.once("error", reject);
+  });
+  const frames: unknown[] = [];
+  const done = new Promise<void>((resolve) => {
+    socket.on("message", (data, isBinary) => {
+      if (isBinary) {
+        return;
+      }
+      const parsed: unknown = JSON.parse(String(data));
+      frames.push(parsed);
+      if (frames.length === 1) {
+        socket.send(
+          JSON.stringify({
+            kind: "subscribe",
+            method: "chat.subscribe",
+            schemaVersion: { major: 1, minor: 8 },
+            params: { epicId, chatId },
+          }),
+        );
+        setTimeout(() => socket.close(), 400);
+      }
+    });
+    socket.once("close", () => resolve());
+    socket.once("error", () => resolve());
+  });
+  socket.send(
+    JSON.stringify({
+      kind: "open",
+      token: "local-dev-token",
+      manifest: {},
+      clientIdentity: {
+        kind: "cli",
+        compatibilityEpoch: CURRENT_CLIENT_COMPATIBILITY_EPOCH,
+        appVersion: "0.1.0",
+      },
+    }),
+  );
+  await done;
+  return frames;
+}
+
+/** The summaries an `accumulatedChanges` frame carries for this chat. */
+function readSummaries(
+  frame: unknown,
+  epicId: string,
+  chatId: string,
+): readonly unknown[] {
+  if (frame === null || typeof frame !== "object") {
+    return [];
+  }
+  if (
+    Reflect.get(frame, "kind") !== "accumulatedChanges" ||
+    Reflect.get(frame, "epicId") !== epicId ||
+    Reflect.get(frame, "chatId") !== chatId
+  ) {
+    return [];
+  }
+  const chunk = Reflect.get(frame, "chunk");
+  if (chunk === null || typeof chunk !== "object") {
+    return [];
+  }
+  const summaries = Reflect.get(chunk, "summaries");
+  return Array.isArray(summaries) ? summaries : [];
+}
 
 type Booted = {
   readonly tempDir: string;
