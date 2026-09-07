@@ -2,6 +2,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readFile,
   realpath,
   rm,
   writeFile,
@@ -1070,6 +1071,7 @@ describe("local GUI send without cloud login", () => {
       diffSource: "snapshot",
       reason: "snapshot",
       hasContents: true,
+      undoable: true,
       digest: changeDigest(before, after),
       counts: { additions: 1, deletions: 1 },
     });
@@ -1149,6 +1151,64 @@ describe("local GUI send without cloud login", () => {
         {},
       ),
     ).toEqual({ bytes: "one\nsame\n".length + "two\nsame\n".length });
+
+    // The panel's Undo. The file was never on disk here - the hooks were
+    // played by hand - so the revert is what puts the first before there.
+    const reverted = await sendActionUntil(
+      streamUrl,
+      {
+        kind: "revertFileChanges",
+        epicId: "epic-12",
+        chatId: "chat-12",
+        clientActionId: "revert-12",
+        fromMessageId: null,
+        filePaths: null,
+        revertArtifacts: true,
+      },
+      "restoreCompleted",
+    );
+    expect(
+      reverted.find((f) => Reflect.get(f ?? {}, "kind") === "actionAck"),
+    ).toMatchObject({ action: "revertFileChanges", status: "accepted" });
+    expect(
+      reverted.find((f) => Reflect.get(f ?? {}, "kind") === "restoreCompleted"),
+    ).toMatchObject({
+      results: [{ filePath: target, status: "restored", operation: "edit" }],
+    });
+    expect(await readFile(target, "utf8")).toBe("one\nsame\n");
+    await rm(target, { force: true });
+    // Back at its first before, the file has not changed since the chat
+    // started - and the panel lists files that have.
+    const afterRevert = await collectChatFrames(
+      streamUrl,
+      "epic-12",
+      "chat-12",
+    );
+    expect(
+      afterRevert.flatMap((frame) =>
+        readSummaries(frame, "epic-12", "chat-12"),
+      ),
+    ).toEqual([]);
+    expect(
+      await sendActionUntil(
+        streamUrl,
+        {
+          kind: "revertFileChanges",
+          epicId: "epic-12",
+          chatId: "chat-12",
+          clientActionId: "revert-12b",
+          fromMessageId: null,
+          filePaths: null,
+          revertArtifacts: true,
+        },
+        "actionAck",
+      ),
+    ).toContainEqual(
+      expect.objectContaining({
+        status: "rejected",
+        code: "NOTHING_TO_REVERT",
+      }),
+    );
   });
 });
 
@@ -1736,6 +1796,74 @@ async function sendOnChat(
         "kind" in parsed &&
         parsed.kind === "actionAck"
       ) {
+        socket.close();
+      }
+    });
+    socket.once("close", () => resolve());
+    socket.once("error", reject);
+  });
+  socket.send(
+    JSON.stringify({
+      kind: "open",
+      token: "local-dev-token",
+      manifest: {},
+      clientIdentity: {
+        kind: "cli",
+        compatibilityEpoch: CURRENT_CLIENT_COMPATIBILITY_EPOCH,
+        appVersion: "0.1.0",
+      },
+    }),
+  );
+  await done;
+  return frames;
+}
+
+/**
+ * Send one action and keep listening until a frame of `untilKind` arrives -
+ * for actions whose answer is not the ack but what follows it.
+ */
+async function sendActionUntil(
+  url: string,
+  frame: Record<string, unknown>,
+  untilKind: string,
+): Promise<unknown[]> {
+  const socket = new WebSocket(url);
+  await new Promise<void>((resolve, reject) => {
+    socket.once("open", () => resolve());
+    socket.once("error", reject);
+  });
+  const frames: unknown[] = [];
+  const done = new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => socket.close(), 4000);
+    socket.on("message", (data, isBinary) => {
+      if (isBinary) {
+        return;
+      }
+      const parsed: unknown = JSON.parse(String(data));
+      frames.push(parsed);
+      const kind = Reflect.get(parsed ?? {}, "kind");
+      if (frames.length === 1) {
+        socket.send(
+          JSON.stringify({
+            kind: "subscribe",
+            method: "chat.subscribe",
+            schemaVersion: { major: 1, minor: 8 },
+            params: { epicId: frame.epicId, chatId: frame.chatId },
+          }),
+        );
+        return;
+      }
+      if (kind === "snapshot" && frames.length === 2) {
+        socket.send(JSON.stringify({ hasBinaryPayload: false, ...frame }));
+        return;
+      }
+      // A rejected ack is the whole answer: nothing follows it.
+      if (
+        kind === untilKind ||
+        (kind === "actionAck" &&
+          Reflect.get(parsed ?? {}, "status") === "rejected")
+      ) {
+        clearTimeout(timer);
         socket.close();
       }
     });

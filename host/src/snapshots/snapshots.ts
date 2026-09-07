@@ -1,6 +1,13 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { diffLines } from "diff";
 import type { FileEditReason } from "@traycer/protocol/persistence/epic/content-blocks";
@@ -51,7 +58,11 @@ function blobPath(dir: string, hash: string): string {
   return join(dir, "blobs", hash);
 }
 
-function sidecarPath(dir: string, toolUseId: string, side: "pre" | "post"): string {
+function sidecarPath(
+  dir: string,
+  toolUseId: string,
+  side: "pre" | "post",
+): string {
   return join(dir, "pending", `${encodeURIComponent(toolUseId)}.${side}.json`);
 }
 
@@ -99,7 +110,15 @@ export async function captureFile(
   return { hash, reason: "snapshot" };
 }
 
-export async function readBlob(dir: string, hash: string): Promise<string | null> {
+/** Whether the store still holds this body - cleared blobs make a row non-undoable. */
+export function hasBlob(dir: string, hash: string): boolean {
+  return existsSync(blobPath(dir, hash));
+}
+
+export async function readBlob(
+  dir: string,
+  hash: string,
+): Promise<string | null> {
   try {
     return await readFile(blobPath(dir, hash), "utf8");
   } catch {
@@ -242,7 +261,9 @@ export function snapshotHookSettings(dataDir: string): string {
     SNAPSHOT_HOOK_FLAG,
     snapshotDir(dataDir),
   ];
-  const command = vector.map((part) => `"${part.replaceAll('"', '\\"')}"`).join(" ");
+  const command = vector
+    .map((part) => `"${part.replaceAll('"', '\\"')}"`)
+    .join(" ");
   const hook = {
     matcher: "Edit|Write|MultiEdit|NotebookEdit",
     hooks: [{ type: "command", command }],
@@ -257,7 +278,10 @@ export function snapshotHookSettings(dataDir: string): string {
  * and never prints: a hook that fails must not fail the edit, and a hook that
  * prints is read as a verdict on it.
  */
-export async function runSnapshotHook(stdin: string, dir: string): Promise<void> {
+export async function runSnapshotHook(
+  stdin: string,
+  dir: string,
+): Promise<void> {
   let payload: unknown;
   try {
     payload = JSON.parse(stdin);

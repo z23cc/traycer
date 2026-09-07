@@ -33,7 +33,7 @@ import type {
 import { bumpChatIndex } from "../store/host-store";
 import type { GuiPrintTurnState } from "../gui/deliver";
 import { resolveChatWorktreeBinding } from "../worktree/service";
-import { changeDigest } from "../snapshots/snapshots";
+import { changeDigest, hasBlob, snapshotDir } from "../snapshots/snapshots";
 
 type ChatWindowedTranscript = {
   readonly epicId: string;
@@ -113,9 +113,14 @@ function accumulatedChangesFrame(
         diffSource:
           row.reason === "snapshot" ? ("snapshot" as const) : ("none" as const),
         reason: row.reason,
-        // A before blob is what a restore would write back, and this host
-        // serves no restore action yet - so no row claims to be undoable.
-        undoable: false,
+        // Undoable when the FIRST before is still on hand to write back: a
+        // captured chain whose before blob survived `clearLocalSnapshots`. A
+        // file created during the chat has no before, and its undo is the
+        // delete - always on hand.
+        undoable:
+          row.reason === "snapshot" &&
+          (row.beforeHash === null ||
+            hasBlob(snapshotDir(runtime.dataDir), row.beforeHash)),
         hasContents: row.reason === "snapshot",
         // The two hashes ARE the version: a later edit changes the after,
         // and a request naming the old pair is refused as stale.
@@ -162,6 +167,19 @@ export function sendChatRange(
   request: ChatRangeRequest,
 ): void {
   sendJson(socket, chatRangeFrame(runtime, request));
+}
+
+/** One frame to every subscriber of this chat, for the frames with no builder of their own. */
+export function broadcastChatFrame(
+  runtime: HostRuntime,
+  epicId: string,
+  chatId: string,
+  frame: { readonly kind: string; readonly [key: string]: unknown },
+): void {
+  const full = { ...frame, hasBinaryPayload: false, epicId, chatId };
+  for (const socket of runtime.chats.sockets(epicId, chatId)) {
+    sendJson(socket, full);
+  }
 }
 
 export function sendChatJson(socket: WebSocket, frame: unknown): void {
