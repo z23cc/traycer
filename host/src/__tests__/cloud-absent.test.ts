@@ -144,6 +144,14 @@ describe("methods whose subject this host does not have", () => {
         }),
       ).toMatchObject({ ok: false });
     }
+    // Its own shape, and the same answer: the response echoes "the policy as
+    // it now stands durably", and nothing here stands durably.
+    expect(
+      await call(host.runtime, "providers.setPackPolicy", {
+        packId: "codex",
+        autoDownload: true,
+      }),
+    ).toMatchObject({ ok: false });
   });
 
   function call(

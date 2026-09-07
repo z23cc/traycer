@@ -121,7 +121,19 @@ export const handleListCloudChatPayloads: RpcHandler = (params) =>
     outcome: { status: "not-found" },
   });
 
-/** "No doc-resident content for this chat on the serving host" - none is. */
+/**
+ * `absent` - "no doc-resident content for this chat on the serving host" -
+ * and NOT a stand-in for a read this host could have done.
+ *
+ * The epic doc does carry a `chats` map here (`seedRoot`), but it holds row
+ * METADATA only: id, title, parent, timestamps. This method's `ok` arm is
+ * messages and events, which live in the registry and are served by the chat
+ * subscribe. That split is already on the wire - `chatRecordSummaryOf` stamps
+ * every row `docResident: false`, and the contract calls that marker "which
+ * store the row was read out of". This read is the fallback for the OTHER
+ * store: a chat that arrived by doc sync from an owner host that is now
+ * unreachable. On a single local host no chat is ever that one.
+ */
 export const handleChatReplicaRead: RpcHandler = (params) =>
   answer(chatReplicaReadRequestSchema.safeParse(params), {
     outcome: { status: "absent" },
