@@ -11,6 +11,7 @@ import type { CommunicationGraphHub } from "./stream/communication-graph";
 import type { ShutdownCoordinator } from "./lifecycle/shutdown";
 import type { EpicHub } from "./stream/epic-hub";
 import type { PlainTerminalHub } from "./terminal/plain";
+import type { EpicStateHub } from "./stream/epic-state";
 import type { PtyManager } from "./terminal/pty";
 import type { TerminalRegistry } from "./terminal/sessions";
 
@@ -29,6 +30,14 @@ export type HostRuntime = {
   readonly chats: ChatHub;
   readonly chatRecords: ChatRecordsHub;
   readonly graphs: CommunicationGraphHub;
+  readonly epicState: EpicStateHub;
+  /**
+   * This process's replica identity, stamped on every records-lane frame. It
+   * carries the start time because the lane's positions are in-memory: a
+   * restart resets them, and a client resuming under an unchanged epoch could
+   * not tell the reset from real history.
+   */
+  readonly authorityEpoch: string;
   readonly notifications: NotificationHub;
   readonly plainTerminals: PlainTerminalHub;
   readonly epics: EpicHub;

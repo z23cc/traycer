@@ -23,7 +23,7 @@ export function sendEpicStatusSnapshot(
   const epic = runtime.store.snapshot().epics.find((row) => row.id === epicId);
   sendJson(socket, {
     kind: "snapshot",
-    authorityEpoch: `oss:${runtime.hostId}`,
+    authorityEpoch: runtime.authorityEpoch,
     securityEpoch: 0,
     permissionRole: epic === undefined ? null : "owner",
     cloudSyncStatus: "disconnected",

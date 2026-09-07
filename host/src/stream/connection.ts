@@ -75,6 +75,7 @@ export function attachStreamConnection(
     runtime.inboxMonitors.remove(socket);
     runtime.chatRecords.remove(socket);
     runtime.graphs.remove(socket);
+    runtime.epicState.remove(socket);
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
@@ -90,6 +91,7 @@ export function attachStreamConnection(
     runtime.inboxMonitors.remove(socket);
     runtime.chatRecords.remove(socket);
     runtime.graphs.remove(socket);
+    runtime.epicState.remove(socket);
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
@@ -440,7 +442,7 @@ export function attachStreamConnection(
         return;
       }
       epicState = new EpicStateSubscriber(socket, runtime, epicId);
-      epicState.seed();
+      runtime.epicState.add(socket, epicState);
       return;
     }
     if (UNSERVED_STREAM_METHOD_NAMES.includes(subscribe.data.method)) {
@@ -486,13 +488,7 @@ export function attachStreamConnection(
     if (runtime.graphs.handleFrame(socket, parsed)) {
       return;
     }
-    if (
-      epicState !== null &&
-      parsed !== null &&
-      typeof parsed === "object" &&
-      Reflect.get(parsed, "kind") === "ping"
-    ) {
-      epicState.pong();
+    if (runtime.epicState.handleFrame(socket, parsed)) {
       return;
     }
     if (parsed === null || typeof parsed !== "object" || !("kind" in parsed)) {

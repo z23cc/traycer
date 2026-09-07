@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { epicStateSubscribeServerFrameSchemaV10 } from "@traycer/protocol/host/epic/state-subscribe";
-import { EpicStateSubscriber } from "../stream/epic-state";
+import { EpicStateHub, EpicStateSubscriber } from "../stream/epic-state";
 import { startHost, type StartedHost } from "../start-host";
 
 type Frame = { readonly kind: string; readonly [key: string]: unknown };
@@ -129,7 +129,7 @@ describe("epic.state.subscribe", () => {
     });
 
     const socket = new FakeSocket();
-    new EpicStateSubscriber(socket as never, host.runtime, "epic-1").seed();
+    new EpicStateSubscriber(socket as never, host.runtime, "epic-1").seed(0);
     const snapshot = socket.frames[0];
     expect(snapshot).toMatchObject({
       kind: "snapshot",
@@ -137,7 +137,9 @@ describe("epic.state.subscribe", () => {
       position: 0,
       reconciledWithCloud: false,
       hasBinaryPayload: false,
-      authorityEpoch: `oss:${host.runtime.hostId}`,
+      // Carries the process start, so an in-memory position cannot be
+      // resumed against a restarted lane.
+      authorityEpoch: host.runtime.authorityEpoch,
       // No tombstone store, so an empty list is the whole truth.
       deletedArtifacts: [],
       epicMeta: { revision: 7, meta: { title: "Records", updatedAt: 7 } },
@@ -179,7 +181,7 @@ describe("epic.state.subscribe", () => {
   it("answers an unknown epic with an empty snapshot rather than an error", async () => {
     const host = await boot();
     const socket = new FakeSocket();
-    new EpicStateSubscriber(socket as never, host.runtime, "nope").seed();
+    new EpicStateSubscriber(socket as never, host.runtime, "nope").seed(0);
     expect(socket.frames[0]).toMatchObject({
       kind: "snapshot",
       artifactRecords: [],
@@ -187,6 +189,126 @@ describe("epic.state.subscribe", () => {
       roleClaims: { revision: 0, claims: [] },
       epicMeta: { revision: 0, meta: { title: "", updatedAt: 0 } },
     });
+  });
+
+  it("commits only what changed, and stays silent for everything else", async () => {
+    const host = await boot();
+    const socket = new FakeSocket();
+    host.runtime.epicState.add(
+      socket as never,
+      new EpicStateSubscriber(socket as never, host.runtime, "epic-1"),
+    );
+    expect(socket.frames).toHaveLength(1);
+
+    // A chat turn mutates the store constantly and touches none of this lane's
+    // rows, so it must not consume a position.
+    await host.runtime.store.mutate((state) => {
+      state.chats.push({
+        epicId: "epic-1",
+        chatId: "c-1",
+        parentId: null,
+        hostId: host.runtime.hostId,
+        title: "",
+        createdAt: 1,
+        runSettings: null,
+        fastMode: false,
+        providerSession: null,
+        turns: [],
+        events: [],
+        transcriptEpoch: 0,
+        indexRevision: 0,
+        fileChangeCount: 0,
+        lastUsage: null,
+        archivedAt: null,
+      });
+    });
+    expect(socket.frames).toHaveLength(1);
+
+    await host.runtime.store.mutate((state) => {
+      state.artifacts.push({
+        epicId: "epic-1",
+        artifactId: "a-1",
+        kind: "spec",
+        title: "Fresh",
+        parentId: null,
+        folderName: "fresh",
+        artifactRoomId: "",
+        createdAt: 1,
+        updatedAt: 2,
+        status: null,
+        assignee: null,
+      });
+    });
+    const created = socket.frames.at(-1);
+    expect(created).toMatchObject({ kind: "delta", seq: 1 });
+    expect(created?.artifactUpserts).toMatchObject([
+      { id: "a-1", title: "Fresh" },
+    ]);
+    expect(created?.artifactTombstones).toEqual([]);
+
+    await host.runtime.store.mutate((state) => {
+      const row = state.artifacts.find((entry) => entry.artifactId === "a-1");
+      if (row !== undefined) {
+        row.title = "Renamed";
+        row.updatedAt = 5;
+      }
+    });
+    const renamed = socket.frames.at(-1);
+    // A position is consumed only by a real commit, so seq advances by one.
+    expect(renamed).toMatchObject({ kind: "delta", seq: 2 });
+    expect(renamed?.artifactUpserts).toMatchObject([
+      { id: "a-1", title: "Renamed", revision: 5 },
+    ]);
+
+    await host.runtime.store.mutate((state) => {
+      state.artifacts = [];
+    });
+    const removed = socket.frames.at(-1);
+    expect(removed).toMatchObject({ kind: "delta", seq: 3 });
+    expect(removed?.artifactUpserts).toEqual([]);
+    // The row is gone from state, so the tombstone comes from what we last sent.
+    expect(removed?.artifactTombstones).toMatchObject([
+      { id: "a-1", title: "Renamed", revision: 5, kind: "spec" },
+    ]);
+  });
+
+  it("seats a later subscriber above the positions already spent", async () => {
+    const host = await boot();
+    const first = new FakeSocket();
+    host.runtime.epicState.add(
+      first as never,
+      new EpicStateSubscriber(first as never, host.runtime, "epic-1"),
+    );
+    await host.runtime.store.mutate((state) => {
+      state.epics.push({
+        id: "epic-1",
+        title: "Named",
+        initialUserPrompt: "",
+        status: "active",
+        createdAt: 1,
+        updatedAt: 3,
+        createdBy: "local",
+        version: "1",
+        ticketCount: 0,
+        specCount: 0,
+        storyCount: 0,
+        reviewCount: 0,
+        repos: [],
+        workspaces: [],
+        pinned: false,
+        lastViewedAt: null,
+      });
+    });
+    expect(first.frames.at(-1)).toMatchObject({ kind: "delta", seq: 1 });
+
+    const second = new FakeSocket();
+    host.runtime.epicState.add(
+      second as never,
+      new EpicStateSubscriber(second as never, host.runtime, "epic-1"),
+    );
+    // Its high-water mark is the lane's, not zero - a delta at 1 is already in
+    // this snapshot and a client must be able to drop it.
+    expect(second.frames[0]).toMatchObject({ kind: "snapshot", position: 1 });
   });
 
   it("answers ping with pong", async () => {

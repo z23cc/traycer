@@ -2,7 +2,10 @@ import type { WebSocket } from "ws";
 import type {
   EpicArtifactRecord,
   EpicCommentThreadRecord,
+  EpicDeletedArtifactRecord,
+  EpicMeta,
 } from "@traycer/protocol/host/epic/state-subscribe";
+import type { RoleClaim } from "@traycer/protocol/persistence/epic/role-claims";
 import { visibleClaims } from "../agent/roles";
 import { commentThreadWire } from "../epic/comments";
 import type { HostRuntime } from "../runtime";
@@ -26,52 +29,140 @@ import type { StoredArtifact, StoredCommentThread } from "../store/host-store";
  * contract states is legal precisely because serving deltas across a host
  * restart would need that journal.
  */
+/** The four row populations the lane owns, as one comparable value. */
+type LaneRows = {
+  readonly epicMeta: { readonly revision: number; readonly meta: EpicMeta };
+  readonly artifacts: readonly EpicArtifactRecord[];
+  readonly claims: {
+    readonly revision: number;
+    readonly claims: readonly RoleClaim[];
+  };
+  readonly threads: readonly EpicCommentThreadRecord[];
+};
+
+export function laneRows(runtime: HostRuntime, epicId: string): LaneRows {
+  const state = runtime.store.snapshot();
+  const epic = state.epics.find((row) => row.id === epicId);
+  const claims = visibleClaims(runtime, epicId);
+  return {
+    epicMeta: {
+      revision: epic?.updatedAt ?? 0,
+      meta: { title: epic?.title ?? "", updatedAt: epic?.updatedAt ?? 0 },
+    },
+    artifacts: state.artifacts
+      .filter((row) => row.epicId === epicId)
+      .map(artifactRecord),
+    claims: {
+      // The SET's revision, per the contract: a claim is created and destroyed
+      // but never updated, so the newest claim dates the set.
+      revision: claims.reduce(
+        (latest, claim) => Math.max(latest, claim.claimedAt),
+        0,
+      ),
+      claims,
+    },
+    threads: state.commentThreads
+      .filter((row) => row.epicId === epicId)
+      .map(commentThreadRecord),
+  };
+}
+
 export class EpicStateSubscriber {
+  private sent: LaneRows | null = null;
+
   constructor(
     private readonly socket: WebSocket,
     private readonly runtime: HostRuntime,
-    private readonly epicId: string,
+    readonly epicId: string,
   ) {}
 
-  seed(): void {
-    const state = this.runtime.store.snapshot();
-    const epic = state.epics.find((row) => row.id === this.epicId);
-    const claims = visibleClaims(this.runtime, this.epicId);
+  seed(position: number): void {
+    const rows = laneRows(this.runtime, this.epicId);
+    this.sent = rows;
     this.send({
       kind: "snapshot",
       hasBinaryPayload: false,
-      // The same replica identity `epic.status.subscribe` mints, so the two
-      // lanes cannot disagree about which replica a client is attached to.
-      authorityEpoch: `oss:${this.runtime.hostId}`,
-      // Nothing has been committed on this lane, which is what position 0 says.
-      position: 0,
+      authorityEpoch: this.runtime.authorityEpoch,
+      // The lane's CURRENT high-water mark, not zero: a delta minted before
+      // this frame reached the client would otherwise look already-contained
+      // and be dropped.
+      position,
       basis: "cold",
       // A local host serves its own replica and reconciles with no cloud. The
       // contract calls this a freshness label, not an error.
       reconciledWithCloud: false,
-      epicMeta: {
-        revision: epic?.updatedAt ?? 0,
-        meta: { title: epic?.title ?? "", updatedAt: epic?.updatedAt ?? 0 },
-      },
-      artifactRecords: state.artifacts
-        .filter((row) => row.epicId === this.epicId)
-        .map(artifactRecord),
-      // Deletion removes the row outright here, so there is no tombstone to
-      // report and an empty list is the whole truth.
+      epicMeta: rows.epicMeta,
+      artifactRecords: rows.artifacts,
+      // Deletion removes the row outright here, so a snapshot has no tombstone
+      // to carry and an empty list is the whole truth.
       deletedArtifacts: [],
-      roleClaims: {
-        // The SET's revision, per the contract: a claim is created and
-        // destroyed but never updated, so the newest claim dates the set.
-        revision: claims.reduce(
-          (latest, claim) => Math.max(latest, claim.claimedAt),
-          0,
-        ),
-        claims,
-      },
-      commentThreads: state.commentThreads
-        .filter((row) => row.epicId === this.epicId)
-        .map(commentThreadRecord),
+      roleClaims: rows.claims,
+      commentThreads: rows.threads,
     });
+  }
+
+  /**
+   * Emits one commit for whatever changed since the last frame, or nothing.
+   * Returns whether a position was consumed - an empty envelope is refused by
+   * the contract precisely because it would burn a cursor for a non-event.
+   */
+  publish(seq: number): boolean {
+    const held = this.sent;
+    if (held === null) {
+      return false;
+    }
+    const rows = laneRows(this.runtime, this.epicId);
+    const artifactUpserts = rows.artifacts.filter(
+      (row) => !held.artifacts.some((was) => same(was, row)),
+    );
+    // A deleted row is gone from state, so its tombstone can only be read off
+    // the projection we last sent.
+    const artifactTombstones = held.artifacts
+      .filter((was) => !rows.artifacts.some((row) => row.id === was.id))
+      .map((was) => tombstoneOf(was, new Date().toISOString()));
+    const commentThreadUpserts = rows.threads.filter(
+      (row) => !held.threads.some((was) => same(was, row)),
+    );
+    const commentThreadRemovals = held.threads
+      .filter(
+        (was) =>
+          !rows.threads.some(
+            (row) =>
+              row.threadId === was.threadId &&
+              row.artifactId === was.artifactId,
+          ),
+      )
+      .map((was) => ({
+        artifactId: was.artifactId,
+        threadId: was.threadId,
+        revision: was.revision,
+      }));
+    const epicMeta = same(held.epicMeta, rows.epicMeta) ? null : rows.epicMeta;
+    const roleClaims = same(held.claims, rows.claims) ? null : rows.claims;
+    this.sent = rows;
+    if (
+      artifactUpserts.length === 0 &&
+      artifactTombstones.length === 0 &&
+      commentThreadUpserts.length === 0 &&
+      commentThreadRemovals.length === 0 &&
+      epicMeta === null &&
+      roleClaims === null
+    ) {
+      return false;
+    }
+    this.send({
+      kind: "delta",
+      hasBinaryPayload: false,
+      authorityEpoch: this.runtime.authorityEpoch,
+      seq,
+      artifactUpserts,
+      artifactTombstones,
+      commentThreadUpserts,
+      commentThreadRemovals,
+      epicMeta,
+      roleClaims,
+    });
+    return true;
   }
 
   pong(): void {
@@ -84,6 +175,86 @@ export class EpicStateSubscriber {
     }
     this.socket.send(JSON.stringify(frame));
   }
+}
+
+/**
+ * Every subscriber, and the lane position they share.
+ *
+ * One counter for the whole host rather than one per epic: the contract asks
+ * only that a position strictly increase within its epoch, and a single
+ * counter satisfies that for every epic at once without a map to keep.
+ */
+export class EpicStateHub {
+  private readonly subscribers = new Map<WebSocket, EpicStateSubscriber>();
+  private position = 0;
+
+  add(socket: WebSocket, subscriber: EpicStateSubscriber): void {
+    this.subscribers.set(socket, subscriber);
+    subscriber.seed(this.position);
+  }
+
+  remove(socket: WebSocket): void {
+    this.subscribers.delete(socket);
+  }
+
+  /**
+   * Called after every store commit. Each subscriber decides for itself whether
+   * its epic changed, so a chat turn - which mutates the store constantly and
+   * touches none of this lane's rows - moves nothing.
+   */
+  publish(): void {
+    const next = this.position + 1;
+    let consumed = false;
+    for (const subscriber of this.subscribers.values()) {
+      consumed = subscriber.publish(next) || consumed;
+    }
+    if (consumed) {
+      this.position = next;
+    }
+  }
+
+  handleFrame(socket: WebSocket, frame: unknown): boolean {
+    const subscriber = this.subscribers.get(socket);
+    if (
+      subscriber === undefined ||
+      frame === null ||
+      typeof frame !== "object" ||
+      Reflect.get(frame, "kind") !== "ping"
+    ) {
+      return false;
+    }
+    subscriber.pong();
+    return true;
+  }
+}
+
+/**
+ * Both sides are built by `laneRows`, so key order is fixed and a string
+ * compare is a value compare here.
+ */
+function same(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+/**
+ * The store deletes a row outright, so a tombstone is minted from the
+ * projection we last sent plus the moment we noticed - there is no recorded
+ * deletion time to read back.
+ */
+function tombstoneOf(
+  row: EpicArtifactRecord,
+  deletedAt: string,
+): EpicDeletedArtifactRecord {
+  const base = {
+    id: row.id,
+    title: row.title,
+    deletedAt,
+    revision: row.revision,
+  };
+  if (row.kind === "ticket" || row.kind === "story") {
+    return { ...base, kind: row.kind, status: row.status };
+  }
+  return { ...base, kind: row.kind };
 }
 
 /**

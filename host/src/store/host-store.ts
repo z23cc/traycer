@@ -328,6 +328,12 @@ export class HostStore {
   private state: HostState;
   private writeTail: Promise<void>;
   private closed: boolean;
+  /**
+   * Called after every persisted mutation. `mutate` is the only write path, so
+   * one hook here reaches every change - a per-call-site notification would
+   * silently miss whichever site is added next.
+   */
+  private committed: (() => void) | null = null;
 
   constructor(private readonly filePath: string) {
     this.state = {
@@ -386,6 +392,10 @@ export class HostStore {
     return cloneState(this.state);
   }
 
+  onCommit(listener: () => void): void {
+    this.committed = listener;
+  }
+
   async close(): Promise<void> {
     this.closed = true;
     await this.writeTail;
@@ -400,6 +410,9 @@ export class HostStore {
       if (!this.closed) {
         await persist(this.filePath, this.state);
       }
+      // After the write lands, never before: a listener that read mid-mutation
+      // could publish a state no reader will ever see on disk.
+      this.committed?.();
       return result;
     });
     this.writeTail = run.then(

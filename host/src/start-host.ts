@@ -16,6 +16,7 @@ import { PlainTerminalHub } from "./terminal/plain";
 import { ChatHub } from "./stream/chat-hub";
 import { ChatRecordsHub } from "./stream/chat-records";
 import { CommunicationGraphHub } from "./stream/communication-graph";
+import { EpicStateHub } from "./stream/epic-state";
 import { ShutdownCoordinator } from "./lifecycle/shutdown";
 import { EpicHub } from "./stream/epic-hub";
 import { PtyManager } from "./terminal/pty";
@@ -71,6 +72,8 @@ export async function startHost(
     chats: new ChatHub(),
     chatRecords: new ChatRecordsHub(),
     graphs: new CommunicationGraphHub(),
+    epicState: new EpicStateHub(),
+    authorityEpoch: `oss:${identity.hostId}:${String(Date.now())}`,
     notifications: new NotificationHub(),
     plainTerminals: new PlainTerminalHub(),
     epics: new EpicHub(),
@@ -78,6 +81,11 @@ export async function startHost(
     requestRestart: () => undefined,
     lastRestartTransitionId: null,
   };
+  // Every store write reaches the records lane through this one hook; the
+  // subscribers themselves decide whether their epic's rows actually moved.
+  store.onCommit(() => {
+    runtime.epicState.publish();
+  });
   const http: HostHttpServer = await listenHostHttp({
     host: options.listenHost,
     port: options.listenPort,
