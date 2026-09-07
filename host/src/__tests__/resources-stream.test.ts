@@ -5,6 +5,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   resourcesSubscribeServerFrameSchema,
   resourcesSubscribeServerFrameSchemaV12,
+  resourcesSubscribeServerFrameSchemaV13,
+  resourcesSubscribeServerFrameSchemaV14,
+  resourcesSubscribeServerFrameSchemaV15,
 } from "@traycer/protocol/host/resources/subscribe";
 import { CpuRates, treeOf, type ProcessRow } from "../gui/resources";
 import { ResourcesSubscriber, readScope } from "../stream/resources";
@@ -21,13 +24,21 @@ class FakeSocket {
 
   send(payload: string): void {
     // Each minor parses through its OWN union, so a field that belongs to a
-    // later one cannot ride out on an earlier frame unnoticed.
-    const schema =
-      this.minor >= 2
-        ? resourcesSubscribeServerFrameSchemaV12
-        : resourcesSubscribeServerFrameSchema;
-    this.frames.push(schema.parse(JSON.parse(payload)) as Frame);
+    // later one cannot ride out on an earlier frame unnoticed - and, the way
+    // this got its teeth, a REQUIRED field of a later minor cannot be missing
+    // from a frame validated against an earlier union that never asked for it.
+    this.frames.push(schemaFor(this.minor).parse(JSON.parse(payload)) as Frame);
   }
+}
+
+function schemaFor(minor: number): {
+  readonly parse: (value: unknown) => unknown;
+} {
+  if (minor >= 5) return resourcesSubscribeServerFrameSchemaV15;
+  if (minor === 4) return resourcesSubscribeServerFrameSchemaV14;
+  if (minor === 3) return resourcesSubscribeServerFrameSchemaV13;
+  if (minor === 2) return resourcesSubscribeServerFrameSchemaV12;
+  return resourcesSubscribeServerFrameSchema;
 }
 
 describe("resources.subscribe", () => {
@@ -92,7 +103,7 @@ describe("resources.subscribe", () => {
     expect(before.epic).toBeNull();
     expect(before.owners).toEqual([]);
 
-    const current = new FakeSocket(2);
+    const current = new FakeSocket(5);
     const lane = new ResourcesSubscriber(
       current as never,
       host.runtime,
@@ -105,6 +116,24 @@ describe("resources.subscribe", () => {
       processCount: expect.any(Number),
     });
     expect(current.frames[0].other).not.toBeNull();
+    // `@1.5` requires the nullable memory detail everywhere a reading appears,
+    // a descriptor on every process, and the restricted aggregate. `ps` has no
+    // proportional or private figure, so null is the truthful reading; every
+    // owner is reported in full, so there is nothing restricted to stand in
+    // for. Omitting them made the client drop the whole frame.
+    expect(current.frames[0]).toMatchObject({ restricted: null });
+    expect(current.frames[0].app).toMatchObject({
+      pssBytes: null,
+      privateBytes: null,
+    });
+    expect(current.frames[0].hostTree).toMatchObject({
+      pssBytes: null,
+      privateBytes: null,
+    });
+    expect(current.frames[0].other).toMatchObject({
+      pssBytes: null,
+      privateBytes: null,
+    });
   });
 
   it("takes an epic id alone at 1.0 and a scope from 1.1", () => {

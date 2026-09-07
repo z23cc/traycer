@@ -33,7 +33,15 @@ const TREE_MINOR = 2;
 const HARNESS_MINOR = 3;
 /** Owners gain the widened kind and `managedCommand` at `@1.4`. */
 const MANAGED_MINOR = 4;
-/** The client may ask for a faster cadence at `@1.5`. */
+/**
+ * `@1.5` is two changes at once: the client may ask for a faster cadence, and
+ * every reading gains the nullable memory detail (`pssBytes`, `privateBytes`)
+ * plus a Chromium `descriptor` on each process and a `restricted` aggregate on
+ * the projection. All of those are REQUIRED fields, so a frame that omits them
+ * is dropped whole by a client that negotiated this minor - which is how the
+ * omission announced itself, as "frame failed its negotiated schema @1.5" in
+ * the app console while the panel stayed empty.
+ */
 const DEMAND_MINOR = 5;
 
 const BACKGROUND_MS = 5_000;
@@ -125,6 +133,11 @@ export class ResourcesSubscriber {
             other: this.otherFrame(rows, rates, chargedPids, now),
           }
         : {}),
+      // Every owner this host sees is reported in full, so there is no hidden
+      // tree for the aggregate to stand in for. The projection itself carries
+      // no reading of its own - the memory detail belongs to the snapshots
+      // nested inside it.
+      ...(this.minor >= DEMAND_MINOR ? { restricted: null } : {}),
     });
   }
 
@@ -153,7 +166,10 @@ export class ResourcesSubscriber {
       processCount: tree.length,
       cpuPercent: sumCpu(tree, rates),
       rssBytes: sumRss(tree),
-      processes: tree.map((row) => processFrame(row, root.rootPid, rates)),
+      processes: tree.map((row) =>
+        processFrame(row, root.rootPid, rates, this.minor),
+      ),
+      ...memoryDetail(this.minor),
       ...(this.minor >= HARNESS_MINOR ? { harnessId: root.harnessId } : {}),
       ...(this.minor >= MANAGED_MINOR ? { managedCommand: null } : {}),
     };
@@ -169,6 +185,7 @@ export class ResourcesSubscriber {
       processCount: 0,
       cpuPercent: 0,
       rssBytes: 0,
+      ...memoryDetail(this.minor),
     };
   }
 
@@ -198,6 +215,7 @@ export class ResourcesSubscriber {
         (total, owner) => total + Number(owner.rssBytes),
         0,
       ),
+      ...memoryDetail(this.minor),
     };
   }
 
@@ -212,6 +230,7 @@ export class ResourcesSubscriber {
       processCount: tree.length,
       cpuPercent: sumCpu(tree, rates),
       rssBytes: sumRss(tree),
+      ...memoryDetail(this.minor),
     };
   }
 
@@ -230,7 +249,10 @@ export class ResourcesSubscriber {
       processCount: rest.length,
       cpuPercent: sumCpu(rest, rates),
       rssBytes: sumRss(rest),
-      processes: rest.map((row) => processFrame(row, process.pid, rates)),
+      processes: rest.map((row) =>
+        processFrame(row, process.pid, rates, this.minor),
+      ),
+      ...memoryDetail(this.minor),
     };
   }
 
@@ -265,6 +287,7 @@ function processFrame(
   row: ProcessRow,
   rootPid: number,
   rates: ReadonlyMap<number, number>,
+  minor: number,
 ): { readonly pid: number; readonly [key: string]: unknown } {
   return {
     pid: row.pid,
@@ -274,7 +297,21 @@ function processFrame(
     command: row.command,
     cpuPercent: rates.get(row.pid) ?? 0,
     rssBytes: row.rssBytes,
+    ...memoryDetail(minor),
+    // The contract's descriptor is Chromium-only, and this host starts agents
+    // and shells; `null` is the schema's own word for "no safely joined
+    // semantic label", not a gap.
+    ...(minor >= DEMAND_MINOR ? { descriptor: null } : {}),
   };
+}
+
+/**
+ * `ps` reports resident set and nothing finer, so proportional and private
+ * memory are genuinely unmeasured here - which is exactly what the minor made
+ * these fields nullable to say.
+ */
+function memoryDetail(minor: number): object {
+  return minor >= DEMAND_MINOR ? { pssBytes: null, privateBytes: null } : {};
 }
 
 function sumCpu(
