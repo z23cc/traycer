@@ -841,9 +841,12 @@ export function guiPrintArgv(
     // the user under `supervised` - which is what makes every mode one
     // decision made in one place. `--dangerously-skip-permissions` would make
     // the same decision inside the CLI, out of sight, and only for one mode.
+    // `plan` is the one CLI mode this host does run: a `/plan` turn, where
+    // the CLI withholds its edit tools and the plan comes back as an
+    // `ExitPlanMode` question this host turns into a card.
     args.push(
       "--permission-mode",
-      "default",
+      permissionMode === "plan" ? "plan" : "default",
       "--permission-prompt-tool",
       "stdio",
       "--input-format",
@@ -854,7 +857,6 @@ export function guiPrintArgv(
     }
     // No prompt here: `--input-format stream-json` reads it from stdin, which
     // is also the channel the permission answers go back on.
-    void permissionMode;
     return args;
   }
   if (harnessId === "codex") {

@@ -54,9 +54,7 @@ export async function listGuiModels(
   };
 }
 
-export function listGuiCommands(
-  harnessId: GuiHarnessId,
-): {
+export function listGuiCommands(harnessId: GuiHarnessId): {
   readonly harnessId: GuiHarnessId;
   readonly commands: GuiAgentCommandOption[];
 } {
@@ -71,6 +69,24 @@ export function listGuiCommands(
         kind: "slash-command",
         metadata: { providerKind: "compaction" },
       },
+      // The released host's catalog entry, verbatim: `/plan <prompt>` runs
+      // the turn in Claude's plan mode, and the plan comes back as a card.
+      ...(harnessId === "claude"
+        ? [
+            {
+              harnessId,
+              name: "plan",
+              description: "Run the prompt in Claude Code plan mode",
+              argumentHint: "<prompt>",
+              kind: "slash-command" as const,
+              metadata: {
+                catalogSource: "providerMode",
+                providerKind: "permission-mode",
+                permissionMode: "plan",
+              },
+            },
+          ]
+        : []),
     ],
   };
 }

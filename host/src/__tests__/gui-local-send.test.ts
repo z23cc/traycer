@@ -2052,7 +2052,121 @@ describe("local GUI send without cloud login", () => {
       blocks.find((block) => Reflect.get(block, "type") === "text"),
     ).toMatchObject({ text: "you chose Blue" });
   });
+
+  /**
+   * Plan mode, end to end. `/plan …` runs the CLI in its plan mode - the fake
+   * reports which mode it was given - and the plan comes back as an
+   * `ExitPlanMode` question this host refuses with the released host's
+   * sentence, having captured the plan as a card. A plan past the preview cap
+   * lives in the blob store, and `agent.gui.getPlan` serves it whole.
+   */
+  it("turns a /plan turn's ExitPlanMode into a plan card the GUI can fetch", async () => {
+    const setup = await bootWithCli(planningCli(), "claude");
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-23", "chat-23");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-23",
+      chatId: "chat-23",
+      clientActionId: "action-23",
+      messageId: "msg-user-23",
+      text: "/plan add a readme",
+      permissionMode: "full_access",
+      harnessId: null,
+    });
+    const frames = await waitForSealedBlocks(
+      streamUrl,
+      "epic-23",
+      "chat-23",
+      "plan",
+      80,
+      50,
+    );
+    const blocks = assistantBlocks(frames, "epic-23", "chat-23");
+    const plan = blocks.find((block) => Reflect.get(block, "type") === "plan");
+    expect(plan).toMatchObject({
+      planStatus: "ready",
+      title: "Plan",
+      source: {
+        harnessId: "claude",
+        sessionId: "sess-plan",
+        kind: "plan-mode",
+      },
+      metadata: { providerEvent: "ExitPlanMode" },
+      approvalId: null,
+    });
+    const planId = String(Reflect.get(plan ?? {}, "planId"));
+    expect(planId.startsWith("claude:sess-plan:turn:")).toBe(true);
+    expect(planId.endsWith(":toolu_plan1")).toBe(true);
+    expect(Reflect.get(plan ?? {}, "blockId")).toBe(`plan:${planId}`);
+    // Past the cap: the card carries the first part and a ref to the rest.
+    expect(String(Reflect.get(plan ?? {}, "markdownPreview"))).toHaveLength(
+      4000,
+    );
+    expect(Reflect.get(plan ?? {}, "fullContentRef")).toMatchObject({
+      kind: "plan_content",
+    });
+    // The CLI was run in plan mode, and told to stop once the plan was captured.
+    const text = String(
+      Reflect.get(
+        blocks.find((block) => Reflect.get(block, "type") === "text") ?? {},
+        "text",
+      ),
+    );
+    expect(text).toContain("mode-plan");
+    expect(text).toContain("plan-ready");
+    const fetched = await call(
+      started.rpcUrl,
+      "agent.gui.getPlan",
+      { major: 1, minor: 0 },
+      {
+        epicId: "epic-23",
+        chatId: "chat-23",
+        planId,
+      },
+    );
+    expect(fetched).toMatchObject({
+      planId,
+      planStatus: "ready",
+      unavailableReason: null,
+      contentHash: expect.any(String),
+    });
+    const markdown = String(Reflect.get(fetched ?? {}, "markdown"));
+    expect(markdown.startsWith("# Add README")).toBe(true);
+    expect(markdown.length).toBeGreaterThan(4000);
+  });
 });
+
+/**
+ * A fake CLI that reports the mode it was run in, then asks to leave plan
+ * mode with a plan long enough to overflow the card's preview - and stops
+ * when refused with the released host's sentence.
+ */
+function planningCli(): string {
+  const plan = `# Add README\\n\\n${"- step: write the readme and check it\\n".repeat(140)}`;
+  return [
+    "#!/bin/sh",
+    "read -r prompt",
+    'case "$*" in *"--permission-mode plan"*) mode=mode-plan ;; *) mode=mode-default ;; esac',
+    `printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-plan"}'`,
+    `printf '%s\n' "{\\"type\\":\\"assistant\\",\\"message\\":{\\"content\\":[{\\"type\\":\\"text\\",\\"text\\":\\"$mode \\"}]}}"`,
+    `printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_plan1","name":"ExitPlanMode","input":{"plan":"${plan}"}}]}}'`,
+    `printf '%s\n' '{"type":"control_request","request_id":"req-plan","request":{"subtype":"can_use_tool","tool_name":"ExitPlanMode","input":{"plan":"${plan}"},"tool_use_id":"toolu_plan1"}}'`,
+    "read -r answer",
+    'case "$answer" in',
+    '  *"Plan captured and shown to the user as a plan card"*)',
+    `    printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","content":"Plan captured","is_error":true,"tool_use_id":"toolu_plan1"}]}}'`,
+    `    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"plan-ready"}]}}'`,
+    "    ;;",
+    "  *)",
+    `    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"plan-allowed"}]}}'`,
+    "    ;;",
+    "esac",
+    `printf '%s\n' '{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}'`,
+    "",
+  ].join("\n");
+}
 
 /**
  * A fake Codex app-server that asks the user one question over

@@ -19,6 +19,7 @@ import type {
 import {
   MAX_SNAPSHOT_BYTES,
   captureFile,
+  writeBlob,
   lineCounts,
   readBlob,
   settleEdit,
@@ -440,11 +441,14 @@ async function runAndPersistAssistant(
     chat?.providerSession ?? null,
     input.harnessId,
   );
+  // `/plan <prompt>` runs the turn in Claude's plan mode; the words after
+  // the command are the prompt, as the released host reads them.
+  const planPrompt = planInvocation(input.prompt);
+  const bare = planPrompt ?? input.prompt;
   const prompt =
-    session === null
-      ? printPromptFromTurns(chat?.turns ?? [], input.prompt)
-      : input.prompt;
+    session === null ? printPromptFromTurns(chat?.turns ?? [], bare) : bare;
   const permissionMode = readPermissionMode(chat?.runSettings);
+  let providerSessionId: string | null = session;
   const textBlockId = assistantTextBlockId(input.assistantMessageId);
   const reasoningBlockId = assistantReasoningBlockId(input.assistantMessageId);
   let assembled = "";
@@ -581,6 +585,7 @@ async function runAndPersistAssistant(
         harnessId: input.harnessId,
         sessionId: event.sessionId,
       });
+      providerSessionId = event.sessionId;
       if (announcedSession) {
         return;
       }
@@ -813,6 +818,10 @@ async function runAndPersistAssistant(
         userMessageId: print?.userMessageId ?? null,
         announcedPaths: announced.map((edit) => edit.path),
         announcedOperation: announced[0]?.operation ?? null,
+        sessionId: providerSessionId,
+        turnId: input.turnId,
+        // The words streamed so far, for a call that carried no plan.
+        narration: assembled,
       });
       return;
     }
@@ -940,7 +949,9 @@ async function runAndPersistAssistant(
       prompt,
       cwd,
       model: input.model ?? readModelSlug(chat?.runSettings),
-      permissionMode,
+      // The CLI's mode, not the chat's: `plan` for a `/plan` turn, `default`
+      // otherwise - the chat's own mode is decided here, per question.
+      permissionMode: planPrompt === null ? permissionMode : "plan",
       sessionId: session,
       onEvent: handleEvent,
     });
@@ -1176,6 +1187,11 @@ async function decidePermission(
     /** For a Codex file-change item, the files its announcement named. */
     readonly announcedPaths: readonly string[];
     readonly announcedOperation: CheckpointFileOperation | null;
+    /** What names a plan: the provider session and this turn. */
+    readonly sessionId: string | null;
+    readonly turnId: string;
+    /** The assistant text streamed so far, the plan's preferred body. */
+    readonly narration: string;
   },
 ): Promise<void> {
   const answer = (
@@ -1195,11 +1211,19 @@ async function decidePermission(
     );
   };
   if (request.toolName === "ExitPlanMode") {
-    answer({
-      behavior: "deny",
-      message:
-        "This host does not run plan mode. Continue without switching modes.",
+    // The released host's answer: the plan is captured as a card, and the
+    // call is refused with the sentence that tells the model to stop here.
+    // The card's body is the call's own `plan` - the artifact the user
+    // reviews - with the turn's narration standing in only when the call
+    // carried none. (The released host prefers the narration of the message
+    // that made the call; this host shows the plan.)
+    await openPlanCard(runtime, input, {
+      toolUseId: request.toolUseId ?? request.requestId,
+      sessionId: turn.sessionId,
+      turnId: turn.turnId,
+      markdown: planText(request.input) ?? turn.narration,
     });
+    answer({ behavior: "deny", message: PLAN_CAPTURED_MESSAGE });
     return;
   }
   if (isInterviewTool(request.toolName)) {
@@ -1432,6 +1456,85 @@ async function abandonApprovals(
       abandoned: true,
     });
   }
+}
+
+/** The released host's refusal of `ExitPlanMode`, verbatim: the model stops, the user reviews. */
+const PLAN_CAPTURED_MESSAGE =
+  "Plan captured and shown to the user as a plan card. Stop here - the user will review it and start implementation when ready.";
+/** Above this a plan's body lives in the blob store and the card carries a preview. */
+const PLAN_PREVIEW_MAX_CHARS = 4000;
+
+/**
+ * `/plan` and the prompt after it, or null for any other message. An empty
+ * `/plan` plans the next steps, as the released host words it.
+ */
+function planInvocation(prompt: string): string | null {
+  const trimmed = prompt.trim();
+  if (trimmed === "/plan") {
+    return "Plan the next steps.";
+  }
+  return trimmed.startsWith("/plan ")
+    ? trimmed.slice("/plan ".length).trim()
+    : null;
+}
+
+function planText(input: unknown): string | null {
+  if (input === null || typeof input !== "object") {
+    return null;
+  }
+  const plan = Reflect.get(input, "plan");
+  return typeof plan === "string" && plan.trim().length > 0 ? plan : null;
+}
+
+/**
+ * A plan card from an `ExitPlanMode` call, named the way the released host
+ * names one - by session, turn and call - and stored the way it stores one:
+ * inline up to the preview cap, in the blob store past it with the card
+ * carrying the first part and a content ref the reader fetches by.
+ */
+async function openPlanCard(
+  runtime: HostRuntime,
+  input: { readonly epicId: string; readonly chatId: string },
+  plan: {
+    readonly toolUseId: string;
+    readonly sessionId: string | null;
+    readonly turnId: string;
+    readonly markdown: string;
+  },
+): Promise<void> {
+  const session = plan.sessionId ?? "unknown-session";
+  const planId = `claude:${session}:${plan.turnId}:${plan.toolUseId}`;
+  const stored =
+    plan.markdown.length <= PLAN_PREVIEW_MAX_CHARS
+      ? { markdownPreview: plan.markdown, fullContentRef: null }
+      : {
+          markdownPreview: plan.markdown.slice(0, PLAN_PREVIEW_MAX_CHARS),
+          fullContentRef: {
+            kind: "plan_content" as const,
+            hash: await writeBlob(snapshotDir(runtime.dataDir), plan.markdown),
+          },
+        };
+  broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+    type: "plan.updated",
+    blockId: `plan:${planId}`,
+    timestamp: Date.now(),
+    planId,
+    source: {
+      harnessId: "claude",
+      sessionId: plan.sessionId,
+      turnId: plan.turnId,
+      kind: "plan-mode",
+    },
+    planStatus: "ready",
+    title: "Plan",
+    summary: null,
+    ...stored,
+    steps: [],
+    actions: [],
+    approvalId: null,
+    supersededByPlanId: null,
+    metadata: { providerEvent: "ExitPlanMode" },
+  });
 }
 
 /** The tools whose call is a question for the user, by the released host's list. */

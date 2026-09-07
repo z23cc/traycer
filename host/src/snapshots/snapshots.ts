@@ -115,6 +115,18 @@ export function hasBlob(dir: string, hash: string): boolean {
   return existsSync(blobPath(dir, hash));
 }
 
+/** Store one text body content-addressed, the way a captured file is; returns its hash. */
+export async function writeBlob(dir: string, text: string): Promise<string> {
+  const bytes = Buffer.from(text, "utf8");
+  const hash = createHash("sha256").update(bytes).digest("hex");
+  const target = blobPath(dir, hash);
+  if (!existsSync(target)) {
+    await mkdir(join(dir, "blobs"), { recursive: true });
+    await writeFile(target, bytes);
+  }
+  return hash;
+}
+
 export async function readBlob(
   dir: string,
   hash: string,

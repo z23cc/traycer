@@ -1,4 +1,11 @@
-import { chmod, mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  mkdir,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -31,22 +38,36 @@ describe("GUI catalog, deliver, inbox, and TUI hooks", () => {
     const setup = await boot();
     tempDir = setup.tempDir;
     started = setup.started;
-    const listed = await call(started.rpcUrl, "agent.gui.listHarnesses", {
-      major: 8,
-      minor: 0,
-    }, {});
-    const record = listed as {
-      harnesses: readonly { id: string; available: boolean; modes: readonly string[] }[];
-    };
-    expect(record.harnesses.some((row) => row.id === "claude" && row.available)).toBe(
-      true,
+    const listed = await call(
+      started.rpcUrl,
+      "agent.gui.listHarnesses",
+      {
+        major: 8,
+        minor: 0,
+      },
+      {},
     );
+    const record = listed as {
+      harnesses: readonly {
+        id: string;
+        available: boolean;
+        modes: readonly string[];
+      }[];
+    };
+    expect(
+      record.harnesses.some((row) => row.id === "claude" && row.available),
+    ).toBe(true);
     const claude = record.harnesses.find((row) => row.id === "claude");
     expect(claude?.modes).toEqual(["gui", "tui"]);
-    const models = await call(started.rpcUrl, "agent.gui.listModels", {
-      major: 1,
-      minor: 0,
-    }, { harnessId: "claude", workingDirectory: null });
+    const models = await call(
+      started.rpcUrl,
+      "agent.gui.listModels",
+      {
+        major: 1,
+        minor: 0,
+      },
+      { harnessId: "claude", workingDirectory: null },
+    );
     const modelRecord = models as {
       models: readonly { slug: string; label: string }[];
     };
@@ -61,10 +82,15 @@ describe("GUI catalog, deliver, inbox, and TUI hooks", () => {
       slug: "default",
       label: "Default (Sonnet 5)",
     });
-    const commands = await call(started.rpcUrl, "agent.gui.listCommands", {
-      major: 1,
-      minor: 0,
-    }, { harnessId: "claude", workingDirectory: null, workingDirectories: [] });
+    const commands = await call(
+      started.rpcUrl,
+      "agent.gui.listCommands",
+      {
+        major: 1,
+        minor: 0,
+      },
+      { harnessId: "claude", workingDirectory: null, workingDirectories: [] },
+    );
     expect(commands).toMatchObject({
       harnessId: "claude",
       commands: [
@@ -73,12 +99,27 @@ describe("GUI catalog, deliver, inbox, and TUI hooks", () => {
           kind: "slash-command",
           metadata: { providerKind: "compaction" },
         }),
+        // The released host's entry: `/plan <prompt>`, a permission-mode command.
+        expect.objectContaining({
+          name: "plan",
+          argumentHint: "<prompt>",
+          metadata: {
+            catalogSource: "providerMode",
+            providerKind: "permission-mode",
+            permissionMode: "plan",
+          },
+        }),
       ],
     });
-    const harnessModels = await call(started.rpcUrl, "agent.listHarnessModels", {
-      major: 2,
-      minor: 0,
-    }, { epicId: null, senderAgentId: null, harnessId: "claude" });
+    const harnessModels = await call(
+      started.rpcUrl,
+      "agent.listHarnessModels",
+      {
+        major: 2,
+        minor: 0,
+      },
+      { epicId: null, senderAgentId: null, harnessId: "claude" },
+    );
     expect(harnessModels).toMatchObject({
       harnessId: "claude",
       models: expect.arrayContaining([
@@ -91,10 +132,15 @@ describe("GUI catalog, deliver, inbox, and TUI hooks", () => {
         expect.objectContaining({ id: "haiku" }),
       ]),
     });
-    const cleared = await call(started.rpcUrl, "snapshots.clearLocalSnapshots", {
-      major: 1,
-      minor: 0,
-    }, {});
+    const cleared = await call(
+      started.rpcUrl,
+      "snapshots.clearLocalSnapshots",
+      {
+        major: 1,
+        minor: 0,
+      },
+      {},
+    );
     expect(cleared).toEqual({ clearedBytes: 0 });
   });
 
@@ -103,51 +149,68 @@ describe("GUI catalog, deliver, inbox, and TUI hooks", () => {
     tempDir = setup.tempDir;
     started = setup.started;
     await seedEpic(started, tempDir);
-    const created = await call(started.rpcUrl, "agent.create", {
-      major: 3,
-      minor: 0,
-    }, {
-      senderAgentId: "chat-1",
-      epicId: "epic-1",
-      name: "Child",
-      surface: "gui",
-      harnessId: "claude",
-      model: null,
-      agentMode: null,
-      reasoningEffort: null,
-      fastMode: null,
-      workspace: { entries: [] },
-      profileSelection: { kind: "ambient" },
-      permissionMode: "full_access",
-    });
+    const created = await call(
+      started.rpcUrl,
+      "agent.create",
+      {
+        major: 3,
+        minor: 0,
+      },
+      {
+        senderAgentId: "chat-1",
+        epicId: "epic-1",
+        name: "Child",
+        surface: "gui",
+        harnessId: "claude",
+        model: null,
+        agentMode: null,
+        reasoningEffort: null,
+        fastMode: null,
+        workspace: { entries: [] },
+        profileSelection: { kind: "ambient" },
+        permissionMode: "full_access",
+      },
+    );
     const agentId = (created as { agentId: string }).agentId;
-    const sent = await call(started.rpcUrl, "agent.sendMessage", {
-      major: 1,
-      minor: 0,
-    }, {
-      senderAgentId: "chat-1",
-      epicId: "epic-1",
-      receiverAgentId: agentId,
-      prompt: "hello from parent",
-      responseId: null,
-      expectReply: true,
-    });
+    const sent = await call(
+      started.rpcUrl,
+      "agent.sendMessage",
+      {
+        major: 1,
+        minor: 0,
+      },
+      {
+        senderAgentId: "chat-1",
+        epicId: "epic-1",
+        receiverAgentId: agentId,
+        prompt: "hello from parent",
+        responseId: null,
+        expectReply: true,
+      },
+    );
     expect(sent).toMatchObject({ responseId: expect.any(String) });
-    const transcript = await call(started.rpcUrl, "agent.getTranscript", {
-      major: 1,
-      minor: 0,
-    }, { epicId: "epic-1", agentId });
+    const transcript = await call(
+      started.rpcUrl,
+      "agent.getTranscript",
+      {
+        major: 1,
+        minor: 0,
+      },
+      { epicId: "epic-1", agentId },
+    );
     expect(String((transcript as { transcript: string }).transcript)).toContain(
       "assistant-ok",
     );
-    const plan = await call(started.rpcUrl, "agent.gui.getPlan", {
-      major: 1,
-      minor: 0,
-    }, { epicId: "epic-1", chatId: agentId, planId: "plan-1" });
-    expect(plan).toMatchObject({
-      planId: "plan-1",
-      unavailableReason: "blob_missing",
-    });
+    // The released host's answer for a plan the chat never held: not found,
+    // rather than a plan with nothing behind it.
+    await expect(
+      call(
+        started.rpcUrl,
+        "agent.gui.getPlan",
+        { major: 1, minor: 0 },
+        { epicId: "epic-1", chatId: agentId, planId: "plan-1" },
+      ),
+    ).rejects.toThrow("PLAN_NOT_FOUND");
   });
 
   it("enqueues TUI inbox mail and accepts hook RPCs", async () => {
@@ -155,80 +218,117 @@ describe("GUI catalog, deliver, inbox, and TUI hooks", () => {
     tempDir = setup.tempDir;
     started = setup.started;
     await seedEpic(started, tempDir);
-    await call(started.rpcUrl, "epic.createTuiAgent", { major: 1, minor: 1 }, {
-      epicId: "epic-1",
-      parentId: "chat-1",
-      title: "",
-      harnessId: "claude",
-      harnessSessionId: "sess-1",
-      terminalAgentArgs: null,
-      terminalShellCommand: setup.claudePath,
-      terminalShellArgs: ["--resume", "sess-1"],
-      hostId: started.runtime.hostId,
-      workspaceFolders: [],
-      workspaceMode: "inherit",
-      model: null,
-      reasoningEffort: null,
-      agentMode: "regular",
-      tuiAgentId: "tui-1",
-      profileId: null,
-      forkSourceHarnessSessionId: null,
-    });
-    await call(started.rpcUrl, "agent.sendMessage", { major: 1, minor: 0 }, {
-      senderAgentId: "chat-1",
-      epicId: "epic-1",
-      receiverAgentId: "tui-1",
-      prompt: "ping tui",
-      responseId: null,
-      expectReply: false,
-    });
-    const inbox = await call(started.rpcUrl, "agent.inbox.read", {
-      major: 2,
-      minor: 0,
-    }, { epicId: "epic-1", agentId: "tui-1", after: null });
+    await call(
+      started.rpcUrl,
+      "epic.createTuiAgent",
+      { major: 1, minor: 1 },
+      {
+        epicId: "epic-1",
+        parentId: "chat-1",
+        title: "",
+        harnessId: "claude",
+        harnessSessionId: "sess-1",
+        terminalAgentArgs: null,
+        terminalShellCommand: setup.claudePath,
+        terminalShellArgs: ["--resume", "sess-1"],
+        hostId: started.runtime.hostId,
+        workspaceFolders: [],
+        workspaceMode: "inherit",
+        model: null,
+        reasoningEffort: null,
+        agentMode: "regular",
+        tuiAgentId: "tui-1",
+        profileId: null,
+        forkSourceHarnessSessionId: null,
+      },
+    );
+    await call(
+      started.rpcUrl,
+      "agent.sendMessage",
+      { major: 1, minor: 0 },
+      {
+        senderAgentId: "chat-1",
+        epicId: "epic-1",
+        receiverAgentId: "tui-1",
+        prompt: "ping tui",
+        responseId: null,
+        expectReply: false,
+      },
+    );
+    const inbox = await call(
+      started.rpcUrl,
+      "agent.inbox.read",
+      {
+        major: 2,
+        minor: 0,
+      },
+      { epicId: "epic-1", agentId: "tui-1", after: null },
+    );
     expect(inbox).toMatchObject({
       nextCursor: null,
-      messages: [expect.objectContaining({ prompt: "ping tui", fromAgentId: "chat-1" })],
+      messages: [
+        expect.objectContaining({ prompt: "ping tui", fromAgentId: "chat-1" }),
+      ],
     });
-    const titled = await call(started.rpcUrl, "agent.tui.generateTitle", {
-      major: 1,
-      minor: 0,
-    }, {
-      epicId: "epic-1",
-      tuiAgentId: "tui-1",
-      harnessSessionId: null,
-      harnessId: "claude",
-      promptText: "Implement the inbox path",
-    });
+    const titled = await call(
+      started.rpcUrl,
+      "agent.tui.generateTitle",
+      {
+        major: 1,
+        minor: 0,
+      },
+      {
+        epicId: "epic-1",
+        tuiAgentId: "tui-1",
+        harnessSessionId: null,
+        harnessId: "claude",
+        promptText: "Implement the inbox path",
+      },
+    );
     expect(titled).toEqual({ accepted: true });
-    const activity = await call(started.rpcUrl, "agent.tui.recordActivity", {
-      major: 1,
-      minor: 1,
-    }, {
-      epicId: "epic-1",
-      tuiAgentId: "tui-1",
-      harnessSessionId: null,
-      harnessId: "claude",
-      event: "start",
-      observedHarnessSessionId: null,
-    });
+    const activity = await call(
+      started.rpcUrl,
+      "agent.tui.recordActivity",
+      {
+        major: 1,
+        minor: 1,
+      },
+      {
+        epicId: "epic-1",
+        tuiAgentId: "tui-1",
+        harnessSessionId: null,
+        harnessId: "claude",
+        event: "start",
+        observedHarnessSessionId: null,
+      },
+    );
     expect(activity).toEqual({ accepted: true });
-    const ended = await call(started.rpcUrl, "agent.tui.turnEnded", {
-      major: 1,
-      minor: 0,
-    }, { epicId: "epic-1", tuiAgentId: "tui-1", harnessId: "claude" });
+    const ended = await call(
+      started.rpcUrl,
+      "agent.tui.turnEnded",
+      {
+        major: 1,
+        minor: 0,
+      },
+      { epicId: "epic-1", tuiAgentId: "tui-1", harnessId: "claude" },
+    );
     expect(ended).toEqual({ accepted: true });
-    const submitted = await call(started.rpcUrl, "agent.tui.promptSubmitted", {
-      major: 1,
-      minor: 1,
-    }, {
-      epicId: "epic-1",
-      tuiAgentId: "tui-1",
-      harnessSessionId: null,
-      harnessId: "claude",
-      observedHarnessSessionId: null,
-      worktreeIntent: null,
-    });
+    const submitted = await call(
+      started.rpcUrl,
+      "agent.tui.promptSubmitted",
+      {
+        major: 1,
+        minor: 1,
+      },
+      {
+        epicId: "epic-1",
+        tuiAgentId: "tui-1",
+        harnessSessionId: null,
+        harnessId: "claude",
+        observedHarnessSessionId: null,
+        worktreeIntent: null,
+      },
+    );
     expect(submitted).toEqual({ accepted: true, pendingPromptContext: null });
   });
 });
@@ -249,10 +349,15 @@ async function boot(): Promise<Booted> {
     listenHost: "127.0.0.1",
     listenPort: 0,
   });
-  await call(started.rpcUrl, "providers.addCustomPath", { major: 2, minor: 1 }, {
-    providerId: "claude-code",
-    path: claudePath,
-  });
+  await call(
+    started.rpcUrl,
+    "providers.addCustomPath",
+    { major: 2, minor: 1 },
+    {
+      providerId: "claude-code",
+      path: claudePath,
+    },
+  );
   return { tempDir, started, claudePath };
 }
 
@@ -261,32 +366,37 @@ async function seedEpic(started: StartedHost, tempDir: string): Promise<void> {
   await mkdir(workspace);
   await writeFile(join(workspace, "README.md"), "hello\n");
   const canonical = await realpath(workspace);
-  await call(started.rpcUrl, "epic.create", { major: 1, minor: 0 }, {
-    epic: {
-      id: "epic-1",
-      title: "GUI path",
-      initialUserPrompt: "go",
-      ticketCount: 0,
-      specCount: 0,
-      storyCount: 0,
-      reviewCount: 0,
-      status: "active",
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      createdBy: "local",
-      version: "2.0.0",
+  await call(
+    started.rpcUrl,
+    "epic.create",
+    { major: 1, minor: 0 },
+    {
+      epic: {
+        id: "epic-1",
+        title: "GUI path",
+        initialUserPrompt: "go",
+        ticketCount: 0,
+        specCount: 0,
+        storyCount: 0,
+        reviewCount: 0,
+        status: "active",
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        createdBy: "local",
+        version: "2.0.0",
+      },
+      repoIdentifiers: [],
+      workspaces: [{ workspacePath: canonical }],
+      chat: {
+        chatId: "chat-1",
+        parentId: null,
+        hostId: started.runtime.hostId,
+        title: "Root",
+        worktreeIntent: null,
+        initialMessage: null,
+      },
     },
-    repoIdentifiers: [],
-    workspaces: [{ workspacePath: canonical }],
-    chat: {
-      chatId: "chat-1",
-      parentId: null,
-      hostId: started.runtime.hostId,
-      title: "Root",
-      worktreeIntent: null,
-      initialMessage: null,
-    },
-  });
+  );
 }
 
 async function writeFakeCli(path: string): Promise<string> {

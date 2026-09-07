@@ -32,6 +32,18 @@ describe("guiPrintArgv", () => {
     ).toEqual(["app-server", "--listen", "stdio://"]);
   });
 
+  it("runs a /plan turn in the CLI's plan mode", () => {
+    expect(guiPrintArgv("claude", "x", null, "plan", null, null)).toContain(
+      "plan",
+    );
+    expect(
+      guiPrintArgv("claude", "x", null, "plan", null, null).join(" "),
+    ).toContain("--permission-mode plan");
+    expect(
+      guiPrintArgv("claude", "x", null, "supervised", null, null).join(" "),
+    ).toContain("--permission-mode default");
+  });
+
   it("skips Claude permission prompts in full_access", () => {
     // The edit hooks ride in as settings, ahead of the model. No prompt in
     // argv: it goes down stdin as a user record, on the same pipe the
