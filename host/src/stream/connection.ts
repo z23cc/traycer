@@ -24,6 +24,8 @@ import { handleChatClientFrame } from "./chat-actions";
 import { sendChatSnapshot } from "./chat";
 import { attachGitStatusStream } from "./git-status";
 import { ArtifactDocLane } from "./artifact-doc";
+import { serveAsset } from "./asset";
+import { AssetStreamSession } from "../workspace/asset-stream";
 import { EpicStateSubscriber } from "./epic-state";
 import {
   sendAgentActivitySnapshot,
@@ -64,6 +66,7 @@ export function attachStreamConnection(
   let fileListStream: WorkspaceFileListSession | null = null;
   let epicState: EpicStateSubscriber | null = null;
   let artifactDoc: ArtifactDocLane | null = null;
+  let assetStream: AssetStreamSession | null = null;
   let pendingBinary: PendingBinary | null = null;
   const hostManifest = hostStreamManifest();
 
@@ -479,6 +482,23 @@ export function attachStreamConnection(
       });
       return;
     }
+    if (
+      subscribe.data.method === "workspace.streamAsset" ||
+      subscribe.data.method === "git.streamFileAsset"
+    ) {
+      // The negotiated minor decides whether PDF is a type this peer can
+      // parse, so it travels with the session rather than being re-derived.
+      assetStream = new AssetStreamSession(
+        socket,
+        subscribe.data.schemaVersion.minor,
+      );
+      void serveAsset(
+        assetStream,
+        subscribe.data.method,
+        subscribe.data.params,
+      );
+      return;
+    }
     if (UNSERVED_STREAM_METHOD_NAMES.includes(subscribe.data.method)) {
       reject(
         {
@@ -529,6 +549,10 @@ export function attachStreamConnection(
       return;
     }
     if (parsed.kind === "ping") {
+      if (assetStream !== null) {
+        assetStream.pong();
+        return;
+      }
       if (artifactDoc !== null) {
         artifactDoc.pong();
         return;

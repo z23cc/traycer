@@ -40,7 +40,6 @@ export const UNSERVED_STREAM_METHOD_NAMES: readonly string[] = [
   "browser.screencast",
   "host.communicationGraph.subscribe",
   "host.notifications.cloudFeed.subscribe",
-  "git.streamFileAsset",
   "managedCommand.subscribeOutput",
   "migration.run",
   "pr.subscribeDetail",
@@ -48,7 +47,6 @@ export const UNSERVED_STREAM_METHOD_NAMES: readonly string[] = [
   "sessionImport.run",
   "sessionImport.scan",
   "speech.dictate",
-  "workspace.streamAsset",
   "worktree.deleteBatchByPath",
   "worktree.deleteByPath",
 ];
