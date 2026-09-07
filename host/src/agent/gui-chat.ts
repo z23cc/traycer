@@ -2469,7 +2469,8 @@ function captureTurnCheckpoint(
       checkpointId: input.turnId,
       capturingUserId: chatOwnerUserId(chat),
       capturingHostId: runtime.hostId,
-      allowedRoots: [cwd],
+      // The workspace and the artifacts: what a revert may write back to.
+      allowedRoots: [cwd, epicArtifactsRoot(runtime, input.epicId)],
       workingDirectory: cwd,
       capturedAt: Date.now(),
       entries: [...entries],

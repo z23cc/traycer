@@ -1312,7 +1312,10 @@ describe("local GUI send without cloud login", () => {
       metadata: {
         schemaVersion: 1,
         capturingHostId: started.runtime.hostId,
-        allowedRoots: [setup.workspace],
+        allowedRoots: [
+          setup.workspace,
+          join(tempDir, "epics", "epic-12", "artifacts"),
+        ],
         entries: [
           {
             filePath: target,
@@ -3178,6 +3181,10 @@ describe("local GUI send without cloud login", () => {
     ).find((e) => Reflect.get(e ?? {}, "type") === "checkpoint.captured");
     expect(captured).toMatchObject({
       metadata: {
+        allowedRoots: [
+          setup.workspace,
+          join(tempDir, "epics", "epic-36", "artifacts"),
+        ],
         entries: [
           {
             filePath: target,
@@ -3190,6 +3197,26 @@ describe("local GUI send without cloud login", () => {
         ],
       },
     });
+    // And the artifact root is a place a revert may write back to.
+    const reverted = await sendActionUntil(
+      streamUrl,
+      {
+        kind: "revertFileChanges",
+        epicId: "epic-36",
+        chatId: "chat-36",
+        clientActionId: "revert-36",
+        fromMessageId: null,
+        filePaths: null,
+        revertArtifacts: true,
+      },
+      "restoreCompleted",
+    );
+    expect(
+      reverted.find((f) => Reflect.get(f ?? {}, "kind") === "restoreCompleted"),
+    ).toMatchObject({
+      results: [{ filePath: target, status: "restored", operation: "edit" }],
+    });
+    expect(await readFile(target, "utf8")).toBe("# Overview\na\n");
   });
 
   /**
