@@ -13,8 +13,13 @@ import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-flo
 import {
   hostNotificationsConfigResponseSchema,
   hostNotificationsListResponseSchemaV22,
+  hostNotificationsSubscribeServerFrameSchemaV10,
 } from "@traycer/protocol/host/notifications/host-notifications";
-import { notify } from "../gui/notifications";
+import {
+  filteredSnapshotFrame,
+  notify,
+  type NotifyInput,
+} from "../gui/notifications";
 import {
   handleNotificationHooksSave,
   handleNotificationHooksStatus,
@@ -35,6 +40,42 @@ describe("host.notifications", () => {
       await rm(tempDir, { recursive: true, force: true });
       tempDir = null;
     }
+  });
+
+  it("serves the filtered lead frame from the same table the feed reads", async () => {
+    const booted = await boot();
+    started = booted.started;
+    tempDir = booted.tempDir;
+    const host = booted.started;
+    await notify(host.runtime, row("n-old", "agent.stopped"));
+    await notify(host.runtime, row("n-new", "agent.stalled"));
+    await host.runtime.store.mutate((state) => {
+      const read = state.notifications.find((entry) => entry.id === "n-old");
+      if (read !== undefined) read.readAt = Date.now();
+    });
+
+    const all = hostNotificationsSubscribeServerFrameSchemaV10.parse(
+      filteredSnapshotFrame(host.runtime, "all", 50),
+    );
+    // Newest first, so a limit keeps the newest rather than the oldest.
+    expect(all).toMatchObject({ kind: "snapshot", hasBinaryPayload: false });
+    expect(all.kind === "snapshot" ? all.entries.map((e) => e.id) : []).toEqual(
+      ["n-new", "n-old"],
+    );
+
+    const unread = hostNotificationsSubscribeServerFrameSchemaV10.parse(
+      filteredSnapshotFrame(host.runtime, "unread", 50),
+    );
+    expect(
+      unread.kind === "snapshot" ? unread.entries.map((e) => e.id) : [],
+    ).toEqual(["n-new"]);
+
+    const capped = hostNotificationsSubscribeServerFrameSchemaV10.parse(
+      filteredSnapshotFrame(host.runtime, "all", 1),
+    );
+    expect(
+      capped.kind === "snapshot" ? capped.entries.map((e) => e.id) : [],
+    ).toEqual(["n-new"]);
   });
 
   it("lists, marks read, and clears rows the host itself recorded", async () => {
@@ -243,6 +284,19 @@ function readEntryIds(result: unknown): readonly string[] {
   return hostNotificationsListResponseSchemaV22
     .parse(result)
     .entries.map((entry) => entry.id);
+}
+
+function row(id: string, kind: "agent.stopped" | "agent.stalled"): NotifyInput {
+  return {
+    id,
+    kind,
+    epicId: "epic-1",
+    chatId: "chat-1",
+    severity: "info",
+    outcome: null,
+    sourceRef: null,
+    message: id,
+  };
 }
 
 async function boot(): Promise<{

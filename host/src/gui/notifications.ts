@@ -111,6 +111,32 @@ export function attentionRows(
   ];
 }
 
+/**
+ * `host.notifications.subscribe@1.0` - the older, filtered view of the SAME
+ * table `host.notifications.feed.subscribe` serves.
+ *
+ * Only the lead frame differs: this line asks for one flat, filtered, limited
+ * list where the feed splits attention from recent. Every live frame after it -
+ * `upserted`, `readStateChanged`, `cleared` - is a kind both unions declare, so
+ * both dialects read the same broadcast and there is no second push path to
+ * drift.
+ */
+export function filteredSnapshotFrame(
+  runtime: HostRuntime,
+  filter: "all" | "unread",
+  initialLimit: number,
+): unknown {
+  const rows = notificationRows(runtime).filter(
+    (row) => filter === "all" || row.readAt === null,
+  );
+  return {
+    kind: "snapshot",
+    hasBinaryPayload: false,
+    // `notificationRows` is newest-first, so the limit keeps the newest.
+    entries: rows.slice(0, initialLimit).map(entryOf),
+  };
+}
+
 export function summaryOf(runtime: HostRuntime): HostNotificationsSummary {
   const rows = notificationRows(runtime);
   return {

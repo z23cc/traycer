@@ -9,6 +9,7 @@ import {
   clientStreamSubscribeFrameSchema,
 } from "@traycer/protocol/framework/stream-ws-protocol";
 import { hostStreamRpcRegistry } from "@traycer/protocol/host/registry";
+import { hostNotificationsSubscribeOpenRequestSchemaV10 } from "@traycer/protocol/host/notifications/host-notifications";
 import { authenticateOpenToken } from "../auth";
 import { epochRejectionReason, evaluateClientEpoch } from "../epoch-gate";
 import {
@@ -17,7 +18,7 @@ import {
   UNSERVED_STREAM_METHOD_NAMES,
 } from "../manifest";
 import type { HostRuntime } from "../runtime";
-import { snapshotFrame } from "../gui/notifications";
+import { filteredSnapshotFrame, snapshotFrame } from "../gui/notifications";
 import { listState } from "../rpc/handlers/plain-terminal-handlers";
 import { handleChatClientFrame } from "./chat-actions";
 import { sendChatSnapshot } from "./chat";
@@ -315,6 +316,27 @@ export function attachStreamConnection(
         hasBinaryPayload: false,
         state: listState(runtime, scope),
       });
+      return;
+    }
+    if (subscribe.data.method === "host.notifications.subscribe") {
+      const opened = hostNotificationsSubscribeOpenRequestSchemaV10.safeParse(
+        subscribe.data.params,
+      );
+      if (!opened.success) {
+        reject(
+          unauthorized(`host.notifications.subscribe: ${opened.error.message}`),
+          "malformed-notifications-open",
+        );
+        return;
+      }
+      runtime.notifications.add(socket);
+      sendJson(
+        filteredSnapshotFrame(
+          runtime,
+          opened.data.filter,
+          opened.data.initialLimit,
+        ),
+      );
       return;
     }
     if (subscribe.data.method === "host.notifications.feed.subscribe") {
