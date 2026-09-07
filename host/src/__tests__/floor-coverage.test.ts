@@ -14,6 +14,10 @@ import {
 } from "@traycer/protocol/framework/index";
 import { hostRpcRegistry } from "@traycer/protocol/host/registry";
 import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-floor";
+import {
+  hostUnaryManifests,
+  UNADVERTISED_UNARY_METHOD_NAMES,
+} from "../manifest";
 import { implementedRpcMethods } from "../rpc/handlers";
 import { startHost, type StartedHost } from "../start-host";
 
@@ -32,6 +36,36 @@ describe("released-floor method table", () => {
       await rm(tempDir, { recursive: true, force: true });
       tempDir = null;
     }
+  });
+
+  /**
+   * The withdrawn optional mutations, checked from three sides at once: on the
+   * floor would break the handshake, missing from the registry is a typo, and
+   * missing a handler would mean a client that asks anyway gets an invention
+   * rather than a refusal.
+   */
+  it("withdraws only non-floor mutations it still answers", () => {
+    const floor = new Set(RELEASED_FLOOR_METHOD_NAMES);
+    const implemented = new Set(implementedRpcMethods());
+    const manifests = hostUnaryManifests();
+    for (const method of UNADVERTISED_UNARY_METHOD_NAMES) {
+      expect(floor.has(method), method).toBe(false);
+      expect(Object.keys(hostRpcRegistry), method).toContain(method);
+      expect(implemented.has(method), method).toBe(true);
+      expect(manifests.manifest[method], method).toBeUndefined();
+      expect(manifests.optionalManifest[method], method).toBeUndefined();
+    }
+    // The floor is handed over whole - it is the half the handshake's
+    // compatibility check runs against.
+    for (const method of RELEASED_FLOOR_METHOD_NAMES) {
+      expect(manifests.manifest[method], method).toBeDefined();
+    }
+    // A read with a true answer stays advertised. Withdrawing this one turns
+    // the fork dialog's gate permissive, which starts a cross-host fork that
+    // cannot work instead of refusing it with a reason.
+    expect(
+      manifests.optionalManifest["epic.chatPublicationState"],
+    ).toBeDefined();
   });
 
   it("registers every floor method and never returns the generic stub", async () => {
@@ -69,10 +103,7 @@ describe("released-floor method table", () => {
         rows.push(`${method}\terror\t${code}\t${compact}`);
         continue;
       }
-      const latest = getLatestContract(
-        methodRegistry(method),
-        undefined,
-      );
+      const latest = getLatestContract(methodRegistry(method), undefined);
       if (isRpcContract(latest)) {
         const parsed = latest.responseSchema.safeParse(frame.result);
         expect(parsed.success).toBe(true);
