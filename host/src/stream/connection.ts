@@ -26,6 +26,7 @@ import { attachGitStatusStream } from "./git-status";
 import { ArtifactDocLane } from "./artifact-doc";
 import { serveAsset } from "./asset";
 import { AssetStreamSession } from "../workspace/asset-stream";
+import { ResourcesSubscriber, readScope } from "./resources";
 import { EpicStateSubscriber } from "./epic-state";
 import {
   sendAgentActivitySnapshot,
@@ -67,6 +68,7 @@ export function attachStreamConnection(
   let epicState: EpicStateSubscriber | null = null;
   let artifactDoc: ArtifactDocLane | null = null;
   let assetStream: AssetStreamSession | null = null;
+  let resources: ResourcesSubscriber | null = null;
   let pendingBinary: PendingBinary | null = null;
   const hostManifest = hostStreamManifest();
 
@@ -84,6 +86,7 @@ export function attachStreamConnection(
     runtime.graphs.remove(socket);
     runtime.epicState.remove(socket);
     runtime.artifactDocs.remove(socket);
+    resources?.stop();
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
@@ -101,6 +104,7 @@ export function attachStreamConnection(
     runtime.graphs.remove(socket);
     runtime.epicState.remove(socket);
     runtime.artifactDocs.remove(socket);
+    resources?.stop();
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
@@ -499,6 +503,27 @@ export function attachStreamConnection(
       );
       return;
     }
+    if (subscribe.data.method === "resources.subscribe") {
+      const scope = readScope(
+        subscribe.data.params,
+        subscribe.data.schemaVersion.minor,
+      );
+      if (scope === null) {
+        reject(
+          unauthorized("resources.subscribe requires an epicId or a scope"),
+          "missing-scope",
+        );
+        return;
+      }
+      resources = new ResourcesSubscriber(
+        socket,
+        runtime,
+        scope,
+        subscribe.data.schemaVersion.minor,
+      );
+      resources.start();
+      return;
+    }
     if (UNSERVED_STREAM_METHOD_NAMES.includes(subscribe.data.method)) {
       reject(
         {
@@ -546,6 +571,9 @@ export function attachStreamConnection(
       return;
     }
     if (parsed === null || typeof parsed !== "object" || !("kind" in parsed)) {
+      return;
+    }
+    if (resources !== null && resources.handleFrame(parsed)) {
       return;
     }
     if (parsed.kind === "ping") {

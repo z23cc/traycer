@@ -49,6 +49,16 @@ export class GuiRunRegistry {
     this.stopped.delete(agentId);
   }
 
+  /** The live child of one GUI chat turn, for resource attribution. */
+  pidOf(agentId: string): number | null {
+    return this.runs.get(agentId)?.pid ?? null;
+  }
+
+  /** Agents with a running child right now. */
+  runningAgentIds(): readonly string[] {
+    return [...this.runs.keys()];
+  }
+
   track(work: Promise<void>): void {
     const wrapped = work.then(
       () => undefined,
