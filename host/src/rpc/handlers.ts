@@ -1,3 +1,10 @@
+import {
+  handleHostServiceDeregister,
+  handleHostServiceRegister,
+  handleHostServiceStatus,
+  handleHostUpdateCheck,
+  handleHostUpdateInstall,
+} from "./handlers/maintenance-handlers";
 import type { RpcHandler } from "./handlers/types";
 export type { RpcHandler, RpcHandlerResult } from "./handlers/types";
 import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-floor";
@@ -102,9 +109,6 @@ import {
 import {
   handleEditorOpenPaths,
   handleHostRestart,
-  handleHostServiceDeregister,
-  handleHostServiceRegister,
-  handleHostUpdateInstall,
   handleHostStatus,
   handleRateLimitUsage,
   handleRuntimeCapabilities,
@@ -227,8 +231,6 @@ import {
   handleHostGetInstallationInfo,
   handleHostIdentityGet,
   handleHostIdentitySet,
-  handleHostServiceStatus,
-  handleHostUpdateCheck,
   handleHostUsageSummary,
   handlePhaseMigrateToEpic,
 } from "./handlers/analog-handlers";

@@ -682,7 +682,7 @@ describe("7 optional analog unaries (@traycer/protocol conformance)", () => {
       expect(resIncludePre).toEqual({ outcome: "cli-unavailable" });
     });
 
-    it("host.service.status@1.0 returns externally-managed outcome", async () => {
+    it("host.service.status@1.0 reports no CLI to ask", async () => {
       const setup = await boot();
       tempDir = setup.tempDir;
       started = setup.started;
@@ -693,7 +693,8 @@ describe("7 optional analog unaries (@traycer/protocol conformance)", () => {
         { major: 1, minor: 0 },
         {},
       );
-      expect(res).toEqual({ outcome: "externally-managed" });
+      // A test host recorded no CLI invocation: nothing can be asked, as released.
+      expect(res).toEqual({ outcome: "cli-unavailable" });
     });
 
     it("host.getInstallationInfo@1.1 returns unmanaged when install/install.json is absent or corrupt", async () => {

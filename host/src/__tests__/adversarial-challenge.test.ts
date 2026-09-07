@@ -742,7 +742,7 @@ describe("Adversarial Stress Suite: Host Unaries & Fault Tolerance", () => {
       expect(resBad.error).toMatchObject({ code: "RPC_ERROR" });
     });
 
-    it("host.service.status@1.0 returns externally-managed adhering to schema", async () => {
+    it("host.service.status@1.0 reports no CLI to ask, adhering to schema", async () => {
       const setup = await boot();
       tempDir = setup.tempDir;
       started = setup.started;
@@ -754,7 +754,8 @@ describe("Adversarial Stress Suite: Host Unaries & Fault Tolerance", () => {
         {},
       );
       expect(res.ok).toBe(true);
-      expect(res.result).toEqual({ outcome: "externally-managed" });
+      // A test host recorded no CLI invocation: nothing can be asked, as released.
+      expect(res.result).toEqual({ outcome: "cli-unavailable" });
       expect(
         hostServiceStatusResponseSchema.safeParse(res.result).success,
       ).toBe(true);

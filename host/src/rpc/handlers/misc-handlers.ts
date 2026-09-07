@@ -316,11 +316,3 @@ export const handleSpeechModelStatus: RpcHandler = (params) => {
  * under way when nothing is happening, and on this machine it would also
  * invite a second supervisor over a host home that already has one.
  */
-const EXTERNALLY_MANAGED: RpcHandler = () => ({
-  ok: true,
-  result: { outcome: "externally-managed" },
-});
-
-export const handleHostUpdateInstall = EXTERNALLY_MANAGED;
-export const handleHostServiceRegister = EXTERNALLY_MANAGED;
-export const handleHostServiceDeregister = EXTERNALLY_MANAGED;

@@ -21,14 +21,11 @@ import {
   hostIdentitySetRequestSchema,
   type HostIdentity,
 } from "@traycer/protocol/host/identity/schemas";
-import {
-  hostGetInstallationInfoRequestSchema,
-  hostServiceStatusRequestSchema,
-  hostUpdateCheckRequestSchemaV11,
-} from "@traycer/protocol/host/maintenance/schemas";
+import { hostGetInstallationInfoRequestSchema } from "@traycer/protocol/host/maintenance/schemas";
 import { hostInstallRecordSchema } from "@traycer/protocol/config/installation-records";
 import { summarizeUsage } from "../../gui/usage";
 import { earlyMetaForEpic } from "../../stream/epic-hub";
+import { readCliManifest, readStagedRecord } from "./maintenance-handlers";
 import type { RpcHandler } from "./types";
 
 export const handlePhaseMigrateToEpic: RpcHandler = async (params, runtime) => {
@@ -347,14 +344,6 @@ export const handleHostIdentitySet: RpcHandler = async (params, runtime) => {
   return { ok: true, result: identity };
 };
 
-export const handleHostUpdateCheck: RpcHandler = (params) => {
-  const parsed = hostUpdateCheckRequestSchemaV11.safeParse(params);
-  if (!parsed.success) {
-    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
-  }
-  return { ok: true, result: { outcome: "cli-unavailable" } };
-};
-
 export const handleHostGetInstallationInfo: RpcHandler = async (
   params,
   runtime,
@@ -369,13 +358,19 @@ export const handleHostGetInstallationInfo: RpcHandler = async (
     const parsedJson: unknown = JSON.parse(raw);
     const validated = hostInstallRecordSchema.safeParse(parsedJson);
     if (validated.success) {
+      // Beside the install: the staged host waiting to be swapped in, and
+      // the manifest of the CLI that runs this one - both as released.
+      const [stagedRecord, cliManifest] = await Promise.all([
+        readStagedRecord(runtime.dataDir),
+        readCliManifest(runtime.dataDir),
+      ]);
       return {
         ok: true,
         result: {
           status: "managed",
           installRecord: validated.data,
-          stagedRecord: null,
-          cliManifest: null,
+          stagedRecord,
+          cliManifest,
         },
       };
     }
@@ -386,12 +381,4 @@ export const handleHostGetInstallationInfo: RpcHandler = async (
     ok: true,
     result: { status: "unmanaged" },
   };
-};
-
-export const handleHostServiceStatus: RpcHandler = (params) => {
-  const parsed = hostServiceStatusRequestSchema.safeParse(params);
-  if (!parsed.success) {
-    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
-  }
-  return { ok: true, result: { outcome: "externally-managed" } };
 };
