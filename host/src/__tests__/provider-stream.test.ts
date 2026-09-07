@@ -288,6 +288,39 @@ describe("parseProviderStdoutLine", () => {
     });
   });
 
+  /** Recorded live around a `run_in_background` Bash: the running set, and the task's own record. */
+  it("reads background commands off the task set and the backgrounded task", () => {
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bfefnbmdb","task_type":"local_bash","description":"Background sleep and echo command"}],"uuid":"62065bde-0c79-4b26-91bd-8b3317671136","session_id":"f22dad8b-6e00-4a97-8ca2-15c63398142b"}',
+      ),
+    ).toContainEqual({
+      kind: "background_tasks",
+      tasks: [
+        {
+          taskId: "bfefnbmdb",
+          taskType: "local_bash",
+          description: "Background sleep and echo command",
+        },
+      ],
+    });
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"system","subtype":"task_started","task_id":"bfefnbmdb","tool_use_id":"toolu_01FUeNDTMSXLEdrX2QaL7dNC","description":"Background sleep and echo command","is_backgrounded":true,"task_type":"local_bash","uuid":"25b2fe22-01f8-437d-82ed-776a15608555","session_id":"f22dad8b-6e00-4a97-8ca2-15c63398142b"}',
+      ),
+    ).toContainEqual({
+      kind: "background_started",
+      taskId: "bfefnbmdb",
+      toolUseId: "toolu_01FUeNDTMSXLEdrX2QaL7dNC",
+      description: "Background sleep and echo command",
+    });
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"system","subtype":"background_tasks_changed","tasks":[],"uuid":"ce0f7087-dabf-4ec4-9672-87858b985360","session_id":"f22dad8b-6e00-4a97-8ca2-15c63398142b"}',
+      ),
+    ).toContainEqual({ kind: "background_tasks", tasks: [] });
+  });
+
   /** Recorded live around `Bash: sleep 3` - a task record, but no agent. */
   it("does not read a Bash call's task record as a subagent", () => {
     expect(

@@ -182,6 +182,11 @@ export function beginGuiPrintTurn(
     readonly prompt: string;
     readonly responseId: string | null;
     readonly model: string | null;
+    /**
+     * A turn the provider began on its own in a kept process - Claude
+     * reporting a background command done. No user message, nothing sent.
+     */
+    readonly autonomous: boolean;
   },
 ): void {
   const chat = runtime.store
@@ -198,12 +203,14 @@ export function beginGuiPrintTurn(
   const assistantMessageId = randomUUID();
   const turnId = `turn:${randomUUID()}`;
   const resumed =
+    input.autonomous ||
     matchingProviderSession(chat?.providerSession ?? null, input.harnessId) !==
-    null;
+      null;
   runtime.guiRuns.beginPrint(input.chatId, {
     harnessId: input.harnessId,
     model: input.model ?? readModelSlug(chat?.runSettings) ?? "default",
-    userMessageId: lastUser === null ? null : lastUser.messageId,
+    userMessageId:
+      lastUser === null || input.autonomous ? null : lastUser.messageId,
     assistantMessageId,
     turnId,
     resumed,
@@ -214,7 +221,8 @@ export function beginGuiPrintTurn(
     type: "turn.started",
     message: "Turn started.",
     turnId,
-    messageId: lastUser === null ? null : lastUser.messageId,
+    messageId:
+      lastUser === null || input.autonomous ? null : lastUser.messageId,
     clientActionId: null,
     severity: "info",
   });
@@ -536,6 +544,7 @@ async function runAndPersistAssistant(
     readonly model: string | null;
     readonly assistantMessageId: string;
     readonly turnId: string;
+    readonly autonomous: boolean;
   },
 ): Promise<void> {
   const cwd = guiWorkingDirectory(runtime, input.epicId);
@@ -550,8 +559,11 @@ async function runAndPersistAssistant(
   // the command are the prompt, as the released host reads them.
   const planPrompt = planInvocation(input.prompt);
   const bare = planPrompt ?? input.prompt;
-  const prompt =
-    session === null ? printPromptFromTurns(chat?.turns ?? [], bare) : bare;
+  const prompt = input.autonomous
+    ? ""
+    : session === null
+      ? printPromptFromTurns(chat?.turns ?? [], bare)
+      : bare;
   const permissionMode = readPermissionMode(chat?.runSettings);
   let providerSessionId: string | null = session;
   const textBlockId = assistantTextBlockId(input.assistantMessageId);
@@ -696,6 +708,12 @@ async function runAndPersistAssistant(
   const print = runtime.guiRuns.printState(input.chatId);
   const handleEvent = (event: ProviderStreamEvent): void => {
     const now = Date.now();
+    if (event.kind === "background_tasks") {
+      // The registry already holds the new set; the panel reads it off the
+      // turn state.
+      broadcastTurnStateChanged(runtime, input.epicId, input.chatId);
+      return;
+    }
     if (event.kind === "session") {
       if (nestUnder !== null) {
         return;
@@ -1113,6 +1131,7 @@ async function runAndPersistAssistant(
       // otherwise - the chat's own mode is decided here, per question.
       permissionMode: planPrompt === null ? permissionMode : "plan",
       sessionId: session,
+      autonomous: input.autonomous,
       onEvent: handleEvent,
     });
     if (sawReasoning) {
@@ -2563,6 +2582,31 @@ async function finishPrint(
   // Read before `endPrint`, which is what a next turn resets.
   const blocks = runtime.guiRuns.blocksOf(chatId);
   runtime.guiRuns.endPrint(chatId, assistantMessageId);
+  if (print !== null && runtime.guiRuns.isDetached(chatId)) {
+    // The process outlives this turn for its background commands. Its
+    // running set is the panel's, and a turn it opens on its own - to report
+    // one of them done - becomes a turn of this chat, with no user message.
+    const harnessId = print.harnessId;
+    runtime.guiRuns.setDetachedHooks(chatId, {
+      onItemsChanged: () => {
+        broadcastTurnStateChanged(runtime, epicId, chatId);
+      },
+      onAutonomousTurn: () => {
+        if (runtime.guiRuns.printState(chatId) !== null) {
+          return;
+        }
+        beginGuiPrintTurn(runtime, {
+          epicId,
+          chatId,
+          harnessId,
+          prompt: "",
+          responseId: null,
+          model: null,
+          autonomous: true,
+        });
+      },
+    });
+  }
   // Live `text.completed` uses `now`. Equal stamps keep live when snapshot
   // blocks differ, so the persisted turn must be strictly newer.
   await sealAssistantTurn(runtime, chatId, assistantMessageId, now + 1, blocks);
@@ -2641,6 +2685,7 @@ async function startQueuedPrompt(
     prompt: item.prompt,
     responseId: turn.responseId,
     model: item.model,
+    autonomous: false,
   });
   runtime.queue.cancel(chatId, item.queueItemId);
   broadcastQueueChanged(runtime, epicId, chatId);

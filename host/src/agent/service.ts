@@ -190,6 +190,7 @@ export async function sendLocalAgentMessage(
     model: null,
     permissionMode: "full_access",
     sessionId: null,
+    autonomous: false,
     onEvent: () => {
       return;
     },

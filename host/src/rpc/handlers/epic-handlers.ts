@@ -925,6 +925,7 @@ async function startFoldedTurn(
     prompt,
     responseId: turn.responseId,
     model: readModelSlug(initialMessage.settings),
+    autonomous: false,
   });
   return true;
 }

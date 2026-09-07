@@ -1,7 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { accumulateEvent } from "@traycer/protocol/host/agent/gui/agent-runtime-accumulator";
 import type { RuntimeEvent } from "@traycer/protocol/host/agent/gui/agent-runtime";
 import type { ContentBlock } from "@traycer/protocol/persistence/epic/content-blocks";
+import type { CommandBackgroundItem } from "@traycer/protocol/host/agent/gui/subscribe";
 import { providerCliIdentity, spawnEnvForProvider } from "../providers/service";
 import { snapshotHookSettings } from "../snapshots/snapshots";
 import type { HostRuntime } from "../runtime";
@@ -124,6 +126,36 @@ function requestUserInputQuestions(
   });
 }
 
+/**
+ * The process behind a run, with the seams a turn plugs into: its stdout
+ * goes to whatever `sink` is set, and its end to whatever `onClose` is. A
+ * turn sets both for its duration; a process kept after its turn (see
+ * `detach`) gets the registry's own.
+ */
+type Carrier = {
+  readonly child: ChildProcess;
+  sink: (chunk: string) => void;
+  onClose: (code: number | null) => void;
+  onError: (error: Error) => void;
+  stderr: string;
+};
+
+/** What the registry does with a kept process's output between turns. */
+export type DetachedHooks = {
+  readonly onItemsChanged: () => void;
+  /** The process began a turn of its own - Claude reporting a finished background command. */
+  readonly onAutonomousTurn: () => void;
+};
+
+type DetachedRun = {
+  readonly carrier: Carrier;
+  readonly sessionId: string | null;
+  /** Lines of the turn the process started on its own, for the turn that will own them. */
+  readonly buffered: string[];
+  lineBuffer: string;
+  hooks: DetachedHooks | null;
+};
+
 export class GuiRunRegistry {
   private readonly runs = new Map<string, ChildProcess>();
   /** How each run's permission answers are written: Claude's control frames or Codex's JSON-RPC results. */
@@ -150,6 +182,27 @@ export class GuiRunRegistry {
   private readonly stopped = new Set<string>();
   private readonly inflight = new Set<Promise<void>>();
   private disposing = false;
+  private readonly carriers = new Map<string, Carrier>();
+  /**
+   * Processes kept after their turn. Recorded live: a Claude turn whose Bash
+   * ran with `run_in_background` ends on its `result` while the command
+   * runs on, and the CLI - stdin still open - later opens a turn of its own
+   * to report the command done. Ending stdin at the `result` would have
+   * ended the command with it.
+   */
+  private readonly detached = new Map<string, DetachedRun>();
+  private readonly backgroundItems = new Map<string, CommandBackgroundItem[]>();
+  /** The last running set the CLI reported, rebuilt into items when a tool id arrives. */
+  private readonly backgroundTasks = new Map<
+    string,
+    readonly {
+      readonly taskId: string;
+      readonly taskType: string;
+      readonly description: string;
+    }[]
+  >();
+  /** Each background task's tool call, which is the row its panel entry points at. */
+  private readonly backgroundTools = new Map<string, Map<string, string>>();
 
   beginPrint(agentId: string, state: GuiPrintTurnState): void {
     this.stopped.delete(agentId);
@@ -324,6 +377,204 @@ export class GuiRunRegistry {
     this.steerers.delete(agentId);
   }
 
+  setCarrier(agentId: string, carrier: Carrier): void {
+    this.carriers.set(agentId, carrier);
+  }
+
+  /**
+   * Keep this run's process after its turn: the registry takes its output,
+   * watches the background set, and holds the start of any turn the process
+   * opens on its own until a turn is begun to own it.
+   */
+  detach(agentId: string, sessionId: string | null): void {
+    const carrier = this.carriers.get(agentId);
+    if (carrier === undefined) {
+      return;
+    }
+    const run: DetachedRun = {
+      carrier,
+      sessionId,
+      buffered: [],
+      lineBuffer: "",
+      hooks: null,
+    };
+    this.detached.set(agentId, run);
+    carrier.sink = (chunk) => {
+      this.consumeDetached(agentId, run, chunk);
+    };
+    carrier.onError = () => undefined;
+    carrier.onClose = () => {
+      if (this.detached.get(agentId) === run) {
+        this.detached.delete(agentId);
+        this.carriers.delete(agentId);
+        this.runs.delete(agentId);
+        this.clearBackground(agentId);
+        run.hooks?.onItemsChanged();
+      }
+    };
+  }
+
+  /**
+   * The kept process a new turn can continue in, taken out of keeping. Null
+   * when there is none, or when it belongs to another session - a spawn is
+   * then what replaces it.
+   */
+  attach(
+    agentId: string,
+    sessionId: string | null,
+    autonomous: boolean,
+  ): DetachedRun | null {
+    const run = this.detached.get(agentId);
+    if (run === undefined) {
+      return null;
+    }
+    if (!autonomous && run.sessionId !== null && run.sessionId !== sessionId) {
+      return null;
+    }
+    this.detached.delete(agentId);
+    run.hooks = null;
+    return run;
+  }
+
+  isDetached(agentId: string): boolean {
+    return this.detached.has(agentId);
+  }
+
+  setDetachedHooks(agentId: string, hooks: DetachedHooks): void {
+    const run = this.detached.get(agentId);
+    if (run === undefined) {
+      return;
+    }
+    run.hooks = hooks;
+    // Activity that arrived before anyone was listening is still activity.
+    if (run.buffered.length > 0) {
+      queueMicrotask(() => {
+        run.hooks?.onAutonomousTurn();
+      });
+    }
+  }
+
+  private consumeDetached(
+    agentId: string,
+    run: DetachedRun,
+    chunk: string,
+  ): void {
+    run.lineBuffer += chunk;
+    const lines = run.lineBuffer.split("\n");
+    run.lineBuffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (line.trim().length === 0) {
+        continue;
+      }
+      // Once the process has begun a turn, every line is that turn's.
+      if (run.buffered.length > 0) {
+        run.buffered.push(line);
+        continue;
+      }
+      const events = parseProviderStdoutLine(line);
+      let content = false;
+      for (const event of events) {
+        if (event.kind === "background_started") {
+          this.noteBackgroundTool(agentId, event.taskId, event.toolUseId);
+        } else if (event.kind === "background_tasks") {
+          this.applyBackgroundTasks(agentId, event.tasks);
+          run.hooks?.onItemsChanged();
+        } else if (!isBookkeeping(event)) {
+          content = true;
+        }
+      }
+      if (content) {
+        run.buffered.push(line);
+        // After this chunk's remaining lines are buffered: the turn that
+        // answers takes the buffer at once, and would miss what this loop
+        // had not yet pushed.
+        queueMicrotask(() => {
+          run.hooks?.onAutonomousTurn();
+        });
+      }
+    }
+  }
+
+  backgroundItemsOf(agentId: string): readonly CommandBackgroundItem[] {
+    return this.backgroundItems.get(agentId) ?? [];
+  }
+
+  noteBackgroundTool(
+    agentId: string,
+    taskId: string,
+    toolUseId: string | null,
+  ): void {
+    if (toolUseId === null) {
+      return;
+    }
+    const tools =
+      this.backgroundTools.get(agentId) ?? new Map<string, string>();
+    tools.set(taskId, toolUseId);
+    this.backgroundTools.set(agentId, tools);
+    // Recorded live, the running set arrives a record BEFORE the task's own,
+    // so the row built from it points at the task until the tool id lands.
+    this.applyBackgroundTasks(agentId, this.backgroundTasks.get(agentId) ?? []);
+  }
+
+  /** The panel's rows, rebuilt from the whole running set the CLI reports. */
+  applyBackgroundTasks(
+    agentId: string,
+    tasks: readonly {
+      readonly taskId: string;
+      readonly taskType: string;
+      readonly description: string;
+    }[],
+  ): void {
+    const tools = this.backgroundTools.get(agentId);
+    this.backgroundTasks.set(agentId, tasks);
+    this.backgroundItems.set(
+      agentId,
+      tasks
+        .filter((task) => task.taskType === "local_bash")
+        .map((task) => ({
+          taskId: task.taskId,
+          kind: "command",
+          title: task.description.length > 0 ? task.description : "Command",
+          blockId: tools?.get(task.taskId) ?? task.taskId,
+          parentTaskId: null,
+          scheduledFor: null,
+          individualStopUnavailable: null,
+        })),
+    );
+  }
+
+  clearBackground(agentId: string): void {
+    this.backgroundItems.delete(agentId);
+    this.backgroundTasks.delete(agentId);
+    this.backgroundTools.delete(agentId);
+  }
+
+  /**
+   * Ask the CLI to end one background task, as its SDK does: a
+   * `stop_task` control request on stdin. Recorded live, the task is
+   * killed and the running set updates on the way back. False when there is
+   * no such task, or no process to ask.
+   */
+  stopBackgroundTask(agentId: string, taskId: string): boolean {
+    const child = this.runs.get(agentId);
+    if (
+      child === undefined ||
+      child.stdin === null ||
+      !child.stdin.writable ||
+      !this.backgroundItemsOf(agentId).some((item) => item.taskId === taskId)
+    ) {
+      return false;
+    }
+    child.stdin.write(
+      `${JSON.stringify({
+        type: "control_request",
+        request_id: randomUUID(),
+        request: { subtype: "stop_task", task_id: taskId },
+      })}\n`,
+    );
+    return true;
+  }
+
   setSteerer(
     agentId: string,
     steerer: (text: string) => Promise<string | null>,
@@ -350,6 +601,9 @@ export class GuiRunRegistry {
       return;
     }
     this.runs.delete(agentId);
+    this.carriers.delete(agentId);
+    this.detached.delete(agentId);
+    this.clearBackground(agentId);
     child.kill("SIGTERM");
   }
 
@@ -377,6 +631,11 @@ export async function runGuiPrintTurn(
     readonly model: string | null;
     readonly permissionMode: string | null;
     readonly sessionId: string | null;
+    /**
+     * A turn the process began on its own, in a kept run - nothing is
+     * written to it; its lines are already waiting.
+     */
+    readonly autonomous: boolean;
     readonly onEvent: (event: ProviderStreamEvent) => void;
   },
 ): Promise<string> {
@@ -406,24 +665,56 @@ export async function runGuiPrintTurn(
         ? "codex"
         : null;
   const stdioPrompt = channel !== null;
+  // A Claude run kept after its last turn continues in the same process:
+  // its session is live there, and the background commands with it.
+  const kept =
+    channel === "claude"
+      ? runtime.guiRuns.attach(input.agentId, input.sessionId, input.autonomous)
+      : null;
   return new Promise((resolve, reject) => {
-    let child: ChildProcess;
-    try {
-      child = spawn(binaryPath, args, {
-        cwd: input.cwd,
-        env: spawnEnvForProvider(runtime.store, providerId),
-        stdio: [stdioPrompt ? "pipe" : "ignore", "pipe", "pipe"],
-        windowsHide: true,
+    let carrier: Carrier;
+    if (kept !== null) {
+      carrier = kept.carrier;
+    } else {
+      let child: ChildProcess;
+      try {
+        child = spawn(binaryPath, args, {
+          cwd: input.cwd,
+          env: spawnEnvForProvider(runtime.store, providerId),
+          stdio: [stdioPrompt ? "pipe" : "ignore", "pipe", "pipe"],
+          windowsHide: true,
+        });
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+      runtime.guiRuns.set(input.agentId, child, channel ?? "claude");
+      carrier = {
+        child,
+        sink: () => undefined,
+        onClose: () => undefined,
+        onError: () => undefined,
+        stderr: "",
+      };
+      runtime.guiRuns.setCarrier(input.agentId, carrier);
+      child.stdout?.on("data", (chunk: Buffer) => {
+        carrier.sink(chunk.toString("utf8"));
       });
-    } catch (error) {
-      reject(error instanceof Error ? error : new Error(String(error)));
-      return;
+      child.stderr?.on("data", (chunk: Buffer) => {
+        carrier.stderr += chunk.toString("utf8");
+      });
+      child.once("error", (error) => {
+        carrier.onError(error);
+      });
+      child.once("close", (code) => {
+        carrier.onClose(code);
+      });
+      // A child that exits before reading its prompt makes the write an EPIPE,
+      // which is the close handler's story to tell - not an unhandled stream
+      // error's.
+      child.stdin?.on("error", () => undefined);
     }
-    runtime.guiRuns.set(input.agentId, child, channel ?? "claude");
-    // A child that exits before reading its prompt makes the write an EPIPE,
-    // which is the close handler's story to tell - not an unhandled stream
-    // error's.
-    child.stdin?.on("error", () => undefined);
+    const child = carrier.child;
     // Late-bound on purpose: the driver's own events - the session it opened,
     // an error answering one of its requests - must take the same door every
     // other event takes, `emit` below, which is what ends the run on a fault.
@@ -446,7 +737,9 @@ export async function runGuiPrintTurn(
           type: "user",
           message: { role: "user", content: [{ type: "text", text }] },
         })}\n`;
-      stdin.write(userRecord(input.prompt));
+      if (!input.autonomous) {
+        stdin.write(userRecord(input.prompt));
+      }
       // A second user record before the `result` is same-turn steering:
       // recorded live, the CLI took it at the next tool boundary and answered
       // both in one `result` (`num_turns: 2`). It is not echoed back, so
@@ -466,7 +759,6 @@ export async function runGuiPrintTurn(
     // credential.
     const killTimer: { current: NodeJS.Timeout | null } = { current: null };
     let stdout = "";
-    let stderr = "";
     let streamed = "";
     let structured = false;
     let pendingPlain = "";
@@ -478,12 +770,34 @@ export async function runGuiPrintTurn(
     let turnFault: string | null = null;
     let endedCleanly = false;
     let flushTimer: NodeJS.Timeout | null = null;
+    let sessionSeen: string | null = input.sessionId;
+    // A kept process's commands are still running when a turn continues in
+    // it, and the CLI only reports the set when it changes.
+    let backgroundRunning = runtime.guiRuns.backgroundItemsOf(
+      input.agentId,
+    ).length;
     const emit = (event: ProviderStreamEvent): void => {
       if (event.kind === "delta") {
         if (event.text.length === 0) {
           return;
         }
         streamed += event.text;
+      }
+      if (event.kind === "session") {
+        sessionSeen = event.sessionId;
+      }
+      if (event.kind === "background_started") {
+        runtime.guiRuns.noteBackgroundTool(
+          input.agentId,
+          event.taskId,
+          event.toolUseId,
+        );
+      }
+      if (event.kind === "background_tasks") {
+        runtime.guiRuns.applyBackgroundTasks(input.agentId, event.tasks);
+        backgroundRunning = runtime.guiRuns.backgroundItemsOf(
+          input.agentId,
+        ).length;
       }
       if (event.kind === "permission_request") {
         // The CLI is now waiting on a person. A deadline that kept running
@@ -500,6 +814,24 @@ export async function runGuiPrintTurn(
           turnFault = `${channel === "codex" ? "Codex" : "Claude"} turn ${event.status}${event.error === null ? "" : `: ${event.error}`}`;
         } else {
           endedCleanly = true;
+        }
+        if (
+          channel === "claude" &&
+          turnFault === null &&
+          backgroundRunning > 0 &&
+          !runtime.guiRuns.wasStopped(input.agentId)
+        ) {
+          // The turn is over; the process is not. Its commands run on, and
+          // it will speak again when one of them ends.
+          disarmDeadline();
+          if (flushTimer !== null) {
+            clearTimeout(flushTimer);
+            flushTimer = null;
+          }
+          runtime.guiRuns.detach(input.agentId, sessionSeen);
+          input.onEvent(event);
+          resolve(streamed.trim());
+          return;
         }
         child.stdin?.end();
         return;
@@ -591,12 +923,7 @@ export async function runGuiPrintTurn(
         emit(event);
       }
     };
-    child.stdout?.on("data", (chunk: Buffer) => {
-      consumeStdout(chunk.toString("utf8"));
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
-    });
+    carrier.sink = consumeStdout;
     let timer: NodeJS.Timeout | null = null;
     const armDeadline = (): void => {
       timer = setTimeout(() => {
@@ -625,11 +952,11 @@ export async function runGuiPrintTurn(
       }
       runtime.guiRuns.kill(input.agentId);
     };
-    child.once("error", (error) => {
+    carrier.onError = (error) => {
       settle();
       reject(error);
-    });
-    child.once("close", (code) => {
+    };
+    carrier.onClose = (code) => {
       settle();
       if (structured && lineBuffer.length > 0) {
         applyStructuredLine(lineBuffer);
@@ -645,7 +972,7 @@ export async function runGuiPrintTurn(
           : structured
             ? ""
             : stdout.trim();
-      const errText = stderr.trim();
+      const errText = carrier.stderr.trim();
       if (runtime.guiRuns.wasStopped(input.agentId)) {
         resolve(text.length > 0 ? text : "Stopped.");
         return;
@@ -686,8 +1013,29 @@ export async function runGuiPrintTurn(
             : `agent.sendMessage: harness '${input.harnessId}' produced no output (exit ${String(code)})`,
         ),
       );
-    });
+    };
+    if (kept !== null) {
+      // The lines the process wrote while it was kept are this turn's first.
+      for (const line of kept.buffered) {
+        consumeStdout(`${line}\n`);
+      }
+      if (kept.lineBuffer.length > 0) {
+        consumeStdout(kept.lineBuffer);
+      }
+    }
   });
+}
+
+/** Events that say nothing about a turn: a kept process producing them has not begun one. */
+function isBookkeeping(event: ProviderStreamEvent): boolean {
+  return (
+    event.kind === "session" ||
+    event.kind === "usage" ||
+    event.kind === "background_started" ||
+    event.kind === "background_tasks" ||
+    event.kind === "subagent_progress" ||
+    event.kind === "subagent_end"
+  );
 }
 
 /**

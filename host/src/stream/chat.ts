@@ -224,7 +224,7 @@ export function broadcastTurnStateChanged(
     chatId,
     runStatus: print === null ? "idle" : "running",
     activeTurn: activeTurnFrame(runtime, print, chatId),
-    backgroundItems: [],
+    backgroundItems: [...runtime.guiRuns.backgroundItemsOf(chatId)],
     turnInProgress: print !== null,
   };
   for (const socket of runtime.chats.sockets(epicId, chatId)) {
@@ -450,6 +450,9 @@ export function chatWindowedTranscript(
         accumulatedFileChangeCount: chat.accumulatedChanges.length,
         managedCommands: [],
         heldUpdates: [],
+        // The commands still running in the background, a kept process's
+        // included - the panel's rows, and the capability that offers them.
+        backgroundItems: [...runtime.guiRuns.backgroundItemsOf(chatId)],
         turnInProgress: print !== null,
         transcriptEpoch: chat.transcriptEpoch,
         rowCount: skeleton.length,

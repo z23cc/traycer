@@ -104,6 +104,18 @@ export function handleChatClientFrame(
     handleChatQueueEdit(parsed, socket, runtime);
     return true;
   }
+  if (kind === "stopBackgroundItem") {
+    handleChatStopBackgroundItem(parsed, socket, runtime);
+    return true;
+  }
+  if (kind === "stopAllBackgroundItems") {
+    handleChatStopAllBackgroundItems(parsed, socket, runtime);
+    return true;
+  }
+  if (kind === "stopBackgroundSession") {
+    handleChatStopBackgroundSession(parsed, socket, runtime);
+    return true;
+  }
   if (kind === "queueSteerNow") {
     void handleChatQueueSteerNow(parsed, socket, runtime);
     return true;
@@ -200,6 +212,7 @@ async function handleChatSend(
     prompt,
     responseId: turn.responseId,
     model,
+    autonomous: false,
   });
   broadcastWorktreeStateChanged(runtime, ids.epicId, ids.chatId);
   ack(socket, ids, "send", "accepted", null, null);
@@ -837,6 +850,7 @@ async function handleChatEditUser(
     prompt,
     responseId: turn.responseId,
     model,
+    autonomous: false,
   });
 }
 
@@ -941,6 +955,86 @@ function handleChatQueueEdit(
     broadcastQueueChanged(runtime, ids.epicId, ids.chatId);
     sendChatSnapshot(socket, runtime, ids.epicId, ids.chatId);
   }
+}
+
+/**
+ * The panel's stop on one background command: a `stop_task` to the CLI that
+ * runs it. The set of running tasks it reports back is what takes the row
+ * off the panel. Words and codes are the released host's.
+ */
+function handleChatStopBackgroundItem(
+  parsed: object,
+  socket: WebSocket,
+  runtime: HostRuntime,
+): void {
+  const ids = readActionIds(parsed);
+  const taskId = readStringField(parsed, "taskId");
+  if (ids === null || taskId === null) {
+    return;
+  }
+  const stopped = runtime.guiRuns.stopBackgroundTask(ids.chatId, taskId);
+  ack(
+    socket,
+    ids,
+    "stopBackgroundItem",
+    stopped ? "accepted" : "rejected",
+    stopped ? null : "Background item is no longer running.",
+    stopped ? null : "BACKGROUND_ITEM_NOT_FOUND",
+  );
+}
+
+function handleChatStopAllBackgroundItems(
+  parsed: object,
+  socket: WebSocket,
+  runtime: HostRuntime,
+): void {
+  const ids = readActionIds(parsed);
+  if (ids === null) {
+    return;
+  }
+  const accepted = runtime.guiRuns
+    .backgroundItemsOf(ids.chatId)
+    .map((item) => item.taskId)
+    .filter((taskId) => runtime.guiRuns.stopBackgroundTask(ids.chatId, taskId));
+  sendChatJson(socket, {
+    kind: "actionAck",
+    hasBinaryPayload: false,
+    epicId: ids.epicId,
+    chatId: ids.chatId,
+    clientActionId: ids.clientActionId,
+    action: "stopAllBackgroundItems",
+    status: accepted.length > 0 ? "accepted" : "rejected",
+    reason: accepted.length > 0 ? null : "No background work is running.",
+    code: accepted.length > 0 ? null : "BACKGROUND_ITEM_NOT_FOUND",
+    backgroundStopTaskIds: accepted,
+  });
+}
+
+/**
+ * The session-scoped stop exists for provider builds that cannot stop one
+ * command; every command this host lists can be stopped on its own, so the
+ * answer is the released host's for that case.
+ */
+function handleChatStopBackgroundSession(
+  parsed: object,
+  socket: WebSocket,
+  runtime: HostRuntime,
+): void {
+  const ids = readActionIds(parsed);
+  if (ids === null) {
+    return;
+  }
+  const running = runtime.guiRuns.backgroundItemsOf(ids.chatId).length > 0;
+  ack(
+    socket,
+    ids,
+    "stopBackgroundSession",
+    "rejected",
+    running
+      ? "No background command requires a session-scoped stop."
+      : "No background work is running.",
+    running ? "BACKGROUND_STOP_UNSUPPORTED" : "BACKGROUND_ITEM_NOT_FOUND",
+  );
 }
 
 /**

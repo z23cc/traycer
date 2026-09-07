@@ -2665,6 +2665,169 @@ describe("local GUI send without cloud login", () => {
       ),
     ).toContain("turn.completed");
   });
+
+  /**
+   * A command sent to the background outlives the turn, recorded live: the
+   * `result` comes while it runs, the CLI keeps going with stdin open, and
+   * when the command ends the CLI opens a turn of its own to say so. The
+   * host keeps the process, lists the command on the panel, files the CLI's
+   * own turn as a turn of the chat, and continues the next send in the same
+   * process - the fake would answer a fresh spawn with "started" again.
+   */
+  it("keeps the process for a background command and takes its own turn", async () => {
+    const setup = await bootWithCli(backgroundCli(), "claude");
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-31", "chat-31");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-31",
+      chatId: "chat-31",
+      clientActionId: "action-31",
+      messageId: "msg-user-31",
+      text: "run it in the background",
+      permissionMode: null,
+      harnessId: null,
+    });
+    const items = (snapshot: object) => readArray(snapshot, "backgroundItems");
+    const texts = (snapshot: object) =>
+      readArray(Reflect.get(snapshot, "tail") ?? {}, "messages")
+        .filter((m) => Reflect.get(m ?? {}, "role") === "assistant")
+        .map((m) => JSON.stringify(Reflect.get(m ?? {}, "blocks")));
+    const starts = (snapshot: object) =>
+      readArray(Reflect.get(snapshot, "tail") ?? {}, "events").filter(
+        (e) => Reflect.get(e ?? {}, "type") === "turn.started",
+      );
+    // The turn ended; the command did not.
+    const running = await waitForSnapshot(
+      streamUrl,
+      "epic-31",
+      "chat-31",
+      (snapshot) =>
+        Reflect.get(snapshot, "runStatus") === "idle" &&
+        items(snapshot).length === 1,
+      80,
+      50,
+    );
+    expect(items(running)).toEqual([
+      {
+        kind: "command",
+        taskId: "bg1",
+        title: "sleep 8 && echo done",
+        blockId: "toolu_bg1",
+        parentTaskId: null,
+        scheduledFor: null,
+        individualStopUnavailable: null,
+      },
+    ]);
+    expect(texts(running).join("")).toContain("started");
+    // A follow-up while it runs continues in the kept process - a fresh
+    // spawn of the fake would have answered "started" again.
+    await sendOnChat(streamUrl, {
+      epicId: "epic-31",
+      chatId: "chat-31",
+      clientActionId: "action-31b",
+      messageId: "msg-user-31b",
+      text: "follow up",
+      permissionMode: null,
+      harnessId: null,
+    });
+    await waitForChatText(
+      streamUrl,
+      "epic-31",
+      "chat-31",
+      "next:follow up",
+      80,
+      50,
+    );
+    // The command ended, and the CLI's own turn about it is the chat's -
+    // begun by no user message.
+    const reported = await waitForSnapshot(
+      streamUrl,
+      "epic-31",
+      "chat-31",
+      (snapshot) =>
+        Reflect.get(snapshot, "runStatus") === "idle" &&
+        items(snapshot).length === 0 &&
+        texts(snapshot).join("").includes("bg-done"),
+      120,
+      50,
+    );
+    expect(starts(reported)).toHaveLength(3);
+    expect(Reflect.get(starts(reported)[2] ?? {}, "messageId")).toBeNull();
+  }, 15_000);
+
+  /** The panel's stop on a background command: a `stop_task` the CLI answers by ending it. */
+  it("stops a background command through the CLI", async () => {
+    const setup = await bootWithCli(backgroundStopCli(), "claude");
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-32", "chat-32");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-32",
+      chatId: "chat-32",
+      clientActionId: "action-32",
+      messageId: "msg-user-32",
+      text: "run it in the background",
+      permissionMode: null,
+      harnessId: null,
+    });
+    await waitForSnapshot(
+      streamUrl,
+      "epic-32",
+      "chat-32",
+      (snapshot) =>
+        Reflect.get(snapshot, "runStatus") === "idle" &&
+        readArray(snapshot, "backgroundItems").length === 1,
+      80,
+      50,
+    );
+    expect(
+      await sendActionUntil(
+        streamUrl,
+        {
+          kind: "stopBackgroundItem",
+          epicId: "epic-32",
+          chatId: "chat-32",
+          clientActionId: "stop-32-nope",
+          taskId: "nope",
+        },
+        "actionAck",
+      ),
+    ).toContainEqual(
+      expect.objectContaining({
+        status: "rejected",
+        code: "BACKGROUND_ITEM_NOT_FOUND",
+      }),
+    );
+    const stopped = await sendActionUntil(
+      streamUrl,
+      {
+        kind: "stopBackgroundItem",
+        epicId: "epic-32",
+        chatId: "chat-32",
+        clientActionId: "stop-32",
+        taskId: "bg1",
+      },
+      "turnStateChanged",
+    );
+    expect(stopped).toContainEqual(
+      expect.objectContaining({
+        kind: "actionAck",
+        action: "stopBackgroundItem",
+        status: "accepted",
+      }),
+    );
+    await waitForSnapshot(
+      streamUrl,
+      "epic-32",
+      "chat-32",
+      (snapshot) => readArray(snapshot, "backgroundItems").length === 0,
+      80,
+      50,
+    );
+  });
 });
 
 /**
@@ -2816,6 +2979,59 @@ async function queueFollowUp(
  * A fake Claude that blocks on a second stdin record mid-turn, the way the
  * real one waits at a tool boundary, and answers with that record's text.
  */
+/** The records of a backgrounded Bash, as recorded live, with the CLI's own turn after it. */
+function backgroundRecords(): readonly string[] {
+  return [
+    '{"type":"system","subtype":"init","session_id":"sess-bg"}',
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg1","name":"Bash","input":{"command":"sleep 8 && echo done","run_in_background":true}}]}}',
+    '{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"bg1","task_type":"local_bash","description":"sleep 8 && echo done"}],"session_id":"sess-bg"}',
+    '{"type":"system","subtype":"task_started","task_id":"bg1","tool_use_id":"toolu_bg1","description":"sleep 8 && echo done","is_backgrounded":true,"task_type":"local_bash","session_id":"sess-bg"}',
+    '{"type":"user","message":{"content":[{"type":"tool_result","content":"Command running in background with ID: bg1","tool_use_id":"toolu_bg1"}]}}',
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"started"}]}}',
+    '{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}',
+  ];
+}
+
+function backgroundCli(): string {
+  return [
+    "#!/bin/sh",
+    "read -r prompt",
+    ...backgroundRecords().map(printfLine),
+    // The command "runs" until the next user record arrives - a follow-up
+    // sent while it runs continues in this same process.
+    "read -r next",
+    `text=$(printf '%s' "$next" | sed -e 's/.*"text":"\\([^"]*\\)".*/\\1/')`,
+    `printf '%s\\n' "{\\"type\\":\\"assistant\\",\\"message\\":{\\"content\\":[{\\"type\\":\\"text\\",\\"text\\":\\"next:$text\\"}]}}"`,
+    `printf '%s\\n' '{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}'`,
+    "sleep 1",
+    `printf '%s\\n' '{"type":"system","subtype":"background_tasks_changed","tasks":[],"session_id":"sess-bg"}'`,
+    `printf '%s\\n' '{"type":"system","subtype":"task_updated","task_id":"bg1","patch":{"status":"completed","end_time":1}}'`,
+    `printf '%s\\n' '{"type":"system","subtype":"task_notification","task_id":"bg1","tool_use_id":"toolu_bg1","status":"completed","output_file":"","summary":"Background command completed (exit code 0)"}'`,
+    `printf '%s\\n' '{"type":"system","subtype":"init","session_id":"sess-bg"}'`,
+    `printf '%s\\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"bg-done"}]}}'`,
+    `printf '%s\\n' '{"type":"result","subtype":"success","num_turns":1,"usage":{"input_tokens":3,"output_tokens":1}}'`,
+    "read -r eof || true",
+    "",
+  ].join("\n");
+}
+
+/** The same, but the command runs until a `stop_task` arrives, as recorded live. */
+function backgroundStopCli(): string {
+  return [
+    "#!/bin/sh",
+    "read -r prompt",
+    ...backgroundRecords().map(printfLine),
+    "read -r ctl",
+    'case "$ctl" in *stop_task*) ;; *) exit 3;; esac',
+    `printf '%s\\n' '{"type":"system","subtype":"background_tasks_changed","tasks":[],"session_id":"sess-bg"}'`,
+    `printf '%s\\n' '{"type":"system","subtype":"task_updated","task_id":"bg1","patch":{"status":"killed","end_time":1}}'`,
+    `printf '%s\\n' '{"type":"system","subtype":"task_notification","task_id":"bg1","tool_use_id":"toolu_bg1","status":"stopped","output_file":"","summary":"sleep 8 && echo done"}'`,
+    `printf '%s\\n' "{\\"type\\":\\"control_response\\",\\"response\\":{\\"subtype\\":\\"success\\",\\"request_id\\":\\"x\\",\\"response\\":{}}}"`,
+    "read -r eof || true",
+    "",
+  ].join("\n");
+}
+
 function steeringCli(): string {
   return [
     "#!/bin/sh",

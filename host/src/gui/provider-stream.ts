@@ -155,6 +155,30 @@ export type ProviderStreamEvent =
       readonly method: string;
     }
   /**
+   * A command Claude runs in the background (`task_started` with
+   * `is_backgrounded`, recorded live around a `run_in_background` Bash) - the
+   * tool call it belongs to is what the panel's row points at.
+   */
+  | {
+      readonly kind: "background_started";
+      readonly taskId: string;
+      readonly toolUseId: string | null;
+      readonly description: string;
+    }
+  /**
+   * `background_tasks_changed`: the whole set of tasks still running in the
+   * background, sent whenever it changes - so an empty list is the last one
+   * ending, and the process is free to exit.
+   */
+  | {
+      readonly kind: "background_tasks";
+      readonly tasks: readonly {
+        readonly taskId: string;
+        readonly taskType: string;
+        readonly description: string;
+      }[];
+    }
+  /**
    * Claude compacting its context, recorded live around `/compact`: a
    * `status: "compacting"` record, then either `compact_result: "failed"`
    * with the reason or a `compact_boundary` carrying the numbers.
@@ -284,6 +308,27 @@ function claudeSystemEvent(record: object): ProviderStreamEvent[] {
   if (subtype === "task_started") {
     return claudeTaskStarted(record);
   }
+  if (subtype === "background_tasks_changed") {
+    const raw = Reflect.get(record, "tasks");
+    const tasks = Array.isArray(raw)
+      ? raw.flatMap((task: unknown) => {
+          if (task === null || typeof task !== "object") {
+            return [];
+          }
+          const taskId = readString(task, "task_id");
+          return taskId === null
+            ? []
+            : [
+                {
+                  taskId,
+                  taskType: readString(task, "task_type") ?? "",
+                  description: readString(task, "description") ?? "",
+                },
+              ];
+        })
+      : [];
+    return [{ kind: "background_tasks", tasks }];
+  }
   if (subtype === "task_progress") {
     return claudeTaskProgress(record);
   }
@@ -371,6 +416,22 @@ function claudeTaskStarted(record: object): ProviderStreamEvent[] {
   const taskId = readString(record, "task_id");
   if (taskId === null) {
     return [];
+  }
+  // A command sent to the background is the one task record that matters
+  // for a Bash call: its row on the panel, stoppable by id, until the set of
+  // running tasks says it ended.
+  if (
+    Reflect.get(record, "is_backgrounded") === true &&
+    readString(record, "task_type") === "local_bash"
+  ) {
+    return [
+      {
+        kind: "background_started",
+        taskId,
+        toolUseId: readString(record, "tool_use_id"),
+        description: readString(record, "description") ?? "",
+      },
+    ];
   }
   // Every task the CLI runs reports here, a plain Bash call included
   // (`task_type: "local_bash"`, recorded live around a `sleep`). Only one
