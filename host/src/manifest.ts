@@ -46,8 +46,6 @@ export const UNSERVED_STREAM_METHOD_NAMES: readonly string[] = [
   "sessionImport.run",
   "sessionImport.scan",
   "speech.dictate",
-  "worktree.deleteBatchByPath",
-  "worktree.deleteByPath",
 ];
 
 /**

@@ -27,6 +27,7 @@ import { ArtifactDocLane } from "./artifact-doc";
 import { serveAsset } from "./asset";
 import { AssetStreamSession } from "../workspace/asset-stream";
 import { ResourcesSubscriber, readScope } from "./resources";
+import { serveWorktreeDelete } from "./worktree-delete";
 import { EpicStateSubscriber } from "./epic-state";
 import {
   sendAgentActivitySnapshot,
@@ -69,6 +70,7 @@ export function attachStreamConnection(
   let artifactDoc: ArtifactDocLane | null = null;
   let assetStream: AssetStreamSession | null = null;
   let resources: ResourcesSubscriber | null = null;
+  let deleteCommands = false;
   let pendingBinary: PendingBinary | null = null;
   const hostManifest = hostStreamManifest();
 
@@ -87,6 +89,7 @@ export function attachStreamConnection(
     runtime.epicState.remove(socket);
     runtime.artifactDocs.remove(socket);
     resources?.stop();
+    runtime.worktreeDeletes.detach(socket);
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
@@ -105,6 +108,7 @@ export function attachStreamConnection(
     runtime.epicState.remove(socket);
     runtime.artifactDocs.remove(socket);
     resources?.stop();
+    runtime.worktreeDeletes.detach(socket);
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
@@ -524,6 +528,34 @@ export function attachStreamConnection(
       resources.start();
       return;
     }
+    if (subscribe.data.method === "worktree.deleteByPath") {
+      void serveWorktreeDelete(
+        socket,
+        runtime,
+        subscribe.data.params,
+        subscribe.data.schemaVersion.minor,
+      ).then((ok) => {
+        if (!ok) {
+          reject(
+            unauthorized("worktree.deleteByPath requires a worktreePath"),
+            "missing-worktree",
+          );
+        }
+      });
+      return;
+    }
+    if (subscribe.data.method === "worktree.deleteBatchByPath") {
+      deleteCommands = true;
+      if (
+        !runtime.worktreeDeletes.attach(socket, runtime, subscribe.data.params)
+      ) {
+        reject(
+          unauthorized("worktree.deleteBatchByPath requires a command"),
+          "malformed-batch",
+        );
+      }
+      return;
+    }
     if (UNSERVED_STREAM_METHOD_NAMES.includes(subscribe.data.method)) {
       reject(
         {
@@ -574,6 +606,9 @@ export function attachStreamConnection(
       return;
     }
     if (resources !== null && resources.handleFrame(parsed)) {
+      return;
+    }
+    if (deleteCommands && runtime.worktreeDeletes.handleFrame(socket, parsed)) {
       return;
     }
     if (parsed.kind === "ping") {
