@@ -106,6 +106,18 @@ export type ProviderStreamEvent =
       readonly outcome: "completed" | "failed" | "stopped";
       readonly result: string | null;
     }
+  /**
+   * A record from a sub-agent's own transcript, which Claude writes to the
+   * PARENT's stream tagged with the tool call that spawned the child. Carried
+   * whole rather than flattened: the events inside are the child's, and the
+   * reader nests or suppresses them under the child's card by the protocol's
+   * own policy (`subagent-nesting.ts`) - never files them as the parent's.
+   */
+  | {
+      readonly kind: "child";
+      readonly parentToolUseId: string;
+      readonly events: readonly ProviderStreamEvent[];
+    }
   | { readonly kind: "usage"; readonly usage: ProviderTokenUsage };
 
 export function parseProviderStdoutLine(line: string): ProviderStreamEvent[] {
@@ -144,14 +156,22 @@ function sessionEvents(record: object): ProviderStreamEvent[] {
 
 function claudeEvents(record: object): ProviderStreamEvent[] {
   // A record belonging to a sub-agent, and not to this turn. The parent's
-  // stream carries the child's whole transcript inline, so without this guard
-  // the child's tool calls arrive as the main agent's and its closing text is
+  // stream carries the child's whole transcript inline; without this wrap the
+  // child's tool calls arrive as the main agent's and its closing text is
   // appended to the main reply. Read before the type dispatch: it is a
   // top-level field on every child record, whatever its type, and the
   // `system` task records that DO describe the child never carry it.
-  if (readString(record, "parent_tool_use_id") !== null) {
-    return [];
+  const parentToolUseId = readString(record, "parent_tool_use_id");
+  const events = claudeRecordEvents(record);
+  if (parentToolUseId === null) {
+    return events;
   }
+  return events.length === 0
+    ? []
+    : [{ kind: "child", parentToolUseId, events }];
+}
+
+function claudeRecordEvents(record: object): ProviderStreamEvent[] {
   const type = readString(record, "type");
   if (type === "stream_event") {
     const event = Reflect.get(record, "event");

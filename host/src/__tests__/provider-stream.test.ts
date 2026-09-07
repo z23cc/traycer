@@ -339,26 +339,54 @@ describe("parseProviderStdoutLine", () => {
   });
 
   /**
-   * The child's transcript rides the parent's stream verbatim. Without the
-   * guard its tool calls arrive as the main agent's, and its closing text is
-   * appended to the main reply.
+   * The child's transcript rides the parent's stream verbatim, tagged with the
+   * call that spawned it. The parser keeps that tag and carries the child's
+   * events whole, so the reader can nest them under the child's card - and so
+   * nothing in them can be mistaken for the parent's.
    */
-  it("drops the records that belong to a subagent, not this turn", () => {
+  it("wraps the records that belong to a subagent under their spawning call", () => {
     expect(
       parseProviderStdoutLine(
         '{"type":"assistant","parent_tool_use_id":"toolu_01AR","message":{"content":[{"type":"tool_use","id":"toolu_016S","name":"Bash","input":{"command":"ls -la"}}]}}',
       ),
-    ).toEqual([]);
+    ).toEqual([
+      {
+        kind: "child",
+        parentToolUseId: "toolu_01AR",
+        events: [
+          {
+            kind: "tool_start",
+            toolId: "toolu_016S",
+            toolName: "Bash",
+            input: { command: "ls -la" },
+          },
+        ],
+      },
+    ]);
     expect(
       parseProviderStdoutLine(
         '{"type":"assistant","parent_tool_use_id":"toolu_01AR","message":{"content":[{"type":"text","text":"The working directory contains 1 file"}]}}',
       ),
-    ).toEqual([]);
+    ).toEqual([
+      {
+        kind: "child",
+        parentToolUseId: "toolu_01AR",
+        events: [
+          { kind: "delta", text: "The working directory contains 1 file" },
+        ],
+      },
+    ]);
     expect(
       parseProviderStdoutLine(
         '{"type":"user","parent_tool_use_id":"toolu_01AR","message":{"content":[{"type":"tool_result","content":"a.txt","tool_use_id":"toolu_016S"}]}}',
       ),
-    ).toEqual([]);
+    ).toEqual([
+      {
+        kind: "child",
+        parentToolUseId: "toolu_01AR",
+        events: [{ kind: "tool_end", toolId: "toolu_016S" }],
+      },
+    ]);
   });
 
   it("ignores unstructured CLI text so the plain-stdout path can take over", () => {

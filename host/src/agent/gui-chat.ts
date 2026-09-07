@@ -4,7 +4,11 @@ import {
   AUTH_ERROR_CODE,
   ENV_CREDENTIAL_AUTH_ERROR_CODE,
 } from "@traycer/protocol/host/agent/gui/agent-runtime";
-import type { UserMessageAnchorResolvedEvent } from "@traycer/protocol/host/agent/gui/agent-runtime";
+import type {
+  RuntimeEvent,
+  UserMessageAnchorResolvedEvent,
+} from "@traycer/protocol/host/agent/gui/agent-runtime";
+import { nestChildRuntimeEvent } from "@traycer/protocol/host/agent/gui/subagent-nesting";
 import { guiHarnessIdSchema } from "@traycer/protocol/host/agent/shared";
 import { assistantRowId } from "@traycer/protocol/persistence/chat-transcript/row-projection";
 import type { CheckpointFileOperation } from "@traycer/protocol/persistence/epic/checkpoint-manifests";
@@ -450,6 +454,44 @@ async function runAndPersistAssistant(
   /** Edit calls whose card is open, waiting on the call's result. */
   const pendingEdits = new Map<string, PendingEdit>();
   /**
+   * The sub-agent card each spawning tool call opened, from `task_started`.
+   * A child record names the call that spawned it, and this is how that name
+   * becomes the card its events nest under.
+   */
+  const cardByTool = new Map<string, string>();
+  /**
+   * The spawning call above each tool call a CHILD made. A nested sub-agent's
+   * `task_started` names the child's own spawn call, and this is the one hop
+   * from there to the card that call was made under. Exact at every depth
+   * whose spawn call was seen; a depth whose transcript the stream does not
+   * carry (recorded live: the second) leaves its children's cards unparented,
+   * which is the contract's "unknown" rather than a guess.
+   */
+  const spawnParent = new Map<string, string>();
+  /** The card the events being handled belong to, while inside a child record. */
+  let nestUnder: string | null = null;
+  /** The spawning call that child record named, for `spawnParent`. */
+  let parentToolOfChild: string | null = null;
+  /**
+   * Every block delta this turn sends. Under a child record it applies the
+   * protocol's own nesting policy - tool and file activity re-homed under the
+   * card with a progress line beside it, narration and lifecycle dropped -
+   * so a child's event can never surface as the parent's.
+   */
+  const emit = (event: RuntimeEvent): void => {
+    if (nestUnder === null) {
+      broadcastBlockDelta(runtime, input.epicId, input.chatId, event);
+      return;
+    }
+    for (const nested of nestChildRuntimeEvent(
+      event,
+      nestUnder,
+      event.timestamp,
+    )) {
+      broadcastBlockDelta(runtime, input.epicId, input.chatId, nested);
+    }
+  };
+  /**
    * Completions still being read off disk. Awaited before the turn is
    * persisted, or a card could be sealed mid-read as a call that never
    * finished.
@@ -492,6 +534,9 @@ async function runAndPersistAssistant(
   const handleEvent = (event: ProviderStreamEvent): void => {
     const now = Date.now();
     if (event.kind === "session") {
+      if (nestUnder !== null) {
+        return;
+      }
       void persistProviderSession(runtime, {
         chatId: input.chatId,
         harnessId: input.harnessId,
@@ -506,7 +551,7 @@ async function runAndPersistAssistant(
       // and the run itself is still fine, so the session block is what drops.
       const harness = guiHarnessIdSchema.safeParse(input.harnessId);
       if (harness.success) {
-        broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+        emit({
           type: print?.resumed === true ? "session.resumed" : "session.created",
           blockId: input.turnId,
           timestamp: now,
@@ -525,7 +570,7 @@ async function runAndPersistAssistant(
         input.turnId,
       );
       if (userMessageId !== null && anchor !== null) {
-        broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+        emit({
           type: "user_message.anchor_resolved",
           blockId: userMessageId,
           timestamp: now,
@@ -536,8 +581,12 @@ async function runAndPersistAssistant(
       return;
     }
     if (event.kind === "delta") {
-      assembled += event.text;
-      broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+      // A child's words are the child's - the policy drops the delta below,
+      // and the reply must not grow by it either.
+      if (nestUnder === null) {
+        assembled += event.text;
+      }
+      emit({
         type: "text.delta",
         blockId: textBlockId,
         timestamp: now,
@@ -546,8 +595,10 @@ async function runAndPersistAssistant(
       return;
     }
     if (event.kind === "reasoning") {
-      sawReasoning = true;
-      broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+      if (nestUnder === null) {
+        sawReasoning = true;
+      }
+      emit({
         type: "reasoning.delta",
         blockId: reasoningBlockId,
         timestamp: now,
@@ -560,11 +611,14 @@ async function runAndPersistAssistant(
       // from `content_block_start` with an EMPTY input, then again on the
       // complete `assistant` record with the real one. Both are broadcast, so
       // the block ends up with the arguments; only the first one counts.
-      if (!openTools.has(event.toolId)) {
+      if (!openTools.has(event.toolId) && nestUnder === null) {
         toolCallCount += 1;
       }
       openTools.set(event.toolId, event.toolName);
-      broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+      if (nestUnder !== null && parentToolOfChild !== null) {
+        spawnParent.set(event.toolId, parentToolOfChild);
+      }
+      emit({
         type: "tool_call.started",
         blockId: event.toolId,
         timestamp: now,
@@ -585,7 +639,7 @@ async function runAndPersistAssistant(
     if (event.kind === "tool_end") {
       const toolName = openTools.get(event.toolId) ?? "tool";
       openTools.delete(event.toolId);
-      broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+      emit({
         type: "tool_call.completed",
         blockId: event.toolId,
         timestamp: now,
@@ -600,8 +654,10 @@ async function runAndPersistAssistant(
     if (event.kind === "tool_error") {
       const toolName = openTools.get(event.toolId) ?? "tool";
       openTools.delete(event.toolId);
-      toolCallErrorCount += 1;
-      broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+      if (nestUnder === null) {
+        toolCallErrorCount += 1;
+      }
+      emit({
         type: "tool_call.errored",
         blockId: event.toolId,
         timestamp: now,
@@ -617,6 +673,9 @@ async function runAndPersistAssistant(
       return;
     }
     if (event.kind === "todo") {
+      if (nestUnder !== null) {
+        return;
+      }
       const items = event.items.map((item) => ({
         id: item.id ?? null,
         text: item.text,
@@ -624,7 +683,7 @@ async function runAndPersistAssistant(
         priority: item.priority ?? null,
         activeForm: item.activeForm ?? null,
       }));
-      broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+      emit({
         type: "todo.updated",
         blockId: event.toolId,
         timestamp: now,
@@ -643,13 +702,26 @@ async function runAndPersistAssistant(
       return;
     }
     if (event.kind === "subagent_start") {
-      broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+      if (event.spawnToolId !== null) {
+        cardByTool.set(event.spawnToolId, event.taskId);
+      }
+      // One hop up: the spawning call was itself made under some card, when
+      // it was a child's. Null at the top, and null past the depth the
+      // stream stops carrying transcripts for.
+      const above =
+        event.spawnToolId === null
+          ? undefined
+          : spawnParent.get(event.spawnToolId);
+      const parentBlockId =
+        above === undefined ? null : (cardByTool.get(above) ?? null);
+      emit({
         type: "subagent.started",
         // The TASK id, not the spawning call's: one `Task` tool call is one
         // sub-agent run, but the ids are different and every later record
         // about this run is keyed by the task.
         blockId: event.taskId,
         timestamp: now,
+        ...(parentBlockId === null ? {} : { parentBlockId }),
         name: event.name,
         agentType: event.agentType,
         // Named so the GUI can drop the `Task` tool row this card replaces -
@@ -662,7 +734,7 @@ async function runAndPersistAssistant(
       return;
     }
     if (event.kind === "subagent_progress") {
-      broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+      emit({
         type: "subagent.progress",
         blockId: event.taskId,
         timestamp: now,
@@ -671,7 +743,7 @@ async function runAndPersistAssistant(
       return;
     }
     if (event.kind === "subagent_end") {
-      broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+      emit({
         type: "subagent.completed",
         blockId: event.taskId,
         timestamp: now,
@@ -684,8 +756,29 @@ async function runAndPersistAssistant(
       authFailure = event;
       return;
     }
+    if (event.kind === "child") {
+      // A child's records never contain another child's - a deeper agent's
+      // transcript is not in this stream at all - so there is no nesting to
+      // stack here, and a card that was never opened means events with no
+      // home, which the policy says must not surface. Dropped, not re-homed.
+      const card = cardByTool.get(event.parentToolUseId);
+      if (nestUnder !== null || card === undefined) {
+        return;
+      }
+      nestUnder = card;
+      parentToolOfChild = event.parentToolUseId;
+      try {
+        for (const inner of event.events) {
+          handleEvent(inner);
+        }
+      } finally {
+        nestUnder = null;
+        parentToolOfChild = null;
+      }
+      return;
+    }
     if (event.kind === "command_start") {
-      broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+      emit({
         type: "command.started",
         blockId: event.commandId,
         timestamp: now,
@@ -694,7 +787,7 @@ async function runAndPersistAssistant(
       return;
     }
     if (event.kind === "command_end") {
-      broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+      emit({
         type: "command.completed",
         blockId: event.commandId,
         timestamp: now,
@@ -719,6 +812,7 @@ async function runAndPersistAssistant(
           blockId,
           path: event.path,
           operation,
+          parentBlockId: nestUnder,
         });
         return;
       }
@@ -729,7 +823,7 @@ async function runAndPersistAssistant(
         completeEdit(
           runtime,
           input,
-          { blockId, path: event.path, operation },
+          { blockId, path: event.path, operation, parentBlockId: nestUnder },
           { before: null, after: null },
           "not_intercepted",
         ),
@@ -737,7 +831,10 @@ async function runAndPersistAssistant(
       return;
     }
     if (event.kind === "usage") {
-      broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+      if (nestUnder !== null) {
+        return;
+      }
+      emit({
         type: "usage.updated",
         blockId: input.turnId,
         timestamp: now,
@@ -939,6 +1036,8 @@ type PendingEdit = {
   readonly blockId: string;
   readonly path: string;
   readonly operation: CheckpointFileOperation;
+  /** The sub-agent card this edit was made under, or null at the top. */
+  readonly parentBlockId: string | null;
 };
 
 /**
@@ -985,10 +1084,13 @@ async function completeEdit(
       )
     : { additions: 0, deletions: 0 };
   const now = Date.now();
+  const nested =
+    edit.parentBlockId === null ? {} : { parentBlockId: edit.parentBlockId };
   broadcastBlockDelta(runtime, input.epicId, input.chatId, {
     type: "file_change.started",
     blockId: edit.blockId,
     timestamp: now,
+    ...nested,
     filePath: edit.path,
     operation,
   });
@@ -996,6 +1098,7 @@ async function completeEdit(
     type: "file_change.completed",
     blockId: edit.blockId,
     timestamp: now,
+    ...nested,
     filePath: edit.path,
     operation,
     diffSource: snapshot ? "snapshot" : "none",

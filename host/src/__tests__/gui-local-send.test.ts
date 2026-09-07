@@ -712,9 +712,7 @@ describe("local GUI send without cloud login", () => {
     expect(chat?.accumulatedChanges[0]?.operation).toBe("create");
 
     const frames = await collectChatFrames(streamUrl, "epic-8", "chat-8");
-    const summaries = frames.flatMap((frame) =>
-      readSummaries(frame, "epic-8", "chat-8"),
-    );
+    const summaries = latestSummaries(frames, "epic-8", "chat-8");
     expect(summaries).toHaveLength(1);
     // The hooks were asked for and reported nothing - the fake CLI runs
     // none - so the row says the capture failed, not that nothing tried.
@@ -927,7 +925,15 @@ describe("local GUI send without cloud login", () => {
    * be true at once: the card exists, and the child's own work is NOT filed
    * as the main agent's - neither its tool calls nor its closing text.
    */
-  it("keeps a subagent's card and none of its work", async () => {
+  /**
+   * A subagent, reported entirely on the parent's stream, with a nested one
+   * under it. Three things at once: the card exists with the child's tool
+   * activity nested under it, the child's own words are NOT the parent's, and
+   * a second-level card hangs off the first by the one hop the stream allows
+   * - while a card whose spawn call was never seen stays unparented, which is
+   * the contract's "unknown" rather than a guess.
+   */
+  it("nests a subagent's work under its card, and a child card under that", async () => {
     const stdout = [
       '{"type":"system","subtype":"init","session_id":"sess-task"}',
       '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_p1","name":"Task","input":{"description":"List files","subagent_type":"Explore","prompt":"list the files here"}}]}}',
@@ -935,6 +941,15 @@ describe("local GUI send without cloud login", () => {
       '{"type":"assistant","parent_tool_use_id":"toolu_p1","message":{"content":[{"type":"tool_use","id":"toolu_c1","name":"Bash","input":{"command":"ls -la"}}]}}',
       '{"type":"user","parent_tool_use_id":"toolu_p1","message":{"content":[{"type":"tool_result","content":"a.txt","tool_use_id":"toolu_c1"}]}}',
       '{"type":"system","subtype":"task_progress","task_id":"task-77","description":"Running ls"}',
+      // The child spawns its own agent. Recorded live: the spawn call is in the
+      // child's record, the nested task names that call, and the nested
+      // agent's transcript is not in this stream at all.
+      '{"type":"assistant","parent_tool_use_id":"toolu_p1","message":{"content":[{"type":"tool_use","id":"toolu_c2","name":"Agent","input":{"description":"Nested","subagent_type":"Explore","prompt":"ls again"}}]}}',
+      '{"type":"system","subtype":"task_started","task_id":"task-88","tool_use_id":"toolu_c2","description":"Nested","subagent_type":"Explore","spawn_depth":2}',
+      '{"type":"system","subtype":"task_notification","task_id":"task-88","tool_use_id":"toolu_c2","status":"completed","summary":"nested done"}',
+      '{"type":"user","parent_tool_use_id":"toolu_p1","message":{"content":[{"type":"tool_result","content":"nested done","tool_use_id":"toolu_c2"}]}}',
+      // A task whose spawn call this stream never carried.
+      '{"type":"system","subtype":"task_started","task_id":"task-99","tool_use_id":"toolu_never","description":"Orphan","subagent_type":"Explore","spawn_depth":3}',
       '{"type":"assistant","parent_tool_use_id":"toolu_p1","message":{"content":[{"type":"text","text":"CHILD-TEXT-LEAK"}]}}',
       '{"type":"system","subtype":"task_notification","task_id":"task-77","tool_use_id":"toolu_p1","status":"completed","summary":"one file"}',
       '{"type":"user","message":{"content":[{"type":"tool_result","content":"one file","tool_use_id":"toolu_p1"}]}}',
@@ -968,29 +983,56 @@ describe("local GUI send without cloud login", () => {
       50,
     );
     const blocks = assistantBlocks(frames, "epic-11", "chat-11");
-    expect(
-      blocks.find((block) => Reflect.get(block, "type") === "subagent"),
-    ).toMatchObject({
-      blockId: "task-77",
+    const card = (id: string) =>
+      blocks.find(
+        (block) =>
+          Reflect.get(block, "type") === "subagent" &&
+          Reflect.get(block, "blockId") === id,
+      );
+    expect(card("task-77")).toMatchObject({
       name: "List files",
       agentType: "Explore",
+      parentBlockId: null,
       // Named so the GUI drops the `Task` row this card stands in for.
       spawnToolCallId: "toolu_p1",
-      progressUpdates: ["Running ls"],
+      // The child's tool activity streams on the card, by the protocol's own
+      // policy, beside the progress the harness reported.
+      progressUpdates: ["Bash · ls -la", "Running ls", "Agent · Nested"],
       result: "one file",
       status: "completed",
     });
-    // The child's Bash call is the child's. Only the spawning `Task` call is
-    // this turn's.
+    // One hop up, exactly: the nested card's spawn call was made under the
+    // first card.
+    expect(card("task-88")).toMatchObject({
+      parentBlockId: "task-77",
+      spawnToolCallId: "toolu_c2",
+      result: "nested done",
+    });
+    // And no hop for a spawn call this stream never carried.
+    expect(card("task-99")).toMatchObject({ parentBlockId: null });
+    // The child's Bash call is the child's: nested under the card, not the
+    // turn's. Only the spawning `Task` call is the turn's own.
+    const calls = blocks.filter(
+      (block) => Reflect.get(block, "type") === "tool_call",
+    );
     expect(
-      blocks
-        .filter((block) => Reflect.get(block, "type") === "tool_call")
+      calls.find((block) => Reflect.get(block, "toolName") === "Bash"),
+    ).toMatchObject({ parentBlockId: "task-77", status: "completed" });
+    expect(
+      calls
+        .filter((block) => Reflect.get(block, "parentBlockId") === null)
         .map((block) => Reflect.get(block, "toolName")),
     ).toEqual(["Task"]);
     // And the child's closing words are not the assistant's. This is the
     // assertion the block types alone would pass either way.
     const text = blocks.find((block) => Reflect.get(block, "type") === "text");
     expect(Reflect.get(text ?? {}, "text")).toBe("task-ok");
+    // Nor are they in the stored reply, which is what gets stuffed back into
+    // the next prompt when the session cannot be resumed.
+    const stored = started.runtime.store
+      .snapshot()
+      .chats.find((row) => row.chatId === "chat-11");
+    expect(stored?.turns.at(-1)?.prompt).toBe("task-ok");
   });
 
   /**
@@ -1063,9 +1105,7 @@ describe("local GUI send without cloud login", () => {
       deletions: 1,
       reason: "snapshot",
     });
-    const summaries = frames.flatMap((frame) =>
-      readSummaries(frame, "epic-12", "chat-12"),
-    );
+    const summaries = latestSummaries(frames, "epic-12", "chat-12");
     expect(summaries).toHaveLength(1);
     expect(summaries[0]).toMatchObject({
       diffSource: "snapshot",
@@ -1184,11 +1224,7 @@ describe("local GUI send without cloud login", () => {
       "epic-12",
       "chat-12",
     );
-    expect(
-      afterRevert.flatMap((frame) =>
-        readSummaries(frame, "epic-12", "chat-12"),
-      ),
-    ).toEqual([]);
+    expect(latestSummaries(afterRevert, "epic-12", "chat-12")).toEqual([]);
     expect(
       await sendActionUntil(
         streamUrl,
@@ -1413,6 +1449,34 @@ async function collectChatFrames(
   );
   await done;
   return frames;
+}
+
+/**
+ * The summaries of the LAST `accumulatedChanges` frame in a collection.
+ *
+ * Not summed across frames: a collect window can overlap a live rebroadcast
+ * - every snapshot resend carries the whole set again - and summing then
+ * counts each row once per frame. Each frame is the complete set, and the
+ * last one is the current one.
+ */
+function latestSummaries(
+  frames: readonly unknown[],
+  epicId: string,
+  chatId: string,
+): readonly unknown[] {
+  for (let index = frames.length - 1; index >= 0; index -= 1) {
+    const frame = frames[index];
+    if (
+      frame !== null &&
+      typeof frame === "object" &&
+      Reflect.get(frame, "kind") === "accumulatedChanges" &&
+      Reflect.get(frame, "epicId") === epicId &&
+      Reflect.get(frame, "chatId") === chatId
+    ) {
+      return readSummaries(frame, epicId, chatId);
+    }
+  }
+  return [];
 }
 
 /** The summaries an `accumulatedChanges` frame carries for this chat. */
