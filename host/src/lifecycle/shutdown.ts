@@ -1,5 +1,80 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import {
+  hostStopIntentPath,
+  isStopIntentWithin,
+  parseStopIntent,
+} from "@traycer/protocol/config/host-stop-intent";
+import type { FatalErrorDetails } from "@traycer/protocol/framework/index";
 import type { ShutdownClaimIntent } from "@traycer/protocol/host/lifecycle/schemas";
+
+/**
+ * What the process exits with. Recorded from the released host: a restart
+ * exits 87, a shutdown 0 - and the launchd agent that supervises it restarts
+ * on a non-zero exit only (`KeepAlive.SuccessfulExit = false`), so the code
+ * is the whole difference between coming back and staying down.
+ */
+export const RESTART_EXIT_CODE = 87;
+
+export function exitCodeForShutdownIntent(intent: ShutdownClaimIntent): number {
+  return intent === "restart" ? RESTART_EXIT_CODE : 0;
+}
+
+/** A restart claim's lease, and the most a claim may ask for (released: 300 s). */
+export const SHUTDOWN_CLAIM_MAX_TTL_MS = 300_000;
+/** How long teardown may take before the process is exited regardless. */
+export const SHUTDOWN_FORCE_EXIT_MS = 30_000;
+/** How long the tombstone is good for, as the released host stamps it. */
+const RESTART_TOMBSTONE_TTL_MS = 60_000;
+/** A CLI stop-intent older than this is somebody else's, not this shutdown's. */
+const STOP_INTENT_FRESH_MS = 30_000;
+
+/**
+ * The frame every stream client gets before a restart tears its socket
+ * down, so it waits for the host to come back instead of bouncing. The
+ * released host's, field for field.
+ */
+export function restartTombstone(now: number): FatalErrorDetails {
+  return {
+    code: "HOST_RESTARTING",
+    reason: "The host is restarting and expects to be back shortly",
+    incompatibleMethods: null,
+    upgradeGuidance: null,
+    retryable: true,
+    restartIntent: {
+      tombstoneId: randomUUID(),
+      expiresAt: now + RESTART_TOMBSTONE_TTL_MS,
+    },
+  };
+}
+
+/**
+ * Whether a SIGTERM is the CLI's `host restart` rather than a plain stop:
+ * the CLI writes `stop-intent.json` beside the host's data before it signals,
+ * and a fresh one naming a restart is what earns the tombstone. Anything
+ * else - no file, another reason, too old - is a final shutdown.
+ */
+export async function hasExternalRestartIntent(
+  dataDir: string,
+  now: number,
+): Promise<boolean> {
+  let raw: string;
+  try {
+    raw = await readFile(hostStopIntentPath(dataDir), "utf8");
+  } catch {
+    return false;
+  }
+  try {
+    const intent = parseStopIntent(JSON.parse(raw));
+    return (
+      intent !== null &&
+      intent.reason === "restart" &&
+      isStopIntentWithin(intent, now, STOP_INTENT_FRESH_MS)
+    );
+  } catch {
+    return false;
+  }
+}
 
 /**
  * The cooperative shutdown claim `traycer host stop|restart` takes before it

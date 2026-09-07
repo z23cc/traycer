@@ -8,6 +8,7 @@ import type { HostStore } from "./store/host-store";
 import type { ChatHub } from "./stream/chat-hub";
 import type { ChatRecordsHub } from "./stream/chat-records";
 import type { CommunicationGraphHub } from "./stream/communication-graph";
+import type { ShutdownClaimIntent } from "@traycer/protocol/host/lifecycle/schemas";
 import type { ShutdownCoordinator } from "./lifecycle/shutdown";
 import type { EpicHub } from "./stream/epic-hub";
 import type { PlainTerminalHub } from "./terminal/plain";
@@ -52,6 +53,11 @@ export type HostRuntime = {
   readonly plainTerminals: PlainTerminalHub;
   readonly epics: EpicHub;
   readonly shutdown: ShutdownCoordinator;
-  requestRestart: () => void;
+  /**
+   * Take the host down, for a restart (exit 87, tombstone announced) or for
+   * good (exit 0). Once: a second request while the first tears down is
+   * ignored.
+   */
+  requestShutdown: (intent: ShutdownClaimIntent) => void;
   lastRestartTransitionId: string | null;
 };

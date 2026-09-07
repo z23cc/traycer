@@ -23,12 +23,12 @@ const started = await startHost({
   listenPort: 0,
 });
 
-const shutdown = (): void => {
-  void started.close().finally(() => {
-    process.exit(0);
-  });
-};
-
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
-process.on("SIGHUP", shutdown);
+process.on("SIGTERM", () => {
+  started.shutdownOnSignal("SIGTERM");
+});
+process.on("SIGINT", () => {
+  started.shutdownOnSignal("SIGINT");
+});
+process.on("SIGHUP", () => {
+  started.shutdownOnSignal("SIGHUP");
+});

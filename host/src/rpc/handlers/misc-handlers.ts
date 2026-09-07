@@ -21,6 +21,7 @@ import {
 } from "../../snapshots/snapshots";
 import { HOST_PROTOCOL_VERSION } from "../../version";
 import { hostBusyVerdict } from "../../gui/busy";
+import { SHUTDOWN_CLAIM_MAX_TTL_MS } from "../../lifecycle/shutdown";
 import { readProviderRateLimits } from "../../gui/provider-rate-limits";
 
 const SPEECH_STATUS = {
@@ -67,15 +68,34 @@ export const handleHostRestart: RpcHandler = (params, runtime) => {
   if (runtime.lastRestartTransitionId === parsed.data.transitionId) {
     return { ok: true, result: { outcome: "accepted" } };
   }
+  // The restart is a shutdown claim like any other, as released: work in
+  // flight or another transition's live claim is a busy verdict, and the
+  // claim taken here is what a competing `lifecycle.claimShutdown` sees.
   const verdict = hostBusyVerdict(runtime);
-  if (verdict.busySessionCount > 0) {
+  const now = Date.now();
+  const claim =
+    verdict.busySessionCount > 0
+      ? null
+      : runtime.shutdown.claimFor(
+          parsed.data.transitionId,
+          SHUTDOWN_CLAIM_MAX_TTL_MS,
+          "restart",
+          now,
+        );
+  if (claim === null) {
     return {
       ok: true,
       result: { outcome: "busy", verdict },
     };
   }
   runtime.lastRestartTransitionId = parsed.data.transitionId;
-  runtime.requestRestart();
+  // Committed after the response is on the wire; a claim released or
+  // expired meanwhile is a restart that does not happen.
+  setTimeout(() => {
+    if (runtime.shutdown.take(claim.token, Date.now()) !== null) {
+      runtime.requestShutdown("restart");
+    }
+  }, 0).unref();
   return { ok: true, result: { outcome: "accepted" } };
 };
 

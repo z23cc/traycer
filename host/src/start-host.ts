@@ -21,7 +21,13 @@ import { defaultProviderRoots } from "./session-import/discover";
 import { SessionImportRuns } from "./stream/session-import-run";
 import { WorktreeDeleteCommands } from "./stream/worktree-delete";
 import { EpicStateHub } from "./stream/epic-state";
-import { ShutdownCoordinator } from "./lifecycle/shutdown";
+import {
+  SHUTDOWN_FORCE_EXIT_MS,
+  ShutdownCoordinator,
+  exitCodeForShutdownIntent,
+  hasExternalRestartIntent,
+  restartTombstone,
+} from "./lifecycle/shutdown";
 import { EpicHub } from "./stream/epic-hub";
 import { PtyManager } from "./terminal/pty";
 import { TerminalRegistry } from "./terminal/sessions";
@@ -32,6 +38,13 @@ export type StartedHost = {
   readonly rpcUrl: string;
   readonly port: number;
   close: () => Promise<void>;
+  /**
+   * The signal handlers' door: a plain shutdown, unless a fresh CLI
+   * `stop-intent.json` says this SIGTERM is a restart - then the tombstone
+   * goes out first, as released. The exit code is the signal's (0) either
+   * way; the CLI is what starts the host again.
+   */
+  shutdownOnSignal: (signal: string) => void;
 };
 
 export type StartHostOptions = {
@@ -85,7 +98,7 @@ export async function startHost(
     plainTerminals: new PlainTerminalHub(),
     epics: new EpicHub(),
     shutdown: new ShutdownCoordinator(),
-    requestRestart: () => undefined,
+    requestShutdown: () => undefined,
     lastRestartTransitionId: null,
   };
   // Every store write reaches the records lane through this one hook; the
@@ -113,18 +126,64 @@ export async function startHost(
     await store.close();
     await http.close();
   };
-  runtime.requestRestart = () => {
-    void close().finally(() => {
+  // The released shutdown handler, shape for shape: once only, a watchdog
+  // that exits regardless after 30 s, the tombstone before teardown when the
+  // host will be back, then the exit code that decides whether launchd
+  // starts it again.
+  let shuttingDown = false;
+  const shutdownHost = (announce: Promise<boolean>, exitCode: number): void => {
+    if (shuttingDown) {
+      return;
+    }
+    shuttingDown = true;
+    const exit = (): void => {
       if (typeof process.env.VITEST === "string") {
         return;
       }
-      process.exit(0);
-    });
+      process.exit(exitCode);
+    };
+    const watchdog = setTimeout(() => {
+      console.error(
+        `[host] shutdown did not complete within ${String(SHUTDOWN_FORCE_EXIT_MS)}ms - forcing exit`,
+      );
+      exit();
+    }, SHUTDOWN_FORCE_EXIT_MS);
+    watchdog.unref();
+    void announce
+      .then((willReturn) =>
+        willReturn
+          ? http.announceRestartIntent(restartTombstone(Date.now()))
+          : undefined,
+      )
+      .catch(() => undefined)
+      .then(() => close())
+      .catch((error: unknown) => {
+        console.error(`[host] shutdown error: ${String(error)}`);
+      })
+      .finally(() => {
+        clearTimeout(watchdog);
+        exit();
+      });
+  };
+  runtime.requestShutdown = (intent) => {
+    shutdownHost(
+      Promise.resolve(intent === "restart"),
+      exitCodeForShutdownIntent(intent),
+    );
   };
   return {
     runtime,
     rpcUrl: http.rpcUrl,
     port: http.port,
     close,
+    shutdownOnSignal: (signal) => {
+      console.error(`[host] received ${signal}, shutting down`);
+      shutdownHost(
+        signal === "SIGTERM"
+          ? hasExternalRestartIntent(dataDir, Date.now())
+          : Promise.resolve(false),
+        0,
+      );
+    },
   };
 }

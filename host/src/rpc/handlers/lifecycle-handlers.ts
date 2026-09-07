@@ -5,6 +5,7 @@ import {
   releaseShutdownRequestSchema,
   type ShutdownClaimIntent,
 } from "@traycer/protocol/host/lifecycle/schemas";
+import { hostBusyVerdict } from "../../gui/busy";
 import type { RpcHandler } from "./types";
 
 /**
@@ -34,11 +35,22 @@ export const handleClaimShutdown: RpcHandler = (params, runtime) => {
   if (request === null) {
     return { ok: false, code: "RPC_ERROR", message: "invalid claim request" };
   }
+  // A host with work in flight is busy, as released - except to the
+  // transition that already holds the claim, whose retried dial only
+  // refreshes its lease.
+  const now = Date.now();
+  const held = runtime.shutdown.current(now);
+  if (
+    (held === null || held.transitionId !== request.transitionId) &&
+    hostBusyVerdict(runtime).busySessionCount > 0
+  ) {
+    return { ok: true, result: { denied: "busy" } };
+  }
   const granted = runtime.shutdown.claimFor(
     request.transitionId,
     request.ttl,
     request.intent,
-    Date.now(),
+    now,
   );
   if (granted === null) {
     return { ok: true, result: { denied: "busy" } };
@@ -57,8 +69,10 @@ export const handleCommitShutdown: RpcHandler = (params, runtime) => {
   }
   // The response has to reach the coordinator before the socket dies with the
   // process, so the exit is scheduled rather than awaited.
+  // After the response is on the wire: the intent the claim was taken with
+  // decides the exit code, and whether the tombstone goes out first.
   setTimeout(() => {
-    runtime.requestRestart();
+    runtime.requestShutdown(claim.intent);
   }, 0).unref();
   return { ok: true, result: { committed: true } };
 };

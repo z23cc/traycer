@@ -102,7 +102,8 @@ describe("host handshake", () => {
   it("accepts host.restart when idle and is idempotent on the same transitionId", async () => {
     started = await boot();
     let restarts = 0;
-    started.runtime.requestRestart = () => {
+    started.runtime.requestShutdown = (intent) => {
+      expect(intent).toBe("restart");
       restarts += 1;
     };
     const clientManifests = splitConnectionManifest(
