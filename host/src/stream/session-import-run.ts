@@ -21,8 +21,10 @@ import { importSession } from "../session-import/import";
  * reason this lives on the runtime rather than on a connection: a closed tab,
  * a reload, or a quit must not leave half a submission behind. Frames are
  * retained, so a subscribe that arrives mid-run ATTACHES - it replays
- * `started` and every `progress` so far, then follows live - and one that
- * arrives after the run finished sees the whole thing and its `complete`.
+ * `started` and every `progress` so far, then follows live. A subscribe that
+ * arrives AFTER the run finished starts a new one with its own selections,
+ * which is what makes re-submission the resume: everything already brought
+ * over comes straight back as `skipped_already_imported`.
  *
  * At most one run at a time, which is what makes an attach unambiguous: a
  * second submission does not queue, it watches the first, and `runId` is how
@@ -144,6 +146,22 @@ export class SessionImportRuns {
     selections: readonly SessionImportSelection[],
     permissionMode: string,
   ): Promise<void> {
+    try {
+      await this.importAll(runtime, record, selections, permissionMode);
+    } finally {
+      // ALWAYS terminal. There is at most one run, so a record left without a
+      // `complete` would report itself in flight forever and every later
+      // subscribe would attach to it and hang until the host restarted.
+      this.finish(record);
+    }
+  }
+
+  private async importAll(
+    runtime: HostRuntime,
+    record: RunRecord,
+    selections: readonly SessionImportSelection[],
+    permissionMode: string,
+  ): Promise<void> {
     // The vendors' directories are walked ONCE for the whole submission: a
     // per-selection lookup would re-walk hundreds of files per import.
     const found = locate(this.roots, selections);
@@ -177,6 +195,12 @@ export class SessionImportRuns {
       // between them is what keeps a long submission from stalling terminals.
       await new Promise((resolve) => setImmediate(resolve));
     }
+  }
+
+  private finish(record: RunRecord): void {
+    if (record.complete !== null) {
+      return;
+    }
     const complete = {
       kind: "complete",
       runId: record.runId,
@@ -184,11 +208,10 @@ export class SessionImportRuns {
       hasBinaryPayload: false,
     };
     record.complete = complete;
-    this.last = {
-      runId: record.runId,
-      counts: record.counts,
-      at: Date.now(),
-    };
+    // ponytail: in memory, so a host that HAS imported answers `null` after a
+    // restart, which the contract reads as "never imported". Persist it beside
+    // the store if the Settings summary is ever worth surviving a restart.
+    this.last = { runId: record.runId, counts: record.counts, at: Date.now() };
     for (const socket of record.sockets) {
       this.send(socket, complete);
     }

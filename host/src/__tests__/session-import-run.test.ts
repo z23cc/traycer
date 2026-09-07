@@ -326,6 +326,31 @@ describe("sessionImport.run", () => {
     });
   });
 
+  it("always reaches a terminal frame, so a run cannot wedge the hub", async () => {
+    const host = await boot();
+    // A root that does not exist walks to nothing, so every selection fails -
+    // the point is that the record still terminates.
+    const runs = new SessionImportRuns(new Map([["claude", "/nowhere"]]));
+    const socket = new FakeSocket();
+    runs.attach(socket as never, host.runtime, {
+      selections: [{ harness: "claude", nativeSessionId: "nope" }],
+      permissionMode: "supervised",
+    });
+
+    await settle(runs);
+
+    expect(socket.frames[socket.frames.length - 1].kind).toBe("complete");
+    // Nothing in flight, so the next subscribe starts its own run rather than
+    // attaching to a record that never finished.
+    expect(runs.status().active).toBeNull();
+    const next = new FakeSocket();
+    runs.attach(next as never, host.runtime, {
+      selections: [],
+      permissionMode: "supervised",
+    });
+    expect(next.frames[0]).toMatchObject({ attached: false, total: 0 });
+  });
+
   it("attaches a second subscribe to the run in flight and replays it", async () => {
     const host = await boot();
     const root = temp();

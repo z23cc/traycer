@@ -426,6 +426,10 @@ function chatOf(
         ]
       : [],
     transcriptEpoch: 0,
+    // Non-zero from birth, unlike every other chat this host seeds: those
+    // start empty and bump on their first turn, and the chat projection reads
+    // a zero as "nothing indexed yet". This one is created holding a
+    // transcript.
     indexRevision: 1,
     fileChangeCount: 0,
     lastUsage: null,
