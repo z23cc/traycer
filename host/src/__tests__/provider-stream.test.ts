@@ -15,24 +15,6 @@ describe("parseProviderStdoutLine", () => {
     ).toEqual([{ kind: "delta", text: "Hel" }]);
   });
 
-  it("maps Codex thread and agent_message events", () => {
-    expect(
-      parseProviderStdoutLine(
-        '{"type":"thread.started","thread_id":"0199a213-81c0-7800-8aa1-bbab2a035a53"}',
-      ),
-    ).toEqual([
-      {
-        kind: "session",
-        sessionId: "0199a213-81c0-7800-8aa1-bbab2a035a53",
-      },
-    ]);
-    expect(
-      parseProviderStdoutLine(
-        '{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"pong"}}',
-      ),
-    ).toEqual([{ kind: "delta", text: "pong" }]);
-  });
-
   it("maps Claude thinking and tool_use blocks", () => {
     expect(
       parseProviderStdoutLine(
@@ -49,25 +31,6 @@ describe("parseProviderStdoutLine", () => {
         toolId: "toolu_1",
         toolName: "Bash",
         input: { command: "ls" },
-      },
-    ]);
-  });
-
-  it("maps Codex reasoning and command_execution items", () => {
-    expect(
-      parseProviderStdoutLine(
-        '{"type":"item.completed","item":{"id":"item_2","type":"reasoning","text":"plan"}}',
-      ),
-    ).toEqual([{ kind: "reasoning", text: "plan" }]);
-    expect(
-      parseProviderStdoutLine(
-        '{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"ls"}}',
-      ),
-    ).toEqual([
-      {
-        kind: "command_start",
-        commandId: "item_1",
-        command: "ls",
       },
     ]);
   });
@@ -252,19 +215,6 @@ describe("parseProviderStdoutLine", () => {
         toolId: "toolu_e9",
       },
     ]);
-    // Codex reports its changes on their own, with no call to pair with.
-    expect(
-      parseProviderStdoutLine(
-        '{"type":"item.completed","item":{"id":"item_9","type":"file_change","path":"/tmp/y.ts","operation":"add"}}',
-      ),
-    ).toEqual([
-      {
-        kind: "file_change",
-        path: "/tmp/y.ts",
-        operation: "add",
-        toolId: null,
-      },
-    ]);
   });
 
   /**
@@ -415,6 +365,155 @@ describe("parseProviderStdoutLine", () => {
         '{"type":"control_request","request_id":"x","request":{"subtype":"initialize"}}',
       ),
     ).toEqual([]);
+  });
+
+  /**
+   * Codex's app-server, recorded live: JSON-RPC notifications on stdout. The
+   * thread id is the session; message and reasoning stream as deltas; a
+   * command item opens and closes with its exit code; a file-change item
+   * announces its files up front, owned by the item, and closes as one.
+   */
+  it("reads the Codex app-server's thread, deltas, command, and file-change items", () => {
+    expect(
+      parseProviderStdoutLine(
+        '{"jsonrpc":"2.0","method":"thread/started","params":{"thread":{"id":"01a07bdc-4486-7b80-a6a8-9fef5936d3e9","status":{"type":"idle"}}}}',
+      ),
+    ).toEqual([
+      { kind: "session", sessionId: "01a07bdc-4486-7b80-a6a8-9fef5936d3e9" },
+    ]);
+    expect(
+      parseProviderStdoutLine(
+        '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"msg_1","delta":"I\u2019ll run"}}',
+      ),
+    ).toEqual([{ kind: "delta", text: "I’ll run" }]);
+    expect(
+      parseProviderStdoutLine(
+        '{"jsonrpc":"2.0","method":"item/reasoning/summaryTextDelta","params":{"itemId":"rs_1","delta":"plan"}}',
+      ),
+    ).toEqual([{ kind: "reasoning", text: "plan" }]);
+    expect(
+      parseProviderStdoutLine(
+        '{"jsonrpc":"2.0","method":"item/started","params":{"item":{"type":"commandExecution","id":"exec-52c7","command":"/bin/zsh -lc \'echo PROBE-OK\'","status":"inProgress","exitCode":null},"threadId":"t","turnId":"u"}}',
+      ),
+    ).toEqual([
+      {
+        kind: "command_start",
+        commandId: "exec-52c7",
+        command: "/bin/zsh -lc 'echo PROBE-OK'",
+      },
+    ]);
+    expect(
+      parseProviderStdoutLine(
+        '{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"commandExecution","id":"exec-52c7","command":"/bin/zsh -lc \'echo PROBE-OK\'","status":"completed","aggregatedOutput":"PROBE-OK\\n","exitCode":0},"threadId":"t","turnId":"u"}}',
+      ),
+    ).toEqual([
+      {
+        kind: "command_end",
+        commandId: "exec-52c7",
+        command: "/bin/zsh -lc 'echo PROBE-OK'",
+        exitCode: 0,
+      },
+    ]);
+    expect(
+      parseProviderStdoutLine(
+        '{"jsonrpc":"2.0","method":"item/started","params":{"item":{"type":"fileChange","id":"exec-7801","changes":[{"path":"/tmp/hello.txt","kind":{"type":"add"},"diff":"hi\\n"}],"status":"inProgress"},"threadId":"t","turnId":"u"}}',
+      ),
+    ).toEqual([
+      {
+        kind: "file_change",
+        path: "/tmp/hello.txt",
+        operation: "add",
+        toolId: "exec-7801",
+      },
+    ]);
+    expect(
+      parseProviderStdoutLine(
+        '{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"fileChange","id":"exec-7801","changes":[{"path":"/tmp/hello.txt","kind":{"type":"add"},"diff":"hi\\n"}],"status":"completed"},"threadId":"t","turnId":"u"}}',
+      ),
+    ).toEqual([{ kind: "tool_end", toolId: "exec-7801" }]);
+  });
+
+  /**
+   * The server asking. An approval becomes a permission request keyed by the
+   * JSON-RPC id it must answer; a file-change request names only its item,
+   * so the reader pairs it with the item's announcement. A request this host
+   * does not serve is surfaced so the driver can refuse it rather than leave
+   * the turn hanging.
+   */
+  it("reads the Codex app-server's approval requests, and flags the rest", () => {
+    expect(
+      parseProviderStdoutLine(
+        '{"jsonrpc":"2.0","id":0,"method":"item/fileChange/requestApproval","params":{"threadId":"t","turnId":"u","itemId":"exec-7801","startedAtMs":1788784465333,"reason":null,"grantRoot":null}}',
+      ),
+    ).toEqual([
+      {
+        kind: "permission_request",
+        requestId: "0",
+        toolUseId: "exec-7801",
+        toolName: "apply_patch",
+        description: "Apply file changes",
+        input: {
+          threadId: "t",
+          turnId: "u",
+          itemId: "exec-7801",
+          startedAtMs: 1788784465333,
+          reason: null,
+          grantRoot: null,
+        },
+      },
+    ]);
+    expect(
+      parseProviderStdoutLine(
+        '{"jsonrpc":"2.0","id":"req-9","method":"item/commandExecution/requestApproval","params":{"threadId":"t","turnId":"u","itemId":"exec-1","command":"rm -rf build","reason":null}}',
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        kind: "permission_request",
+        requestId: '"req-9"',
+        toolUseId: "exec-1",
+        toolName: "command",
+        description: "rm -rf build",
+      }),
+    ]);
+    expect(
+      parseProviderStdoutLine(
+        '{"jsonrpc":"2.0","id":4,"method":"item/tool/requestUserInput","params":{"itemId":"x","questions":[]}}',
+      ),
+    ).toEqual([
+      {
+        kind: "rpc_unsupported",
+        requestId: "4",
+        method: "item/tool/requestUserInput",
+      },
+    ]);
+    expect(
+      parseProviderStdoutLine(
+        '{"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"threadId":"t","turnId":"u","tokenUsage":{"total":{"totalTokens":16234},"last":{"totalTokens":16234,"inputTokens":16062,"cachedInputTokens":6912,"outputTokens":172},"modelContextWindow":258400}}}',
+      ),
+    ).toEqual([
+      {
+        kind: "usage",
+        usage: {
+          inputTokens: 16062,
+          outputTokens: 172,
+          totalTokens: 16234,
+          cacheReadInputTokens: 6912,
+          contextTokens: 16234,
+          contextWindow: 258400,
+          costUsd: undefined,
+        },
+      },
+    ]);
+    expect(
+      parseProviderStdoutLine(
+        '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"t","turn":{"id":"u","status":"failed","error":{"message":"boom"}}}}',
+      ),
+    ).toEqual([{ kind: "turn_end", status: "failed", error: "boom" }]);
+    expect(
+      parseProviderStdoutLine(
+        '{"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"bad thread"}}',
+      ),
+    ).toEqual([{ kind: "transport_error", message: "bad thread" }]);
   });
 
   it("ignores unstructured CLI text so the plain-stdout path can take over", () => {

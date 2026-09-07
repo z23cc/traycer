@@ -245,6 +245,7 @@ describe("local GUI send without cloud login", () => {
       messageId: "msg-user-2",
       text: "second turn",
       permissionMode: null,
+      harnessId: null,
     });
     expect(frames.some((frame) => jsonHas(frame, "actionAck"))).toBe(true);
     expect(frames.some((frame) => jsonHas(frame, "accepted"))).toBe(true);
@@ -401,6 +402,7 @@ describe("local GUI send without cloud login", () => {
       messageId: "msg-user-4a",
       text: "keep this",
       permissionMode: null,
+      harnessId: null,
     });
     await waitForChatText(
       streamUrl,
@@ -417,6 +419,7 @@ describe("local GUI send without cloud login", () => {
       messageId: "msg-user-4b",
       text: "drop this",
       permissionMode: null,
+      harnessId: null,
     });
     await waitForChatText(streamUrl, "epic-4", "chat-4", "drop this", 40, 50);
     await waitForChatText(
@@ -484,6 +487,7 @@ describe("local GUI send without cloud login", () => {
   it("queues a follow-up send while a print is running", async () => {
     const setup = await bootWithCli(
       "#!/bin/sh\nsleep 0.4\nprintf 'slow-ok\\n'\n",
+      "claude",
     );
     tempDir = setup.tempDir;
     started = setup.started;
@@ -570,6 +574,7 @@ describe("local GUI send without cloud login", () => {
         ...stdout.map((line) => `printf '%s\n' '${line}'`),
         "",
       ].join("\n"),
+      "claude",
     );
     tempDir = setup.tempDir;
     started = setup.started;
@@ -612,6 +617,7 @@ describe("local GUI send without cloud login", () => {
       messageId: "msg-user-7",
       text: "plan it",
       permissionMode: null,
+      harnessId: null,
     });
     const snapshot = await waitForChatText(
       streamUrl,
@@ -661,6 +667,7 @@ describe("local GUI send without cloud login", () => {
         ...stdout.map((line) => `printf '%s\n' '${line}'`),
         "",
       ].join("\n"),
+      "claude",
     );
     tempDir = setup.tempDir;
     started = setup.started;
@@ -703,6 +710,7 @@ describe("local GUI send without cloud login", () => {
       messageId: "msg-user-8",
       text: "edit it",
       permissionMode: null,
+      harnessId: null,
     });
     await waitForChatText(streamUrl, "epic-8", "chat-8", "edit-ok", 80, 50);
 
@@ -745,6 +753,7 @@ describe("local GUI send without cloud login", () => {
         ...stdout.map((line) => `printf '%s\\n' '${line}'`),
         "",
       ].join("\n"),
+      "claude",
     );
     tempDir = setup.tempDir;
     started = setup.started;
@@ -787,6 +796,7 @@ describe("local GUI send without cloud login", () => {
       messageId: "msg-user-6",
       text: "break something",
       permissionMode: null,
+      harnessId: null,
     });
     await waitForChatText(
       streamUrl,
@@ -826,6 +836,7 @@ describe("local GUI send without cloud login", () => {
         ...stdout.map((line) => `printf '%s\n' '${line}'`),
         "",
       ].join("\n"),
+      "claude",
     );
     tempDir = setup.tempDir;
     started = setup.started;
@@ -838,6 +849,7 @@ describe("local GUI send without cloud login", () => {
       messageId: "msg-user-9",
       text: "do things",
       permissionMode: null,
+      harnessId: null,
     });
     const frames = await waitForSealedBlocks(
       streamUrl,
@@ -896,6 +908,7 @@ describe("local GUI send without cloud login", () => {
         "exit 3",
         "",
       ].join("\n"),
+      "claude",
     );
     tempDir = setup.tempDir;
     started = setup.started;
@@ -908,6 +921,7 @@ describe("local GUI send without cloud login", () => {
       messageId: "msg-user-10",
       text: "die halfway",
       permissionMode: null,
+      harnessId: null,
     });
     const frames = await waitForSealedBlocks(
       streamUrl,
@@ -970,6 +984,7 @@ describe("local GUI send without cloud login", () => {
         ...stdout.map((line) => `printf '%s\n' '${line}'`),
         "",
       ].join("\n"),
+      "claude",
     );
     tempDir = setup.tempDir;
     started = setup.started;
@@ -982,6 +997,7 @@ describe("local GUI send without cloud login", () => {
       messageId: "msg-user-11",
       text: "delegate it",
       permissionMode: null,
+      harnessId: null,
     });
     const frames = await waitForSealedBlocks(
       streamUrl,
@@ -1069,6 +1085,7 @@ describe("local GUI send without cloud login", () => {
         ...stdout.map((line) => `printf '%s\n' '${line}'`),
         "",
       ].join("\n"),
+      "claude",
     );
     tempDir = setup.tempDir;
     started = setup.started;
@@ -1083,6 +1100,7 @@ describe("local GUI send without cloud login", () => {
       messageId: "msg-user-12",
       text: "edit it",
       permissionMode: null,
+      harnessId: null,
     });
     const frames = await waitForSealedBlocks(
       streamUrl,
@@ -1312,6 +1330,7 @@ describe("local GUI send without cloud login", () => {
   it("asks the user before a tool under supervised, and relays the answer", async () => {
     const setup = await bootWithCli(
       askingCli("Bash", '{"command":"rm -rf build"}', "Run rm -rf build"),
+      "claude",
     );
     tempDir = setup.tempDir;
     started = setup.started;
@@ -1324,6 +1343,7 @@ describe("local GUI send without cloud login", () => {
       messageId: "msg-user-14",
       text: "clean the build",
       permissionMode: "supervised",
+      harnessId: null,
     });
     // The question lands on the snapshot, which is where a reopened tab
     // finds it.
@@ -1420,6 +1440,7 @@ describe("local GUI send without cloud login", () => {
     const target = join(tmpdir(), `traycer-perm-${String(Date.now())}.ts`);
     const setup = await bootWithCli(
       askingCli("Write", `{"file_path":"${target}","content":"x"}`, "perm.ts"),
+      "claude",
     );
     tempDir = setup.tempDir;
     started = setup.started;
@@ -1432,6 +1453,7 @@ describe("local GUI send without cloud login", () => {
       messageId: "msg-user-15",
       text: "write it",
       permissionMode: "supervised",
+      harnessId: null,
     });
     const asked = await waitForSnapshot(
       streamUrl,
@@ -1510,6 +1532,7 @@ describe("local GUI send without cloud login", () => {
   it("answers for the user under full_access without asking", async () => {
     const setup = await bootWithCli(
       askingCli("Bash", '{"command":"ls"}', "Run ls"),
+      "claude",
     );
     tempDir = setup.tempDir;
     started = setup.started;
@@ -1522,6 +1545,7 @@ describe("local GUI send without cloud login", () => {
       messageId: "msg-user-16",
       text: "list",
       permissionMode: "full_access",
+      harnessId: null,
     });
     expect(
       sent.some((f) => Reflect.get(f ?? {}, "kind") === "approvalRequested"),
@@ -1554,6 +1578,7 @@ describe("local GUI send without cloud login", () => {
   it("abandons an open question when the turn is stopped", async () => {
     const setup = await bootWithCli(
       askingCli("Bash", '{"command":"ls"}', "Run ls"),
+      "claude",
     );
     tempDir = setup.tempDir;
     started = setup.started;
@@ -1566,6 +1591,7 @@ describe("local GUI send without cloud login", () => {
       messageId: "msg-user-17",
       text: "list",
       permissionMode: "supervised",
+      harnessId: null,
     });
     const asked = await waitForSnapshot(
       streamUrl,
@@ -1619,7 +1645,7 @@ describe("local GUI send without cloud login", () => {
    * an `answers` map on the tool's own input.
    */
   it("opens an interview for AskUserQuestion and relays the answer", async () => {
-    const setup = await bootWithCli(askingInterviewCli());
+    const setup = await bootWithCli(askingInterviewCli(), "claude");
     tempDir = setup.tempDir;
     started = setup.started;
     await seedChat(started, setup.workspace, "epic-18", "chat-18");
@@ -1631,6 +1657,7 @@ describe("local GUI send without cloud login", () => {
       messageId: "msg-user-18",
       text: "ask me",
       permissionMode: "full_access",
+      harnessId: null,
     });
     const asked = await waitForSnapshot(
       streamUrl,
@@ -1752,7 +1779,7 @@ describe("local GUI send without cloud login", () => {
    * "Aborted", the card errors, and the log says so.
    */
   it("fails an open question when the turn is stopped", async () => {
-    const setup = await bootWithCli(askingInterviewCli());
+    const setup = await bootWithCli(askingInterviewCli(), "claude");
     tempDir = setup.tempDir;
     started = setup.started;
     await seedChat(started, setup.workspace, "epic-19", "chat-19");
@@ -1764,6 +1791,7 @@ describe("local GUI send without cloud login", () => {
       messageId: "msg-user-19",
       text: "ask me",
       permissionMode: "supervised",
+      harnessId: null,
     });
     await waitForSnapshot(
       streamUrl,
@@ -1806,7 +1834,173 @@ describe("local GUI send without cloud login", () => {
       ),
     ).toContain("interview.errored");
   });
+
+  /**
+   * Codex, end to end, against a fake app-server that speaks the JSON-RPC
+   * the real one does - recorded live: `initialize`, `thread/start`,
+   * `turn/start`, an announced file change, the approval request that gates
+   * it, and the item's completion. The fake writes the file only when told
+   * yes, which is what makes the host's own before/after real.
+   */
+  it("asks about a Codex file change, and captures it around the approval", async () => {
+    const target = join(tmpdir(), `traycer-codex-${String(Date.now())}.txt`);
+    const setup = await bootWithCli(fakeCodexAppServer(target), "codex");
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-20", "chat-20");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-20",
+      chatId: "chat-20",
+      clientActionId: "action-20",
+      messageId: "msg-user-20",
+      text: "make the file",
+      permissionMode: "supervised",
+      harnessId: "codex",
+    });
+    const asked = await waitForSnapshot(
+      streamUrl,
+      "epic-20",
+      "chat-20",
+      (snapshot) =>
+        readArray(snapshot, "pendingFileEditApprovals").length === 1,
+      80,
+      50,
+    );
+    const pending = readArray(asked, "pendingFileEditApprovals")[0];
+    // The paths come from the item's announcement, not the request - which
+    // names only the item.
+    expect(pending).toMatchObject({
+      toolName: "apply_patch",
+      paths: [target],
+      operation: "create",
+    });
+    const approvalId = String(Reflect.get(pending ?? {}, "approvalId"));
+    expect(approvalId).toBe("item-fc-1:file-edit");
+    const answered = await sendActionUntil(
+      streamUrl,
+      {
+        kind: "fileEditApprovalDecision",
+        epicId: "epic-20",
+        chatId: "chat-20",
+        clientActionId: "decide-20",
+        approvalId,
+        decision: { approved: true },
+      },
+      "fileEditApprovalResolved",
+    );
+    expect(answered).toContainEqual(
+      expect.objectContaining({ kind: "actionAck", status: "accepted" }),
+    );
+    const frames = await waitForSealedBlocks(
+      streamUrl,
+      "epic-20",
+      "chat-20",
+      "file_change",
+      80,
+      50,
+    );
+    const blocks = assistantBlocks(frames, "epic-20", "chat-20");
+    expect(await readFile(target, "utf8")).toBe("hi\n");
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "file_change"),
+    ).toMatchObject({
+      blockId: `item-fc-1:${target}`,
+      operation: "create",
+      diffSource: "snapshot",
+      beforeHash: null,
+      additions: 1,
+      deletions: 0,
+      reason: "snapshot",
+    });
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "text"),
+    ).toMatchObject({ text: "codex-ok" });
+    expect(latestSummaries(frames, "epic-20", "chat-20")[0]).toMatchObject({
+      filePath: target,
+      operation: "create",
+      hasContents: true,
+      undoable: true,
+      counts: { additions: 1, deletions: 0 },
+    });
+    await rm(target, { force: true });
+  });
+
+  /** `full_access` answers the app-server's question itself; nothing reaches the GUI. */
+  it("answers a Codex approval itself under full_access", async () => {
+    const target = join(tmpdir(), `traycer-codex-${String(Date.now())}-fa.txt`);
+    const setup = await bootWithCli(fakeCodexAppServer(target), "codex");
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-21", "chat-21");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    const sent = await sendOnChat(streamUrl, {
+      epicId: "epic-21",
+      chatId: "chat-21",
+      clientActionId: "action-21",
+      messageId: "msg-user-21",
+      text: "make the file",
+      permissionMode: "full_access",
+      harnessId: "codex",
+    });
+    expect(
+      sent.some(
+        (f) => Reflect.get(f ?? {}, "kind") === "fileEditApprovalRequested",
+      ),
+    ).toBe(false);
+    const frames = await waitForSealedBlocks(
+      streamUrl,
+      "epic-21",
+      "chat-21",
+      "file_change",
+      80,
+      50,
+    );
+    const blocks = assistantBlocks(frames, "epic-21", "chat-21");
+    expect(await readFile(target, "utf8")).toBe("hi\n");
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "file_change"),
+    ).toMatchObject({ diffSource: "snapshot", operation: "create" });
+    await rm(target, { force: true });
+  });
 });
+
+/**
+ * A fake Codex app-server: answers the three requests this host sends, then
+ * announces one file change, asks about it, and applies it only on "accept".
+ * Every line is the recorded shape, trimmed to what the host reads.
+ */
+function fakeCodexAppServer(target: string): string {
+  const fc = `{"type":"fileChange","id":"item-fc-1","changes":[{"path":"${target}","kind":{"type":"add"},"diff":"hi\\\\n"}]`;
+  return [
+    "#!/bin/sh",
+    "read -r init",
+    `printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"fake"}}'`,
+    "read -r threadstart",
+    `printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"thread":{"id":"thread-fake-1"}}}'`,
+    `printf '%s\n' '{"jsonrpc":"2.0","method":"thread/started","params":{"thread":{"id":"thread-fake-1"}}}'`,
+    "read -r turnstart",
+    `printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"turn":{"id":"turn-fake-1","status":"inProgress"}}}'`,
+    `printf '%s\n' '{"jsonrpc":"2.0","method":"item/started","params":{"item":${fc},"status":"inProgress"},"threadId":"thread-fake-1","turnId":"turn-fake-1"}}'`,
+    `printf '%s\n' '{"jsonrpc":"2.0","id":7,"method":"item/fileChange/requestApproval","params":{"threadId":"thread-fake-1","turnId":"turn-fake-1","itemId":"item-fc-1","startedAtMs":1,"reason":null,"grantRoot":null}}'`,
+    "read -r answer",
+    'case "$answer" in',
+    '  *\'"decision":"accept"\'*)',
+    `    printf 'hi\\n' > "${target}"`,
+    `    printf '%s\n' '{"jsonrpc":"2.0","method":"item/completed","params":{"item":${fc},"status":"completed"},"threadId":"thread-fake-1","turnId":"turn-fake-1"}}'`,
+    "    ;;",
+    "  *)",
+    `    printf '%s\n' '{"jsonrpc":"2.0","method":"item/completed","params":{"item":${fc},"status":"declined"},"threadId":"thread-fake-1","turnId":"turn-fake-1"}}'`,
+    "    ;;",
+    "esac",
+    `printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"msg-1","delta":"codex-ok"}}'`,
+    `printf '%s\n' '{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg-1","text":"codex-ok"},"threadId":"thread-fake-1","turnId":"turn-fake-1"}}'`,
+    `printf '%s\n' '{"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"threadId":"thread-fake-1","turnId":"turn-fake-1","tokenUsage":{"total":{"totalTokens":30},"last":{"totalTokens":30,"inputTokens":20,"outputTokens":10},"modelContextWindow":1000}}}'`,
+    `printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thread-fake-1","turn":{"id":"turn-fake-1","status":"completed","error":null}}}'`,
+    "read -r eof || true",
+    "",
+  ].join("\n");
+}
 
 /**
  * A fake CLI asking the user a question over the stdio channel, and reading
@@ -2122,14 +2316,17 @@ type Booted = {
 };
 
 async function boot(): Promise<Booted> {
-  return bootWithCli("#!/bin/sh\nprintf 'assistant-ok\\n'\n");
+  return bootWithCli("#!/bin/sh\nprintf 'assistant-ok\\n'\n", "claude");
 }
 
-async function bootWithCli(script: string): Promise<Booted> {
+async function bootWithCli(
+  script: string,
+  harness: "claude" | "codex",
+): Promise<Booted> {
   const tempDir = await mkdtemp(join(tmpdir(), "traycer-host-"));
   const binDir = join(tempDir, "bin");
   await mkdir(binDir);
-  const claudePath = join(binDir, "claude");
+  const claudePath = join(binDir, harness);
   await writeFile(claudePath, script);
   await chmod(claudePath, 0o755);
   const workspace = join(tempDir, "proj");
@@ -2145,7 +2342,7 @@ async function bootWithCli(script: string): Promise<Booted> {
     "providers.addCustomPath",
     { major: 2, minor: 1 },
     {
-      providerId: "claude-code",
+      providerId: harness === "claude" ? "claude-code" : "codex",
       path: await realpath(claudePath),
     },
   );
@@ -2458,6 +2655,8 @@ async function sendOnChat(
     readonly text: string;
     /** Null is the tests' default, `full_access`. */
     readonly permissionMode: string | null;
+    /** Null is the tests' default, `claude`. */
+    readonly harnessId: string | null;
   },
 ): Promise<unknown[]> {
   const socket = new WebSocket(url);
@@ -2499,7 +2698,7 @@ async function sendOnChat(
             content: promptDoc(input.text),
             sender: { type: "user", userId: "local" },
             settings: {
-              harnessId: "claude",
+              harnessId: input.harnessId ?? "claude",
               model: "default",
               permissionMode: input.permissionMode ?? "full_access",
               reasoningEffort: null,

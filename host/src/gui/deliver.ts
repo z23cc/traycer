@@ -46,8 +46,36 @@ export type PendingApproval = {
   readonly operation: "edit" | "create" | "delete" | null;
 };
 
+/**
+ * The result a Codex approval request takes, by what it asked. Command and
+ * file-change requests take a decision word; a permissions request takes the
+ * permissions back (or none) for the turn. The released host answers the
+ * same three the same way.
+ */
+function codexApprovalResult(
+  allowed: boolean,
+  about: { readonly toolName: string; readonly input: unknown },
+): unknown {
+  if (about.toolName === "permissions") {
+    const requested =
+      about.input !== null && typeof about.input === "object"
+        ? Reflect.get(about.input, "permissions")
+        : null;
+    return {
+      permissions:
+        allowed && requested !== null && typeof requested === "object"
+          ? requested
+          : {},
+      scope: "turn",
+    };
+  }
+  return { decision: allowed ? "accept" : "decline" };
+}
+
 export class GuiRunRegistry {
   private readonly runs = new Map<string, ChildProcess>();
+  /** How each run's permission answers are written: Claude's control frames or Codex's JSON-RPC results. */
+  private readonly channels = new Map<string, "claude" | "codex">();
   /** Open permission questions per chat, answered by the GUI or abandoned at turn end. */
   private readonly approvals = new Map<string, Map<string, PendingApproval>>();
   private readonly prints = new Map<string, GuiPrintTurnState>();
@@ -128,10 +156,24 @@ export class GuiRunRegistry {
     response:
       | { readonly behavior: "allow"; readonly updatedInput: unknown }
       | { readonly behavior: "deny"; readonly message: string },
+    /** What was asked, for the channels whose answer shape depends on it. */
+    about: { readonly toolName: string; readonly input: unknown },
   ): boolean {
     const child = this.runs.get(agentId);
     if (child === undefined || child.stdin === null || !child.stdin.writable) {
       return false;
+    }
+    if (this.channels.get(agentId) === "codex") {
+      // The JSON-RPC id, quoted back exactly as it came - a number or a string.
+      const id: unknown = JSON.parse(requestId);
+      child.stdin.write(
+        `${JSON.stringify({
+          jsonrpc: "2.0",
+          id,
+          result: codexApprovalResult(response.behavior === "allow", about),
+        })}\n`,
+      );
+      return true;
     }
     child.stdin.write(
       `${JSON.stringify({
@@ -206,12 +248,13 @@ export class GuiRunRegistry {
     return this.stopped.has(agentId);
   }
 
-  set(agentId: string, child: ChildProcess): void {
+  set(agentId: string, child: ChildProcess, channel: "claude" | "codex"): void {
     const current = this.runs.get(agentId);
     if (current !== undefined) {
       current.kill("SIGTERM");
     }
     this.runs.set(agentId, child);
+    this.channels.set(agentId, channel);
   }
 
   kill(agentId: string): void {
@@ -269,7 +312,13 @@ export async function runGuiPrintTurn(
     // or not at all.
     input.harnessId === "claude" ? snapshotHookSettings(runtime.dataDir) : null,
   );
-  const stdioPrompt = input.harnessId === "claude";
+  const channel: "claude" | "codex" | null =
+    input.harnessId === "claude"
+      ? "claude"
+      : input.harnessId === "codex"
+        ? "codex"
+        : null;
+  const stdioPrompt = channel !== null;
   return new Promise((resolve, reject) => {
     let child: ChildProcess;
     try {
@@ -283,12 +332,14 @@ export async function runGuiPrintTurn(
       reject(error instanceof Error ? error : new Error(String(error)));
       return;
     }
-    runtime.guiRuns.set(input.agentId, child);
+    runtime.guiRuns.set(input.agentId, child, channel ?? "claude");
     // A child that exits before reading its prompt makes the write an EPIPE,
     // which is the close handler's story to tell - not an unhandled stream
     // error's.
     child.stdin?.on("error", () => undefined);
-    if (stdioPrompt && child.stdin !== null) {
+    const codex = channel === "codex" ? codexDriver(child, input) : null;
+    codex?.start();
+    if (channel === "claude" && child.stdin !== null) {
       // The prompt, as the user record the stream-json input format takes.
       // Stdin stays open after it: the permission answers ride the same pipe,
       // and the run does not end until it closes - see the `result` handling
@@ -316,6 +367,7 @@ export async function runGuiPrintTurn(
       readonly status: number;
       readonly detail: string;
     } | null = null;
+    let turnFault: string | null = null;
     let flushTimer: NodeJS.Timeout | null = null;
     const emit = (event: ProviderStreamEvent): void => {
       if (event.kind === "delta") {
@@ -330,11 +382,29 @@ export async function runGuiPrintTurn(
         // line the CLI writes, which is the first thing it does once answered.
         disarmDeadline();
       }
-      if (event.kind === "usage" && stdioPrompt) {
+      if (event.kind === "usage" && channel === "claude") {
         // `usage` rides the `result` record, which is the turn's end. With
         // stdin open the CLI would wait for a next turn; closing it is what
         // lets the process exit and the run settle.
         child.stdin?.end();
+      }
+      if (event.kind === "turn_end") {
+        // Codex's end of turn. A failed turn is a failed run: the reply text
+        // so far is not an answer, and the close handler says why.
+        if (event.status === "failed" || event.status === "interrupted") {
+          turnFault = `Codex turn ${event.status}${event.error === null ? "" : `: ${event.error}`}`;
+        }
+        child.stdin?.end();
+        return;
+      }
+      if (event.kind === "transport_error") {
+        turnFault = event.message;
+        child.stdin?.end();
+        return;
+      }
+      if (event.kind === "rpc_unsupported") {
+        codex?.refuse(event.requestId, event.method);
+        return;
       }
       if (event.kind === "auth_failure" && authFailure === null) {
         // Stop rather than wait it out. The provider retries a rejected
@@ -397,6 +467,9 @@ export async function runGuiPrintTurn(
       }
     };
     const applyStructuredLine = (line: string): void => {
+      if (codex?.consumeResponse(line) === true) {
+        return;
+      }
       const events = parseProviderStdoutLine(line);
       const fullMessage = lineIncludesFullMessage(line);
       for (const event of events) {
@@ -489,6 +562,10 @@ export async function runGuiPrintTurn(
         );
         return;
       }
+      if (turnFault !== null) {
+        reject(new Error(`agent.sendMessage: ${turnFault}`));
+        return;
+      }
       if (text.length > 0) {
         resolve(text);
         return;
@@ -502,6 +579,172 @@ export async function runGuiPrintTurn(
       );
     });
   });
+}
+
+/**
+ * This host's side of the app-server conversation: the three requests that
+ * open a turn, and the responses that advance them. Everything the server
+ * says on its own is left to the parser.
+ *
+ * The shape is the released host's: `initialize`, then `thread/start` (or
+ * `thread/resume` for a known thread), then `turn/start` with the prompt as
+ * a text input, the workspace as cwd and root, `approvalPolicy: "untrusted"`
+ * with `approvalsReviewer: "user"` so the server asks and this host answers,
+ * and `sandboxPolicy: dangerFullAccess` because the answers ARE the gate.
+ */
+function codexDriver(
+  child: ChildProcess,
+  input: {
+    readonly prompt: string;
+    readonly cwd: string;
+    readonly model: string | null;
+    readonly sessionId: string | null;
+    readonly onEvent: (event: ProviderStreamEvent) => void;
+  },
+): {
+  readonly start: () => void;
+  readonly consumeResponse: (line: string) => boolean;
+  readonly refuse: (requestId: string, method: string) => void;
+} {
+  let nextId = 0;
+  const pending = new Map<number, "initialize" | "thread" | "turn">();
+  const write = (frame: unknown): void => {
+    if (child.stdin !== null && child.stdin.writable) {
+      child.stdin.write(`${JSON.stringify(frame)}\n`);
+    }
+  };
+  const send = (
+    purpose: "initialize" | "thread" | "turn",
+    method: string,
+    params: unknown,
+  ): void => {
+    nextId += 1;
+    pending.set(nextId, purpose);
+    write({ jsonrpc: "2.0", id: nextId, method, params });
+  };
+  const model =
+    input.model === null || input.model === "default" ? null : input.model;
+  const policy = { approvalPolicy: "untrusted", approvalsReviewer: "user" };
+  return {
+    start: () => {
+      send("initialize", "initialize", {
+        protocolVersion: "2025-01-01",
+        capabilities: { experimentalApi: true },
+        clientInfo: { name: "traycer-oss-host", version: "0.1.0" },
+      });
+    },
+    consumeResponse: (line: string): boolean => {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line);
+      } catch {
+        return false;
+      }
+      if (parsed === null || typeof parsed !== "object") {
+        return false;
+      }
+      const id = Reflect.get(parsed, "id");
+      if (
+        typeof id !== "number" ||
+        Reflect.get(parsed, "method") !== undefined
+      ) {
+        return false;
+      }
+      const purpose = pending.get(id);
+      if (purpose === undefined) {
+        return false;
+      }
+      pending.delete(id);
+      const error = Reflect.get(parsed, "error");
+      if (error !== null && error !== undefined) {
+        input.onEvent({
+          kind: "transport_error",
+          message: `${purpose}: ${
+            typeof error === "object" && error !== null
+              ? (readStringOf(error, "message") ?? JSON.stringify(error))
+              : String(error)
+          }`,
+        });
+        return true;
+      }
+      const result = Reflect.get(parsed, "result");
+      if (purpose === "initialize") {
+        send(
+          "thread",
+          input.sessionId === null ? "thread/start" : "thread/resume",
+          {
+            ...(input.sessionId === null ? {} : { threadId: input.sessionId }),
+            cwd: input.cwd,
+            ...(model === null ? {} : { model }),
+            ...policy,
+          },
+        );
+        return true;
+      }
+      if (purpose === "thread") {
+        const thread =
+          result !== null && typeof result === "object"
+            ? Reflect.get(result, "thread")
+            : null;
+        const threadId =
+          (thread !== null && typeof thread === "object"
+            ? readStringOf(thread, "id")
+            : null) ??
+          (result !== null && typeof result === "object"
+            ? readStringOf(result, "threadId")
+            : null) ??
+          input.sessionId;
+        if (threadId === null) {
+          input.onEvent({
+            kind: "transport_error",
+            message: "thread/start returned no thread id",
+          });
+          return true;
+        }
+        input.onEvent({ kind: "session", sessionId: threadId });
+        send("turn", "turn/start", {
+          threadId,
+          input: [{ type: "text", text: input.prompt, text_elements: [] }],
+          cwd: input.cwd,
+          runtimeWorkspaceRoots: [input.cwd],
+          ...policy,
+          sandboxPolicy: { type: "dangerFullAccess" },
+          summary: "auto",
+          ...(model === null ? {} : { model }),
+        });
+        return true;
+      }
+      return true;
+    },
+    refuse: (requestId: string, method: string): void => {
+      // An unanswered server request holds the turn open forever; an honest
+      // refusal lets the server carry on or fail cleanly. Elicitations have
+      // a cancel of their own.
+      let id: unknown;
+      try {
+        id = JSON.parse(requestId);
+      } catch {
+        return;
+      }
+      if (method === "mcpServer/elicitation/request") {
+        write({ jsonrpc: "2.0", id, result: { action: "cancel" } });
+        return;
+      }
+      write({
+        jsonrpc: "2.0",
+        id,
+        error: {
+          code: -32601,
+          message: `This host does not serve ${method}.`,
+        },
+      });
+    },
+  };
+}
+
+function readStringOf(record: object, key: string): string | null {
+  const value = Reflect.get(record, key);
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 export function guiPrintArgv(
@@ -550,22 +793,11 @@ export function guiPrintArgv(
     return args;
   }
   if (harnessId === "codex") {
-    const args = ["exec", "--json"];
-    if (modelFlag !== null) {
-      args.push("--model", modelFlag);
-    }
-    if (permissionMode === "full_access") {
-      args.push("--dangerously-bypass-approvals-and-sandbox");
-    } else if (permissionMode === "auto_accept_edits") {
-      args.push("--sandbox", "workspace-write");
-    } else {
-      args.push("--sandbox", "read-only");
-    }
-    if (sessionId !== null) {
-      args.push("resume", sessionId);
-    }
-    args.push(prompt);
-    return args;
+    // The app-server, as the released host runs it. Model, thread, prompt,
+    // sandbox and approval policy all ride JSON-RPC on stdin - see
+    // `codexDriver` - and the approvals come back the same way, decided by
+    // this host under every mode.
+    return ["app-server", "--listen", "stdio://"];
   }
   if (harnessId === "opencode") {
     return modelFlag === null
@@ -621,8 +853,8 @@ export function visibleDeltaText(
 function lineIncludesFullMessage(line: string): boolean {
   return (
     lineTypeIs(line, "assistant") ||
-    lineTypeIs(line, "item.completed") ||
-    lineTypeIs(line, "item.updated")
+    line.includes('"method":"item/completed"') ||
+    line.includes('"method": "item/completed"')
   );
 }
 

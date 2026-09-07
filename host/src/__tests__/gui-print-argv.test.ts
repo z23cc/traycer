@@ -2,33 +2,24 @@ import { describe, expect, it } from "vitest";
 import { guiPrintArgv, visibleDeltaText } from "../gui/deliver";
 
 describe("guiPrintArgv", () => {
-  it("runs Codex full_access without approval prompts", () => {
-    expect(
-      guiPrintArgv(
-        "codex",
-        "分析当前的项目",
-        "gpt-5.6-sol",
-        "full_access",
-        null,
-        null,
-      ),
-    ).toEqual([
-      "exec",
-      "--json",
-      "--model",
-      "gpt-5.6-sol",
-      "--dangerously-bypass-approvals-and-sandbox",
-      "分析当前的项目",
-    ]);
-  });
-
-  it("keeps Codex supervised turns in the read-only sandbox", () => {
-    expect(
-      guiPrintArgv("codex", "ping", null, "supervised", null, null),
-    ).toEqual(["exec", "--json", "--sandbox", "read-only", "ping"]);
-  });
-
-  it("resumes a Codex thread instead of stuffing history into the prompt", () => {
+  /**
+   * Codex is the app-server, whatever the mode or the thread: model, prompt,
+   * sandbox, approval policy and the thread to resume all ride JSON-RPC on
+   * stdin, and the approvals come back the same way for this host to decide.
+   */
+  it("runs Codex as the app-server under every mode", () => {
+    for (const mode of ["full_access", "auto_accept_edits", "supervised"]) {
+      expect(
+        guiPrintArgv(
+          "codex",
+          "分析当前的项目",
+          "gpt-5.6-sol",
+          mode,
+          null,
+          null,
+        ),
+      ).toEqual(["app-server", "--listen", "stdio://"]);
+    }
     expect(
       guiPrintArgv(
         "codex",
@@ -38,16 +29,7 @@ describe("guiPrintArgv", () => {
         "thread-1",
         null,
       ),
-    ).toEqual([
-      "exec",
-      "--json",
-      "--model",
-      "gpt-5.6-sol",
-      "--dangerously-bypass-approvals-and-sandbox",
-      "resume",
-      "thread-1",
-      "follow up",
-    ]);
+    ).toEqual(["app-server", "--listen", "stdio://"]);
   });
 
   it("skips Claude permission prompts in full_access", () => {

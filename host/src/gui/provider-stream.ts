@@ -132,6 +132,24 @@ export type ProviderStreamEvent =
       readonly description: string;
       readonly input: unknown;
     }
+  /** Codex's `turn/completed`: the turn is over, with or without a fault. */
+  | {
+      readonly kind: "turn_end";
+      readonly status: string;
+      readonly error: string | null;
+    }
+  /** A JSON-RPC error answering one of this host's own requests. */
+  | { readonly kind: "transport_error"; readonly message: string }
+  /**
+   * A server request this host does not serve. Surfaced rather than dropped
+   * so the driver can answer it with an error: an unanswered request holds
+   * the turn open forever.
+   */
+  | {
+      readonly kind: "rpc_unsupported";
+      readonly requestId: string;
+      readonly method: string;
+    }
   | { readonly kind: "usage"; readonly usage: ProviderTokenUsage };
 
 export function parseProviderStdoutLine(line: string): ProviderStreamEvent[] {
@@ -148,11 +166,13 @@ export function parseProviderStdoutLine(line: string): ProviderStreamEvent[] {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     return [];
   }
+  if (Reflect.get(parsed, "jsonrpc") === "2.0") {
+    return codexRpcEvents(parsed);
+  }
   return [
     ...sessionEvents(parsed),
     ...usageEvents(parsed),
     ...claudeEvents(parsed),
-    ...codexEvents(parsed),
   ];
 }
 
@@ -633,68 +653,215 @@ function claudeAssistantContent(message: unknown): ProviderStreamEvent[] {
   return events;
 }
 
-function codexEvents(record: object): ProviderStreamEvent[] {
-  const type = readString(record, "type");
-  if (type === "item.delta") {
-    const delta = readString(record, "delta") ?? nestedItemText(record);
-    if (delta !== null && delta.length > 0) {
-      return [{ kind: "delta", text: delta }];
+/**
+ * Codex's app-server, as JSON-RPC over stdio. Three shapes share the pipe:
+ * notifications (`method` + `params`), server requests (those plus an `id`,
+ * which must be answered), and responses to this host's own requests (`id`
+ * + `result` or `error`). The driver in `deliver.ts` owns the requests it
+ * sent; this reads everything else. Recorded live against codex-cli 0.153.4.
+ */
+function codexRpcEvents(record: object): ProviderStreamEvent[] {
+  const method = readString(record, "method");
+  const id = Reflect.get(record, "id");
+  if (method === null) {
+    const error = Reflect.get(record, "error");
+    if (error !== null && typeof error === "object") {
+      return [
+        {
+          kind: "transport_error",
+          message: readString(error, "message") ?? "Codex app-server error",
+        },
+      ];
     }
     return [];
   }
+  const params = Reflect.get(record, "params");
+  const paramsRecord =
+    params !== null && typeof params === "object" ? params : {};
+  if (id !== undefined && id !== null) {
+    return codexServerRequest(method, JSON.stringify(id), paramsRecord);
+  }
+  return codexNotification(method, paramsRecord);
+}
+
+/**
+ * The server asking this host something. Approvals become permission
+ * requests, decided by the same rules as Claude's; the ids are the JSON-RPC
+ * ids, carried as text so the answer can quote them back exactly.
+ */
+function codexServerRequest(
+  method: string,
+  requestId: string,
+  params: object,
+): ProviderStreamEvent[] {
+  const itemId = readString(params, "itemId");
+  if (method === "item/commandExecution/requestApproval") {
+    return [
+      {
+        kind: "permission_request",
+        requestId,
+        toolUseId: itemId,
+        toolName: "command",
+        description:
+          readString(params, "command") ??
+          readString(params, "reason") ??
+          "Command execution",
+        input: params,
+      },
+    ];
+  }
+  if (method === "item/fileChange/requestApproval") {
+    // The paths are on the `item/started` that preceded this, not here: the
+    // reader pairs them by item id.
+    return [
+      {
+        kind: "permission_request",
+        requestId,
+        toolUseId: itemId,
+        toolName: "apply_patch",
+        description: readString(params, "reason") ?? "Apply file changes",
+        input: params,
+      },
+    ];
+  }
+  if (method === "item/permissions/requestApproval") {
+    return [
+      {
+        kind: "permission_request",
+        requestId,
+        toolUseId: itemId,
+        toolName: "permissions",
+        description: readString(params, "reason") ?? "Permissions",
+        input: params,
+      },
+    ];
+  }
+  return [{ kind: "rpc_unsupported", requestId, method }];
+}
+
+function codexNotification(
+  method: string,
+  params: object,
+): ProviderStreamEvent[] {
+  if (method === "thread/started") {
+    const thread = Reflect.get(params, "thread");
+    const sessionId =
+      thread !== null && typeof thread === "object"
+        ? readString(thread, "id")
+        : null;
+    return sessionId === null ? [] : [{ kind: "session", sessionId }];
+  }
+  if (method === "item/agentMessage/delta") {
+    const delta = readString(params, "delta");
+    return delta === null ? [] : [{ kind: "delta", text: delta }];
+  }
   if (
-    type !== "item.completed" &&
-    type !== "item.updated" &&
-    type !== "item.started"
+    method === "item/reasoning/textDelta" ||
+    method === "item/reasoning/summaryTextDelta"
   ) {
+    const delta = readString(params, "delta");
+    return delta === null ? [] : [{ kind: "reasoning", text: delta }];
+  }
+  if (method === "thread/tokenUsage/updated") {
+    return codexTokenUsage(params);
+  }
+  if (method === "turn/completed") {
+    const turn = Reflect.get(params, "turn");
+    const status =
+      turn !== null && typeof turn === "object"
+        ? (readString(turn, "status") ?? "completed")
+        : "completed";
+    const error =
+      turn !== null && typeof turn === "object"
+        ? Reflect.get(turn, "error")
+        : null;
+    return [
+      {
+        kind: "turn_end",
+        status,
+        error:
+          error === null || typeof error !== "object"
+            ? typeof error === "string"
+              ? error
+              : null
+            : (readString(error, "message") ?? JSON.stringify(error)),
+      },
+    ];
+  }
+  if (method !== "item/started" && method !== "item/completed") {
     return [];
   }
-  const item = Reflect.get(record, "item");
-  if (item === null || typeof item !== "object" || Array.isArray(item)) {
+  const item = Reflect.get(params, "item");
+  if (item === null || typeof item !== "object") {
     return [];
   }
   const itemType = readString(item, "type");
   const itemId = readString(item, "id") ?? itemType ?? "item";
-  if (itemType === "agent_message") {
+  const completed = method === "item/completed";
+  if (itemType === "agentMessage") {
+    // The full text on completion. The deltas already streamed it, and the
+    // reader dedupes a full message against what it has - see
+    // `lineIncludesFullMessage`.
     const text = readString(item, "text");
-    if (text !== null && text.length > 0) {
-      return [{ kind: "delta", text }];
-    }
-    return [];
+    return completed && text !== null ? [{ kind: "delta", text }] : [];
   }
-  if (itemType === "reasoning") {
-    const text = readString(item, "text") ?? readString(item, "content");
-    if (text !== null && text.length > 0) {
-      return [{ kind: "reasoning", text }];
+  if (itemType === "commandExecution") {
+    const command = readString(item, "command") ?? "shell";
+    if (!completed) {
+      return [{ kind: "command_start", commandId: itemId, command }];
     }
-    return [];
-  }
-  if (itemType === "command_execution") {
-    const command = readString(item, "command") ?? "bash";
-    if (type === "item.started" || type === "item.updated") {
-      return [
-        {
-          kind: "command_start",
-          commandId: itemId,
-          command,
-        },
-      ];
-    }
-    const exitCode =
-      readNumber(item, "exit_code") ?? readNumber(item, "exitCode");
     return [
       {
         kind: "command_end",
         commandId: itemId,
         command,
-        exitCode,
+        exitCode: readNumber(item, "exitCode"),
       },
     ];
   }
-  if (itemType === "file_change" || itemType === "file_change") {
-    return fileChangeEvents(item);
+  if (itemType === "fileChange") {
+    // Started: one card per file, owned by the item - so the reader can take
+    // its before now, ahead of the approval that gates the write. Completed:
+    // the item's result, which closes those cards.
+    return completed
+      ? [{ kind: "tool_end", toolId: itemId }]
+      : fileChangeEvents(item, itemId);
   }
   return [];
+}
+
+function codexTokenUsage(params: object): ProviderStreamEvent[] {
+  const usage = Reflect.get(params, "tokenUsage");
+  if (usage === null || typeof usage !== "object") {
+    return [];
+  }
+  const last = Reflect.get(usage, "last");
+  const total = Reflect.get(usage, "total");
+  if (last === null || typeof last !== "object") {
+    return [];
+  }
+  const inputTokens = readNumber(last, "inputTokens") ?? 0;
+  const outputTokens = readNumber(last, "outputTokens") ?? 0;
+  const contextTokens =
+    total !== null && typeof total !== "undefined" && typeof total === "object"
+      ? readNumber(total, "totalTokens")
+      : null;
+  return [
+    {
+      kind: "usage",
+      usage: {
+        inputTokens,
+        outputTokens,
+        totalTokens:
+          readNumber(last, "totalTokens") ?? inputTokens + outputTokens,
+        cacheReadInputTokens:
+          readNumber(last, "cachedInputTokens") ?? undefined,
+        contextTokens: contextTokens ?? undefined,
+        contextWindow: readNumber(usage, "modelContextWindow") ?? undefined,
+        costUsd: undefined,
+      },
+    },
+  ];
 }
 
 function usageEvents(record: object): ProviderStreamEvent[] {
@@ -755,55 +922,33 @@ function parseUsage(value: unknown, record: object): ProviderTokenUsage | null {
   };
 }
 
-function fileChangeEvents(item: object): ProviderStreamEvent[] {
+function fileChangeEvents(item: object, itemId: string): ProviderStreamEvent[] {
   const changes = Reflect.get(item, "changes");
-  if (Array.isArray(changes) && changes.length > 0) {
-    const rows: ProviderStreamEvent[] = [];
-    for (const change of changes) {
-      if (
-        change === null ||
-        typeof change !== "object" ||
-        Array.isArray(change)
-      ) {
-        continue;
-      }
-      const path =
-        readString(change, "path") ??
-        readString(change, "filePath") ??
-        readString(change, "filename");
-      if (path === null) {
-        continue;
-      }
-      rows.push({
-        kind: "file_change",
-        path,
-        operation:
-          readString(change, "kind") ?? readString(change, "operation"),
-        toolId: null,
-      });
-    }
-    return rows;
-  }
-  const path = readString(item, "path") ?? readString(item, "filePath");
-  if (path === null) {
+  if (!Array.isArray(changes)) {
     return [];
   }
-  return [
-    {
-      kind: "file_change",
-      path,
-      operation: readString(item, "operation"),
-      toolId: null,
-    },
-  ];
-}
-
-function nestedItemText(record: object): string | null {
-  const item = Reflect.get(record, "item");
-  if (item === null || typeof item !== "object" || Array.isArray(item)) {
-    return null;
+  const rows: ProviderStreamEvent[] = [];
+  for (const change of changes) {
+    if (
+      change === null ||
+      typeof change !== "object" ||
+      Array.isArray(change)
+    ) {
+      continue;
+    }
+    const path = readString(change, "path");
+    if (path === null) {
+      continue;
+    }
+    // `kind` is `{type: "add" | "delete" | "update"}` on the app-server.
+    const kind = Reflect.get(change, "kind");
+    const operation =
+      kind !== null && typeof kind === "object"
+        ? readString(kind, "type")
+        : readString(change, "kind");
+    rows.push({ kind: "file_change", path, operation, toolId: itemId });
   }
-  return readString(item, "text") ?? readString(item, "delta");
+  return rows;
 }
 
 function readString(record: object, key: string): string | null {

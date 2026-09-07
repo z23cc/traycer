@@ -17,6 +17,8 @@ import type {
   FileEditReason,
 } from "@traycer/protocol/persistence/epic/content-blocks";
 import {
+  MAX_SNAPSHOT_BYTES,
+  captureFile,
   lineCounts,
   readBlob,
   settleEdit,
@@ -504,11 +506,45 @@ async function runAndPersistAssistant(
     toolId: string,
     failed: boolean,
   ): Promise<void> => {
-    const edit = pendingEdits.get(toolId);
+    const edits = [...pendingEdits.values()].filter(
+      (candidate) => candidate.toolId === toolId,
+    );
+    for (const edit of edits) {
+      pendingEdits.delete(edit.blockId);
+    }
+    for (const edit of edits) {
+      if (edit.before !== null) {
+        // Captured here, not by a hook: the before was read when the item
+        // was announced, ahead of the approval; the after is read now, once
+        // the item reports done. A refused item never touched the file.
+        //
+        // ponytail: exact only while an approval sits between the two, which
+        // under `untrusted` is every non-trusted change; a change the server
+        // applied without asking could land between the announce and the
+        // read. The app-server's own diff is the upgrade path.
+        const before = await edit.before;
+        await completeEdit(
+          runtime,
+          input,
+          edit,
+          {
+            before,
+            after: failed
+              ? before
+              : await captureFile(
+                  snapshotDir(runtime.dataDir),
+                  edit.path,
+                  MAX_SNAPSHOT_BYTES,
+                ),
+          },
+          "capture_failed",
+        );
+      }
+    }
+    const edit = edits.find((candidate) => candidate.before === null);
     if (edit === undefined) {
       return;
     }
-    pendingEdits.delete(toolId);
     const captured = await settleEdit(snapshotDir(runtime.dataDir), toolId);
     // A call that failed with nothing captured on either side never reached
     // the file: Claude refuses an edit before its hooks run (recorded live -
@@ -756,8 +792,18 @@ async function runAndPersistAssistant(
       return;
     }
     if (event.kind === "permission_request") {
+      // A Codex file-change request names only its item; the files are on
+      // the cards that item announced a moment earlier.
+      const announced =
+        event.toolUseId === null
+          ? []
+          : [...pendingEdits.values()].filter(
+              (edit) => edit.toolId === event.toolUseId,
+            );
       void decidePermission(runtime, input, event, permissionMode, cwd, {
         userMessageId: print?.userMessageId ?? null,
+        announcedPaths: announced.map((edit) => edit.path),
+        announcedOperation: announced[0]?.operation ?? null,
       });
       return;
     }
@@ -817,11 +863,20 @@ async function runAndPersistAssistant(
         // at this point the operation is a guess racing the write - so the
         // card opens when the call completes, from what the hooks captured
         // around it. See `completeEdit`.
-        pendingEdits.set(event.toolId, {
+        pendingEdits.set(blockId, {
           blockId,
           path: event.path,
           operation,
           parentBlockId: nestUnder,
+          toolId: event.toolId,
+          before:
+            input.harnessId === "codex"
+              ? captureFile(
+                  snapshotDir(runtime.dataDir),
+                  event.path,
+                  MAX_SNAPSHOT_BYTES,
+                )
+              : null,
         });
         return;
       }
@@ -832,7 +887,14 @@ async function runAndPersistAssistant(
         completeEdit(
           runtime,
           input,
-          { blockId, path: event.path, operation, parentBlockId: nestUnder },
+          {
+            blockId,
+            path: event.path,
+            operation,
+            parentBlockId: nestUnder,
+            toolId: input.turnId,
+            before: null,
+          },
           { before: null, after: null },
           "not_intercepted",
         ),
@@ -1047,6 +1109,8 @@ const EDIT_TOOLS: ReadonlySet<string> = new Set([
   "MultiEdit",
   "Write",
   "NotebookEdit",
+  // Codex's file-change item, whose paths ride its announcement.
+  "apply_patch",
 ]);
 const EDIT_PATH_KEYS = [
   "file_path",
@@ -1098,14 +1162,24 @@ async function decidePermission(
   },
   permissionMode: string | null,
   cwd: string,
-  turn: { readonly userMessageId: string | null },
+  turn: {
+    readonly userMessageId: string | null;
+    /** For a Codex file-change item, the files its announcement named. */
+    readonly announcedPaths: readonly string[];
+    readonly announcedOperation: CheckpointFileOperation | null;
+  },
 ): Promise<void> {
   const answer = (
     response:
       | { readonly behavior: "allow"; readonly updatedInput: unknown }
       | { readonly behavior: "deny"; readonly message: string },
   ): void => {
-    runtime.guiRuns.answerPermission(input.chatId, request.requestId, response);
+    runtime.guiRuns.answerPermission(
+      input.chatId,
+      request.requestId,
+      response,
+      request,
+    );
   };
   if (request.toolName === "ExitPlanMode") {
     answer({
@@ -1134,7 +1208,9 @@ async function decidePermission(
     return;
   }
   const paths = EDIT_TOOLS.has(request.toolName)
-    ? editPaths(request.input)
+    ? request.toolName === "apply_patch"
+      ? turn.announcedPaths
+      : editPaths(request.input)
     : [];
   const isFileEdit = paths.length > 0;
   if (
@@ -1158,13 +1234,15 @@ async function decidePermission(
         input: request.input,
         requestedAt: now,
         paths,
-        operation: fileChangeOperation(
-          request.toolName === "NotebookEdit" &&
-            Reflect.get(request.input ?? {}, "edit_mode") === "delete"
-            ? "delete"
-            : null,
-          paths[0] ?? "",
-        ),
+        operation:
+          turn.announcedOperation ??
+          fileChangeOperation(
+            request.toolName === "NotebookEdit" &&
+              Reflect.get(request.input ?? {}, "edit_mode") === "delete"
+              ? "delete"
+              : null,
+            paths[0] ?? "",
+          ),
       }
     : {
         kind: "tool",
@@ -1293,6 +1371,7 @@ export async function resolveApproval(
           behavior: "deny",
           message: input.decision.reason ?? "Permission denied by user",
         },
+    pending,
   );
   await settleApproval(runtime, input.epicId, input.chatId, pending, {
     approved: input.decision.approved,
@@ -1309,10 +1388,12 @@ async function abandonApprovals(
   reason: string,
 ): Promise<void> {
   for (const pending of runtime.guiRuns.takeAllApprovals(chatId)) {
-    runtime.guiRuns.answerPermission(chatId, pending.requestId, {
-      behavior: "deny",
-      message: reason,
-    });
+    runtime.guiRuns.answerPermission(
+      chatId,
+      pending.requestId,
+      { behavior: "deny", message: reason },
+      pending,
+    );
     if (pending.kind === "interview") {
       await settleInterview(runtime, epicId, chatId, pending, {
         kind: "error",
@@ -1516,14 +1597,19 @@ export async function answerInterview(
     pending.input !== null && typeof pending.input === "object"
       ? pending.input
       : {};
-  runtime.guiRuns.answerPermission(input.chatId, pending.requestId, {
-    behavior: "allow",
-    updatedInput: {
-      ...base,
-      answers,
-      ...(Object.keys(annotations).length === 0 ? {} : { annotations }),
+  runtime.guiRuns.answerPermission(
+    input.chatId,
+    pending.requestId,
+    {
+      behavior: "allow",
+      updatedInput: {
+        ...base,
+        answers,
+        ...(Object.keys(annotations).length === 0 ? {} : { annotations }),
+      },
     },
-  });
+    pending,
+  );
   await settleInterview(runtime, input.epicId, input.chatId, pending, {
     kind: "success",
     answers: input.answers,
@@ -1545,10 +1631,12 @@ export async function failInterview(
   if (pending === null || pending.kind !== "interview") {
     return false;
   }
-  runtime.guiRuns.answerPermission(input.chatId, pending.requestId, {
-    behavior: "deny",
-    message: input.reason,
-  });
+  runtime.guiRuns.answerPermission(
+    input.chatId,
+    pending.requestId,
+    { behavior: "deny", message: input.reason },
+    pending,
+  );
   await settleInterview(runtime, input.epicId, input.chatId, pending, {
     kind: "error",
     reason: input.reason,
@@ -1703,6 +1791,14 @@ type PendingEdit = {
   readonly operation: CheckpointFileOperation;
   /** The sub-agent card this edit was made under, or null at the top. */
   readonly parentBlockId: string | null;
+  /** The call (or Codex item) that owns this edit; one item may own several. */
+  readonly toolId: string;
+  /**
+   * The before, captured by this host at the moment the edit was announced
+   * - Codex, whose app-server names the files ahead of the approval that
+   * gates the write. Null when hooks capture both sides (Claude).
+   */
+  readonly before: Promise<SnapshotCapture> | null;
 };
 
 /**
