@@ -275,11 +275,15 @@ export function broadcastEventAppended(
     readonly severity: "info" | "warning" | "error";
   },
 ): void {
-  broadcastQueueEvent(runtime, epicId, chatId, { ...event, queueItemId: null });
+  broadcastChatEvent(runtime, epicId, chatId, {
+    ...event,
+    queueItemId: null,
+    metadata: null,
+  });
 }
 
-/** `broadcastEventAppended` for the events that are about one queue item. */
-export function broadcastQueueEvent(
+/** `broadcastEventAppended` with the fields only some events carry. */
+export function broadcastChatEvent(
   runtime: HostRuntime,
   epicId: string,
   chatId: string,
@@ -291,6 +295,7 @@ export function broadcastQueueEvent(
     readonly queueItemId: string | null;
     readonly clientActionId: string | null;
     readonly severity: "info" | "warning" | "error";
+    readonly metadata: unknown;
   },
 ): void {
   const stored: StoredChatEvent = {
@@ -306,7 +311,7 @@ export function broadcastQueueEvent(
     approvalId: null,
     blockId: null,
     severity: event.severity,
-    metadata: null,
+    metadata: event.metadata,
   };
   void runtime.store.mutate((state) => {
     const chat = state.chats.find((row) => row.chatId === chatId);

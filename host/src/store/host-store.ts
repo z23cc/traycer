@@ -82,7 +82,8 @@ export type StoredChatEvent = {
   readonly approvalId: null;
   readonly blockId: null;
   readonly severity: "info" | "warning" | "error";
-  readonly metadata: null;
+  /** The event's manifest, when it carries one - a checkpoint's entries, a restore's results. */
+  readonly metadata: unknown;
 };
 
 export type StoredTokenUsage = {
@@ -874,7 +875,7 @@ function normalizeChatEvents(value: unknown): StoredChatEvent[] {
         severity === "warning" || severity === "error" || severity === "info"
           ? severity
           : "info",
-      metadata: null,
+      metadata: readMetadata(entry),
     });
   }
   return rows;
@@ -912,6 +913,11 @@ function normalizeUsage(value: unknown): StoredTokenUsage | null {
       typeof contextWindow === "number" ? contextWindow : undefined,
     costUsd: typeof costUsd === "number" ? costUsd : undefined,
   };
+}
+
+function readMetadata(entry: object): unknown {
+  const value = Reflect.get(entry, "metadata");
+  return value !== null && typeof value === "object" ? value : null;
 }
 
 function readNullableString(record: object, key: string): string | null {

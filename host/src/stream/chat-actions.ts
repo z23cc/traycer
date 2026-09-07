@@ -1,11 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, isAbsolute, relative } from "node:path";
 import type { WebSocket } from "ws";
-import type { RestoreResultEntry } from "@traycer/protocol/persistence/epic/checkpoint-manifests";
+import {
+  turnCheckpointManifestSchema,
+  type RestoreResultEntry,
+  type TurnCheckpointManifest,
+  type TurnCheckpointManifestEntry,
+} from "@traycer/protocol/persistence/epic/checkpoint-manifests";
 import { LOCAL_USER_ID } from "../local-user";
-import { hasBlob, readBlob, snapshotDir } from "../snapshots/snapshots";
-import { bumpChatIndex, type StoredFileChange } from "../store/host-store";
+import { lineCounts, readBlob, snapshotDir } from "../snapshots/snapshots";
+import {
+  bumpChatIndex,
+  type StoredChat,
+  type StoredFileChange,
+} from "../store/host-store";
 import {
   beginGuiPrintTurn,
   deleteTurnsFrom,
@@ -30,6 +39,7 @@ import {
   broadcastAccumulatedChanges,
   broadcastChatFrame,
   broadcastChatSnapshot,
+  broadcastChatEvent,
   broadcastErrorNotice,
   broadcastEventAppended,
   broadcastQueueChanged,
@@ -380,18 +390,10 @@ async function handleChatRevertFileChanges(
   if (ids === null) {
     return;
   }
-  const fromMessageId = Reflect.get(parsed, "fromMessageId");
-  if (typeof fromMessageId === "string") {
-    ack(
-      socket,
-      ids,
-      "revertFileChanges",
-      "rejected",
-      "This host keeps no per-turn checkpoints; only a whole-chat revert is available.",
-      "TURN_SCOPE_UNSUPPORTED",
-    );
-    return;
-  }
+  const rawFrom = Reflect.get(parsed, "fromMessageId");
+  const fromMessageId = typeof rawFrom === "string" ? rawFrom : null;
+  const filePaths = readStringArrayField(parsed, "filePaths");
+  const includeArtifacts = Reflect.get(parsed, "revertArtifacts") !== false;
   // The GUI disables Undo while a turn runs, but the host is the authority
   // and the two can race - seen live, where a revert accepted mid-turn wrote
   // the first before back under an agent that was still working on the file.
@@ -401,56 +403,76 @@ async function handleChatRevertFileChanges(
       ids,
       "revertFileChanges",
       "rejected",
-      "Wait for the active turn to finish before reverting.",
-      "TURN_IN_PROGRESS",
+      "Wait for the active chat turn to finish or stop it before reverting file changes.",
+      "CHECKPOINT_RESTORE_ACTIVE_TURN",
     );
     return;
   }
-  const filePaths = readStringArrayField(parsed, "filePaths");
   const chat = runtime.store
     .snapshot()
     .chats.find(
       (row) => row.chatId === ids.chatId && row.epicId === ids.epicId,
     );
-  const dir = snapshotDir(runtime.dataDir);
-  const targets = (chat?.accumulatedChanges ?? []).filter(
-    (row) =>
-      row.reason === "snapshot" &&
-      (filePaths === null || filePaths.includes(row.filePath)) &&
-      (row.beforeHash === null || hasBlob(dir, row.beforeHash)),
-  );
-  if (chat === undefined || targets.length === 0) {
+  if (chat === undefined) {
     ack(
       socket,
       ids,
       "revertFileChanges",
       "rejected",
-      "Nothing here can be reverted.",
-      "NOTHING_TO_REVERT",
+      "Chat not found",
+      "CHAT_NOT_FOUND",
     );
     return;
   }
+  const manifests = scopedCheckpoints(chat, fromMessageId);
+  if (
+    manifests.some((manifest) => manifest.capturingHostId !== runtime.hostId)
+  ) {
+    ack(
+      socket,
+      ids,
+      "revertFileChanges",
+      "rejected",
+      "These changes can only be reverted on the host that captured them.",
+      "CHECKPOINT_DEVICE_MISMATCH",
+    );
+    return;
+  }
+  // The earliest record of each path is the way back: a file edited in three
+  // turns is restored once, to what it was before the first of them.
+  const targets = [...earliestEntriesByPath(manifests).values()].filter(
+    ({ entry }) =>
+      (filePaths === null || filePaths.includes(entry.filePath)) &&
+      (includeArtifacts || !entry.artifact),
+  );
   ack(socket, ids, "revertFileChanges", "accepted", null, null);
-  const checkpointId = randomUUID();
-  const startedAt = Date.now();
-  broadcastChatFrame(runtime, ids.epicId, ids.chatId, {
-    kind: "restoreStarted",
+  // The revert is named by the action that asked for it, as released - the
+  // same click retried is the same revert.
+  const checkpointId = ids.clientActionId;
+  const started = {
     checkpointId,
     restoringUserId: LOCAL_USER_ID,
     restoringHostId: runtime.hostId,
-    startedAt,
+    startedAt: Date.now(),
+  };
+  broadcastChatFrame(runtime, ids.epicId, ids.chatId, {
+    kind: "restoreStarted",
+    ...started,
   });
-  broadcastEventAppended(runtime, ids.epicId, ids.chatId, {
+  broadcastChatEvent(runtime, ids.epicId, ids.chatId, {
     type: "checkpoint.restoreStarted",
-    message: `Reverting ${String(targets.length)} file${targets.length === 1 ? "" : "s"}.`,
-    turnId: null,
+    message: "File-change revert started.",
+    turnId: checkpointId,
     messageId: null,
+    queueItemId: null,
     clientActionId: ids.clientActionId,
     severity: "info",
+    metadata: started,
   });
+  const dir = snapshotDir(runtime.dataDir);
   const results: RestoreResultEntry[] = [];
-  for (const row of targets) {
-    results.push(await revertOne(dir, row));
+  for (const { manifest, entry } of targets) {
+    results.push(await restoreEntry(dir, manifest, entry));
     broadcastChatFrame(runtime, ids.epicId, ids.chatId, {
       kind: "restoreProgress",
       checkpointId,
@@ -458,74 +480,217 @@ async function handleChatRevertFileChanges(
       totalCount: targets.length,
     });
   }
-  const restored = new Set(
-    results
-      .filter((entry) => entry.status === "restored")
-      .map((entry) => entry.filePath),
+  await refreshAccumulatedAfterRestore(
+    runtime,
+    ids.chatId,
+    dir,
+    targets,
+    results,
   );
-  await runtime.store.mutate((state) => {
-    const row = state.chats.find((entry) => entry.chatId === ids.chatId);
-    if (row === undefined) {
-      return;
-    }
-    // A reverted file is back at its first before, which is the one state
-    // the accumulated panel does not list.
-    row.accumulatedChanges = row.accumulatedChanges.filter(
-      (change) => !restored.has(change.filePath),
-    );
-    bumpChatIndex(row);
-  });
+  const restored = { checkpointId, restoredAt: Date.now(), results };
   broadcastChatFrame(runtime, ids.epicId, ids.chatId, {
     kind: "restoreCompleted",
     checkpointId,
-    finishedAt: Date.now(),
+    finishedAt: restored.restoredAt,
     results,
   });
-  const failed = results.length - restored.size;
-  broadcastEventAppended(runtime, ids.epicId, ids.chatId, {
+  broadcastChatEvent(runtime, ids.epicId, ids.chatId, {
     type: "checkpoint.restored",
-    message:
-      failed === 0
-        ? `Reverted ${String(restored.size)} file${restored.size === 1 ? "" : "s"}.`
-        : `Reverted ${String(restored.size)}, failed ${String(failed)}.`,
-    turnId: null,
+    message: "File changes reverted.",
+    turnId: checkpointId,
     messageId: null,
+    queueItemId: null,
     clientActionId: ids.clientActionId,
-    severity: failed === 0 ? "info" : "warning",
+    severity: results.some((entry) => entry.status === "failed")
+      ? "warning"
+      : "info",
+    metadata: restored,
   });
   broadcastAccumulatedChanges(runtime, ids.epicId, ids.chatId);
   broadcastChatSnapshot(runtime, ids.epicId, ids.chatId);
 }
 
+type ScopedEntry = {
+  readonly manifest: TurnCheckpointManifest;
+  readonly entry: TurnCheckpointManifestEntry;
+};
+
 /**
- * One file back to its first before. No before means the chat created it,
- * and the way back is its removal - `unlink` of a path already gone is the
- * same outcome, not a failure.
+ * The turns' checkpoints a revert reads, in the order they were captured:
+ * all of them, or - from a message on - those of the user messages at and
+ * after it. A message this chat does not have scopes nothing, as released.
  */
-async function revertOne(
-  dir: string,
-  row: StoredFileChange,
-): Promise<RestoreResultEntry> {
-  const entry = { filePath: row.filePath, operation: row.operation };
-  try {
-    if (row.beforeHash === null) {
-      await rm(row.filePath, { force: true });
-      return { ...entry, status: "restored", reason: null };
-    }
-    const body = await readBlob(dir, row.beforeHash);
-    if (body === null) {
-      return { ...entry, status: "failed", reason: "blob_missing" };
-    }
-    await mkdir(dirname(row.filePath), { recursive: true });
-    await writeFile(row.filePath, body);
-    return { ...entry, status: "restored", reason: null };
-  } catch (error) {
-    return {
-      ...entry,
-      status: "failed",
-      reason: error instanceof Error ? error.message : String(error),
-    };
+function scopedCheckpoints(
+  chat: StoredChat,
+  fromMessageId: string | null,
+): TurnCheckpointManifest[] {
+  const manifests = chat.events
+    .filter((event) => event.type === "checkpoint.captured")
+    .map((event) => ({
+      messageId: event.messageId,
+      parsed: turnCheckpointManifestSchema.safeParse(event.metadata),
+    }));
+  if (fromMessageId === null) {
+    return manifests.flatMap((row) =>
+      row.parsed.success ? [row.parsed.data] : [],
+    );
   }
+  const from = chat.turns.findIndex((turn) => turn.messageId === fromMessageId);
+  if (from < 0) {
+    return [];
+  }
+  const inScope = new Set(
+    chat.turns
+      .slice(from)
+      .filter((turn) => turn.role === "user")
+      .map((turn) => turn.messageId),
+  );
+  return manifests.flatMap((row) =>
+    row.parsed.success && row.messageId !== null && inScope.has(row.messageId)
+      ? [row.parsed.data]
+      : [],
+  );
+}
+
+function earliestEntriesByPath(
+  manifests: readonly TurnCheckpointManifest[],
+): Map<string, ScopedEntry> {
+  const earliest = new Map<string, ScopedEntry>();
+  for (const manifest of manifests) {
+    for (const entry of manifest.entries) {
+      if (!earliest.has(entry.filePath)) {
+        earliest.set(entry.filePath, { manifest, entry });
+      }
+    }
+  }
+  return earliest;
+}
+
+/**
+ * One entry back to its before, with the released host's outcomes: outside
+ * the turn's roots or not captured is `skipped`, a before this store no
+ * longer holds is `failed`, and a created file goes back to not existing.
+ */
+async function restoreEntry(
+  dir: string,
+  manifest: TurnCheckpointManifest,
+  entry: TurnCheckpointManifestEntry,
+): Promise<RestoreResultEntry> {
+  const result = (
+    status: RestoreResultEntry["status"],
+    reason: string | null,
+  ): RestoreResultEntry => ({
+    filePath: entry.filePath,
+    status,
+    operation: entry.operation,
+    reason,
+  });
+  if (!isPathInAllowedRoots(entry.filePath, manifest.allowedRoots)) {
+    return result("skipped", "outside_root");
+  }
+  if (!entry.undoable) {
+    return result("skipped", "not_undoable");
+  }
+  if (entry.operation === "create") {
+    try {
+      await rm(entry.filePath, { force: true, recursive: false });
+      return result("restored", null);
+    } catch {
+      return result("failed", "fs_error");
+    }
+  }
+  if (entry.beforeHash === null) {
+    return result("skipped", "not_undoable");
+  }
+  const body = await readBlob(dir, entry.beforeHash);
+  if (body === null) {
+    return result("failed", "blob_missing");
+  }
+  try {
+    await mkdir(dirname(entry.filePath), { recursive: true });
+    await writeFile(entry.filePath, body);
+    return result("restored", null);
+  } catch {
+    return result("failed", "fs_error");
+  }
+}
+
+function isPathInAllowedRoots(
+  filePath: string,
+  roots: readonly string[],
+): boolean {
+  return roots.some((root) => {
+    const rel = relative(root, filePath);
+    return rel.length > 0 && !rel.startsWith("..") && !isAbsolute(rel);
+  });
+}
+
+/**
+ * The accumulated panel after a revert: a restored file is at the before
+ * its entry named, so its row's after moves there - and a row whose after
+ * is now its before is a file that has not changed since the chat started,
+ * which the panel does not list.
+ */
+async function refreshAccumulatedAfterRestore(
+  runtime: HostRuntime,
+  chatId: string,
+  dir: string,
+  targets: readonly ScopedEntry[],
+  results: readonly RestoreResultEntry[],
+): Promise<void> {
+  const restoredTo = new Map<string, string | null>();
+  targets.forEach(({ entry }, index) => {
+    if (results[index]?.status === "restored") {
+      restoredTo.set(
+        entry.filePath,
+        entry.operation === "create" ? null : entry.beforeHash,
+      );
+    }
+  });
+  if (restoredTo.size === 0) {
+    return;
+  }
+  const chat = runtime.store
+    .snapshot()
+    .chats.find((row) => row.chatId === chatId);
+  const next: StoredFileChange[] = [];
+  for (const row of chat?.accumulatedChanges ?? []) {
+    if (!restoredTo.has(row.filePath)) {
+      next.push(row);
+      continue;
+    }
+    const afterHash = restoredTo.get(row.filePath) ?? null;
+    if (afterHash === row.beforeHash) {
+      continue;
+    }
+    next.push({
+      ...row,
+      afterHash,
+      operation:
+        row.beforeHash === null
+          ? "create"
+          : afterHash === null
+            ? "delete"
+            : "edit",
+      counts:
+        row.reason === "snapshot"
+          ? lineCounts(
+              row.beforeHash === null
+                ? null
+                : await readBlob(dir, row.beforeHash),
+              afterHash === null ? null : await readBlob(dir, afterHash),
+            )
+          : row.counts,
+    });
+  }
+  await runtime.store.mutate((state) => {
+    const row = state.chats.find((entry) => entry.chatId === chatId);
+    if (row === undefined) {
+      return;
+    }
+    row.accumulatedChanges = next;
+    bumpChatIndex(row);
+  });
 }
 
 function readStringArrayField(record: object, key: string): string[] | null {

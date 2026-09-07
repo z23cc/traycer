@@ -1073,28 +1073,27 @@ describe("local GUI send without cloud login", () => {
    * result arrives, exactly as it would from the hooks.
    */
   it("serves the before and after the hooks captured around an edit", async () => {
-    const target = join(tmpdir(), `traycer-snap-${String(Date.now())}.ts`);
     // The first Edit is refused before its hooks run, as Claude does live for
     // a file it has not read - so no sidecar exists for it on either side.
     const stdout = [
       '{"type":"system","subtype":"init","session_id":"sess-snap"}',
-      `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_s0","name":"Edit","input":{"file_path":"${target}","old_string":"one","new_string":"two"}}]}}`,
+      `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_s0","name":"Edit","input":{"file_path":"__TARGET__","old_string":"one","new_string":"two"}}]}}`,
       '{"type":"user","message":{"content":[{"type":"tool_result","content":"File has not been read yet.","is_error":true,"tool_use_id":"toolu_s0"}]}}',
-      `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_s1","name":"Edit","input":{"file_path":"${target}","old_string":"one","new_string":"two"}}]}}`,
+      `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_s1","name":"Edit","input":{"file_path":"__TARGET__","old_string":"one","new_string":"two"}}]}}`,
       '{"type":"user","message":{"content":[{"type":"tool_result","content":"ok","tool_use_id":"toolu_s1"}]}}',
       '{"type":"assistant","message":{"content":[{"type":"text","text":"snap-ok"}]}}',
       '{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}',
     ];
     const setup = await bootWithCli(
-      [
-        "#!/bin/sh",
-        ...stdout.map((line) => `printf '%s\n' '${line}'`),
-        "",
-      ].join("\n"),
+      ["#!/bin/sh", ...stdout.map(printfLine), ""].join("\n"),
       "claude",
     );
     tempDir = setup.tempDir;
     started = setup.started;
+    // Inside the workspace: a revert only restores paths under the turn's
+    // roots, as released, and the fake CLI learns the path from the env.
+    const target = join(setup.workspace, "snap-target.ts");
+    process.env.TRAYCER_TEST_EDIT_TARGET = target;
     const before = await playHook(tempDir, "toolu_s1", "pre", "one\nsame\n");
     const after = await playHook(tempDir, "toolu_s1", "post", "two\nsame\n");
     await seedChat(started, setup.workspace, "epic-12", "chat-12");
@@ -1259,26 +1258,183 @@ describe("local GUI send without cloud login", () => {
       "chat-12",
     );
     expect(latestSummaries(afterRevert, "epic-12", "chat-12")).toEqual([]);
+    // The turn's checkpoint is the record a revert reads: one event, its
+    // manifest listing the edit with both hashes, named by the user message.
+    const captured = readArray(
+      Reflect.get(
+        Reflect.get(
+          afterRevert.find(
+            (f) => Reflect.get(f ?? {}, "kind") === "snapshot",
+          ) ?? {},
+          "snapshot",
+        ) ?? {},
+        "tail",
+      ) ?? {},
+      "events",
+    ).find((e) => Reflect.get(e ?? {}, "type") === "checkpoint.captured");
+    expect(captured).toMatchObject({
+      messageId: "msg-user-12",
+      metadata: {
+        schemaVersion: 1,
+        capturingHostId: started.runtime.hostId,
+        allowedRoots: [setup.workspace],
+        entries: [
+          {
+            filePath: target,
+            operation: "edit",
+            beforeHash: before,
+            afterHash: after,
+            undoable: true,
+            reason: "snapshot",
+          },
+        ],
+      },
+    });
+    // A revert is replayable, as released: the same checkpoint restores the
+    // same before again, and nothing is "already reverted".
+    const again = await sendActionUntil(
+      streamUrl,
+      {
+        kind: "revertFileChanges",
+        epicId: "epic-12",
+        chatId: "chat-12",
+        clientActionId: "revert-12b",
+        fromMessageId: null,
+        filePaths: null,
+        revertArtifacts: true,
+      },
+      "restoreCompleted",
+    );
     expect(
-      await sendActionUntil(
+      again.find((f) => Reflect.get(f ?? {}, "kind") === "restoreCompleted"),
+    ).toMatchObject({
+      checkpointId: "revert-12b",
+      results: [{ filePath: target, status: "restored" }],
+    });
+    expect(await readFile(target, "utf8")).toBe("one\nsame\n");
+    await rm(target, { force: true });
+  });
+
+  /**
+   * Undo from a message on. Two turns edit the same file; a revert scoped to
+   * the second puts back what the second turn found, not what the first did
+   * - and the panel then shows the first turn's change alone. A message the
+   * chat does not have scopes nothing, as released.
+   */
+  it("reverts only the turns from a given message on", async () => {
+    const script = [
+      "#!/bin/sh",
+      "read -r prompt",
+      'case "$prompt" in *first*) id=toolu_t1;; *) id=toolu_t2;; esac',
+      `printf '%s\\n' '{"type":"system","subtype":"init","session_id":"sess-scope"}'`,
+      `printf '%s\\n' "{\\"type\\":\\"assistant\\",\\"message\\":{\\"content\\":[{\\"type\\":\\"tool_use\\",\\"id\\":\\"$id\\",\\"name\\":\\"Edit\\",\\"input\\":{\\"file_path\\":\\"$TRAYCER_TEST_EDIT_TARGET\\",\\"old_string\\":\\"a\\",\\"new_string\\":\\"b\\"}}]}}"`,
+      `printf '%s\\n' "{\\"type\\":\\"user\\",\\"message\\":{\\"content\\":[{\\"type\\":\\"tool_result\\",\\"content\\":\\"ok\\",\\"tool_use_id\\":\\"$id\\"}]}}"`,
+      `printf '%s\\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"edited"}]}}'`,
+      `printf '%s\\n' '{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}'`,
+      "",
+    ].join("\n");
+    const setup = await bootWithCli(script, "claude");
+    tempDir = setup.tempDir;
+    started = setup.started;
+    const target = join(setup.workspace, "scope-target.ts");
+    process.env.TRAYCER_TEST_EDIT_TARGET = target;
+    const one = await playHook(tempDir, "toolu_t1", "pre", "one\n");
+    const two = await playHook(tempDir, "toolu_t1", "post", "two\n");
+    await playHook(tempDir, "toolu_t2", "pre", "two\n");
+    await playHook(tempDir, "toolu_t2", "post", "three\n");
+    await seedChat(started, setup.workspace, "epic-30", "chat-30");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    const checkpoints = (snapshot: object): number =>
+      readArray(Reflect.get(snapshot, "tail") ?? {}, "events").filter(
+        (e) => Reflect.get(e ?? {}, "type") === "checkpoint.captured",
+      ).length;
+    await sendOnChat(streamUrl, {
+      epicId: "epic-30",
+      chatId: "chat-30",
+      clientActionId: "action-30a",
+      messageId: "msg-user-30a",
+      text: "first edit",
+      permissionMode: null,
+      harnessId: null,
+    });
+    await waitForSnapshot(
+      streamUrl,
+      "epic-30",
+      "chat-30",
+      (snapshot) =>
+        checkpoints(snapshot) === 1 &&
+        Reflect.get(snapshot, "runStatus") === "idle",
+      80,
+      50,
+    );
+    await sendOnChat(streamUrl, {
+      epicId: "epic-30",
+      chatId: "chat-30",
+      clientActionId: "action-30b",
+      messageId: "msg-user-30b",
+      text: "second edit",
+      permissionMode: null,
+      harnessId: null,
+    });
+    await waitForSnapshot(
+      streamUrl,
+      "epic-30",
+      "chat-30",
+      (snapshot) =>
+        checkpoints(snapshot) === 2 &&
+        Reflect.get(snapshot, "runStatus") === "idle",
+      80,
+      50,
+    );
+    const revert = (clientActionId: string, fromMessageId: string | null) =>
+      sendActionUntil(
         streamUrl,
         {
           kind: "revertFileChanges",
-          epicId: "epic-12",
-          chatId: "chat-12",
-          clientActionId: "revert-12b",
-          fromMessageId: null,
+          epicId: "epic-30",
+          chatId: "chat-30",
+          clientActionId,
+          fromMessageId,
           filePaths: null,
           revertArtifacts: true,
         },
-        "actionAck",
-      ),
-    ).toContainEqual(
-      expect.objectContaining({
-        status: "rejected",
-        code: "NOTHING_TO_REVERT",
-      }),
+        "restoreCompleted",
+      );
+    const completed = (frames: readonly unknown[]) =>
+      frames.find((f) => Reflect.get(f ?? {}, "kind") === "restoreCompleted");
+    // From the second message: back to what the second turn found.
+    expect(completed(await revert("revert-30a", "msg-user-30b"))).toMatchObject(
+      {
+        results: [{ filePath: target, status: "restored", operation: "edit" }],
+      },
     );
+    expect(await readFile(target, "utf8")).toBe("two\n");
+    // The panel now describes the first turn alone.
+    expect(
+      latestSummaries(
+        await collectChatFrames(streamUrl, "epic-30", "chat-30"),
+        "epic-30",
+        "chat-30",
+      ),
+    ).toMatchObject([{ digest: changeDigest(one, two) }]);
+    // A message this chat never had scopes nothing.
+    expect(completed(await revert("revert-30b", "msg-nope"))).toMatchObject({
+      results: [],
+    });
+    expect(await readFile(target, "utf8")).toBe("two\n");
+    // Everything: back to before the first turn, and the panel is empty.
+    expect(completed(await revert("revert-30c", null))).toMatchObject({
+      results: [{ filePath: target, status: "restored" }],
+    });
+    expect(await readFile(target, "utf8")).toBe("one\n");
+    expect(
+      latestSummaries(
+        await collectChatFrames(streamUrl, "epic-30", "chat-30"),
+        "epic-30",
+        "chat-30",
+      ),
+    ).toEqual([]);
+    await rm(target, { force: true });
   });
 
   /**
@@ -1320,7 +1476,7 @@ describe("local GUI send without cloud login", () => {
       expect.objectContaining({
         kind: "actionAck",
         status: "rejected",
-        code: "TURN_IN_PROGRESS",
+        code: "CHECKPOINT_RESTORE_ACTIVE_TURN",
       }),
     );
     started.runtime.guiRuns.endPrint("chat-13", "assistant-13");
@@ -2803,6 +2959,22 @@ function readArray(record: object, key: string): readonly unknown[] {
  * What one hook invocation leaves behind, written by hand: the body in the
  * blob store and the sidecar the host settles the call from.
  */
+/**
+ * One stdout line of a fake CLI. A line naming `__TARGET__` is printed
+ * double-quoted so the shell fills the edit target in from the environment
+ * (`TRAYCER_TEST_EDIT_TARGET`), which the test sets once it knows the
+ * workspace; every other line is printed as it is.
+ */
+function printfLine(line: string): string {
+  if (!line.includes("__TARGET__")) {
+    return `printf '%s\n' '${line}'`;
+  }
+  const quoted = line
+    .replaceAll('"', '\\"')
+    .replaceAll("__TARGET__", "$TRAYCER_TEST_EDIT_TARGET");
+  return `printf '%s\n' "${quoted}"`;
+}
+
 async function playHook(
   dataDir: string,
   toolUseId: string,

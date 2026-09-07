@@ -13,7 +13,11 @@ import type {
 import { nestChildRuntimeEvent } from "@traycer/protocol/host/agent/gui/subagent-nesting";
 import { guiHarnessIdSchema } from "@traycer/protocol/host/agent/shared";
 import { assistantRowId } from "@traycer/protocol/persistence/chat-transcript/row-projection";
-import type { CheckpointFileOperation } from "@traycer/protocol/persistence/epic/checkpoint-manifests";
+import {
+  TURN_CHECKPOINT_MANIFEST_SCHEMA_VERSION,
+  type CheckpointFileOperation,
+  type TurnCheckpointManifestEntry,
+} from "@traycer/protocol/persistence/epic/checkpoint-manifests";
 import type {
   ContentBlock,
   FileEditReason,
@@ -57,7 +61,8 @@ import {
   broadcastChatSnapshot,
   broadcastEventAppended,
   broadcastQueueChanged,
-  broadcastQueueEvent,
+  broadcastChatEvent,
+  chatOwnerUserId,
   broadcastTurnStateChanged,
 } from "../stream/chat";
 
@@ -284,7 +289,7 @@ export async function steerQueuedPrompt(
     null,
     print.turnId,
   );
-  broadcastQueueEvent(runtime, epicId, chatId, {
+  broadcastChatEvent(runtime, epicId, chatId, {
     type: "queue.steerRequested",
     message: "Queued prompt will steer into the active turn.",
     turnId: print.turnId,
@@ -292,6 +297,7 @@ export async function steerQueuedPrompt(
     queueItemId: item.queueItemId,
     clientActionId: null,
     severity: "info",
+    metadata: null,
   });
   broadcastQueueChanged(runtime, epicId, chatId);
   const refusal = await runtime.guiRuns.steer(chatId, item.prompt);
@@ -307,7 +313,7 @@ export async function steerQueuedPrompt(
       : "The turn ended before this follow-up could be steered.");
   if (reason !== null) {
     runtime.queue.setStatus(chatId, item.queueItemId, "fallback", reason, null);
-    broadcastQueueEvent(runtime, epicId, chatId, {
+    broadcastChatEvent(runtime, epicId, chatId, {
       type: "queue.fallback",
       message: reason,
       turnId: print.turnId,
@@ -315,13 +321,14 @@ export async function steerQueuedPrompt(
       queueItemId: item.queueItemId,
       clientActionId: null,
       severity: "info",
+      metadata: null,
     });
     broadcastQueueChanged(runtime, epicId, chatId);
     drainGuiQueue(runtime, epicId, chatId);
     return false;
   }
   runtime.queue.cancel(chatId, item.queueItemId);
-  broadcastQueueEvent(runtime, epicId, chatId, {
+  broadcastChatEvent(runtime, epicId, chatId, {
     type: "queue.steered",
     message: "Queued follow-up steered into the active turn.",
     turnId: print.turnId,
@@ -329,6 +336,7 @@ export async function steerQueuedPrompt(
     queueItemId: item.queueItemId,
     clientActionId: null,
     severity: "info",
+    metadata: null,
   });
   broadcastBlockDelta(runtime, epicId, chatId, {
     type: "steer.submitted",
@@ -612,6 +620,8 @@ async function runAndPersistAssistant(
    * finished.
    */
   const settling: Promise<void>[] = [];
+  /** What this turn did to disk, for its checkpoint. */
+  const turnEntries: TurnCheckpointManifestEntry[] = [];
   const settleEditOf = async (
     toolId: string,
     failed: boolean,
@@ -633,21 +643,23 @@ async function runAndPersistAssistant(
         // applied without asking could land between the announce and the
         // read. The app-server's own diff is the upgrade path.
         const before = await edit.before;
-        await completeEdit(
-          runtime,
-          input,
-          edit,
-          {
-            before,
-            after: failed
-              ? before
-              : await captureFile(
-                  snapshotDir(runtime.dataDir),
-                  edit.path,
-                  MAX_SNAPSHOT_BYTES,
-                ),
-          },
-          "capture_failed",
+        turnEntries.push(
+          await completeEdit(
+            runtime,
+            input,
+            edit,
+            {
+              before,
+              after: failed
+                ? before
+                : await captureFile(
+                    snapshotDir(runtime.dataDir),
+                    edit.path,
+                    MAX_SNAPSHOT_BYTES,
+                  ),
+            },
+            "capture_failed",
+          ),
         );
       }
     }
@@ -669,14 +681,16 @@ async function runAndPersistAssistant(
     // does not run for it - so the before IS the after, and a diff of the two
     // says "counted, unchanged" rather than guessing at a capture that never
     // happened.
-    await completeEdit(
-      runtime,
-      input,
-      edit,
-      failed && captured.after === null
-        ? { before: captured.before, after: captured.before }
-        : captured,
-      "capture_failed",
+    turnEntries.push(
+      await completeEdit(
+        runtime,
+        input,
+        edit,
+        failed && captured.after === null
+          ? { before: captured.before, after: captured.before }
+          : captured,
+        "capture_failed",
+      ),
     );
   };
   const print = runtime.guiRuns.printState(input.chatId);
@@ -1059,7 +1073,9 @@ async function runAndPersistAssistant(
           },
           { before: null, after: null },
           "not_intercepted",
-        ),
+        ).then((entry) => {
+          turnEntries.push(entry);
+        }),
       );
       return;
     }
@@ -1118,6 +1134,7 @@ async function runAndPersistAssistant(
       });
     }
     await Promise.all(settling);
+    captureTurnCheckpoint(runtime, input, cwd, turnEntries);
     await persistAssistantTurn(runtime, {
       epicId: input.epicId,
       chatId: input.chatId,
@@ -1154,6 +1171,7 @@ async function runAndPersistAssistant(
     });
   } catch (error) {
     await Promise.all(settling);
+    captureTurnCheckpoint(runtime, input, cwd, turnEntries);
     await recordUsageFact(runtime, {
       epicId: input.epicId,
       chatId: input.chatId,
@@ -2101,7 +2119,7 @@ async function completeEdit(
     readonly after: SnapshotCapture | null;
   },
   missing: FileEditReason,
-): Promise<void> {
+): Promise<TurnCheckpointManifestEntry> {
   const dir = snapshotDir(runtime.dataDir);
   const before = captured.before ?? { hash: null, reason: missing };
   const after = captured.after ?? { hash: null, reason: missing };
@@ -2201,6 +2219,63 @@ async function completeEdit(
     });
   }
   broadcastAccumulatedChanges(runtime, input.epicId, input.chatId);
+  // This edit as the turn's checkpoint will list it: its own before and
+  // after, undoable only when both were actually captured.
+  return {
+    filePath: edit.path,
+    operation,
+    beforeHash: snapshot ? before.hash : null,
+    afterHash: snapshot ? after.hash : null,
+    undoable: snapshot,
+    reason,
+  };
+}
+
+/**
+ * The turn's checkpoint, the released host's way: one `checkpoint.captured`
+ * event per turn that changed files, whose manifest lists every edit with
+ * its before and after. A revert reads these back - all of them, or the ones
+ * from a message on - so it is the record of what a turn did to disk, not
+ * the accumulated panel, that an undo is scoped by.
+ */
+function captureTurnCheckpoint(
+  runtime: HostRuntime,
+  input: {
+    readonly epicId: string;
+    readonly chatId: string;
+    readonly turnId: string;
+  },
+  cwd: string,
+  entries: readonly TurnCheckpointManifestEntry[],
+): void {
+  if (entries.length === 0) {
+    return;
+  }
+  const chat = runtime.store
+    .snapshot()
+    .chats.find((row) => row.chatId === input.chatId);
+  if (chat === undefined) {
+    return;
+  }
+  broadcastChatEvent(runtime, input.epicId, input.chatId, {
+    type: "checkpoint.captured",
+    message: `Captured ${String(entries.length)} file change(s) for this turn.`,
+    turnId: input.turnId,
+    messageId: runtime.guiRuns.printState(input.chatId)?.userMessageId ?? null,
+    queueItemId: null,
+    clientActionId: null,
+    severity: "info",
+    metadata: {
+      schemaVersion: TURN_CHECKPOINT_MANIFEST_SCHEMA_VERSION,
+      checkpointId: input.turnId,
+      capturingUserId: chatOwnerUserId(chat),
+      capturingHostId: runtime.hostId,
+      allowedRoots: [cwd],
+      workingDirectory: cwd,
+      capturedAt: Date.now(),
+      entries: [...entries],
+    },
+  });
 }
 
 /**
