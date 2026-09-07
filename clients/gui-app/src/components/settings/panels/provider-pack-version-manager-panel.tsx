@@ -75,7 +75,10 @@ const CLEAR_PIN_PENDING_KEY = "__auto__";
  * {@link useProviderPackVersionManagerSupport} (three-valued) against the
  * **passed** `hostId`.
  * - `hostId === null` or support `null` → pending (not unsupported).
- * - support `false` → clear "host too old" (no action buttons).
+ * - support `false` → clear "this host does not manage versions" (no action
+ *   buttons). Not "too old": a host can lack the methods by design - one that
+ *   has no pack machinery at all withdraws them from its manifest - and the
+ *   copy cannot tell that host from an outdated one, so it asserts neither.
  * - support `true` → full panel.
  */
 export type ProviderPackVersionManagerPanelProps = {
@@ -551,9 +554,9 @@ export function ProviderPackVersionManagerPanel(
         className="w-full px-4 py-3 text-ui-sm text-muted-foreground"
         role="status"
       >
-        Managing managed CLI versions requires a newer Traycer host. The
-        provider table still works; update this host to download, switch, or
-        delete individual versions.
+        This Traycer host does not manage CLI versions. The provider table
+        still works; downloading, switching, or deleting individual versions
+        needs a host that does.
       </div>
     );
   }
