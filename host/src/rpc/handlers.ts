@@ -31,6 +31,14 @@ import {
   handleManagedCommandStop,
 } from "./handlers/managed-command-handlers";
 import {
+  handleAgentGetProviderProfileRateLimits,
+  handleAgentListProviderProfiles,
+  handleProvidersConsumeRateLimitResetCredit,
+  handleProvidersListModelProviders,
+  handleProvidersRefreshProfileStatus,
+  handleProvidersSetProfileEnabled,
+} from "./handlers/provider-profile-handlers";
+import {
   handleAgentConfigure,
   handleAgentFork,
   handleValidateTuiForkProfile,
@@ -313,6 +321,13 @@ export function implementedRpcMethods(): readonly string[] {
 
 const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "sessionImport.status": handleSessionImportStatus,
+  "agent.listProviderProfiles": handleAgentListProviderProfiles,
+  "agent.getProviderProfileRateLimits": handleAgentGetProviderProfileRateLimits,
+  "providers.refreshProfileStatus": handleProvidersRefreshProfileStatus,
+  "providers.setProfileEnabled": handleProvidersSetProfileEnabled,
+  "providers.consumeRateLimitResetCredit":
+    handleProvidersConsumeRateLimitResetCredit,
+  "providers.listModelProviders": handleProvidersListModelProviders,
   "host.status": handleHostStatus,
   "host.restart": handleHostRestart,
   "host.getRuntimeCapabilities": handleRuntimeCapabilities,

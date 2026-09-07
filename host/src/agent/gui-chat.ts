@@ -473,6 +473,14 @@ async function runAndPersistAssistant(
         timestamp: now,
         toolName: event.toolName,
         input: event.input,
+        // Empty by construction, not unimplemented: the field describes a
+        // `traycer_send_message` call the AGENT made, and this host spawns
+        // `claude -p` / `codex exec` with no MCP config and serves no
+        // `traycer_*` tool, so no tool call reaching here can be one. (This
+        // host does serve `agent.sendMessage` - that is the CLIENT-driven A2A
+        // path, and it leaves no tool call in a transcript.) The same holds
+        // for `agentMessageReceipt` on the completion below, which is the
+        // result-side sibling of this field.
         agentMessageSend: null,
       });
       return;
@@ -484,6 +492,7 @@ async function runAndPersistAssistant(
         blockId: event.toolId,
         timestamp: now,
         toolName: event.toolName,
+        // Empty for the reason given at `tool_call.started` above.
         agentMessageSend: null,
         imageResults: [],
       });
@@ -585,6 +594,7 @@ async function runAndPersistAssistant(
         blockId: toolId,
         timestamp: Date.now(),
         toolName,
+        // Empty for the reason given at `tool_call.started` above.
         agentMessageSend: null,
         imageResults: [],
       });
