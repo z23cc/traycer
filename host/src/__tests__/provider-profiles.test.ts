@@ -10,6 +10,11 @@ import {
   providersListModelProvidersResponseSchema,
   providersSetProfileEnabledResponseSchema,
 } from "@traycer/protocol/host/provider-schemas";
+import {
+  providersCancelMcpAuthResponseSchema,
+  providersMcpAuthResponseSchema,
+  providersModelProviderAuthResponseSchema,
+} from "@traycer/protocol/host/provider-schemas";
 import { providersRefreshProfileStatusResponseSchema } from "@traycer/protocol/host/rate-limit/schemas";
 import { dispatchHostRpc, type DispatchOutcome } from "../rpc/dispatch";
 import type { HostRuntime } from "../runtime";
@@ -175,6 +180,61 @@ describe("provider profiles", () => {
       providersListModelProvidersResponseSchema.parse(readResult(result))
         .result,
     ).toMatchObject({ ok: false, code: "capability_unavailable" });
+  });
+
+  it("answers both auth flows unsupported, not with an OAuth URL", async () => {
+    const host = await boot();
+
+    // The analog picked the union's first arm and handed the client
+    // `{kind: "authorizationUrl", authorizationUrl: "oss"}` - a flow it would
+    // start by opening `oss` in a browser.
+    expect(
+      providersMcpAuthResponseSchema.parse(
+        readResult(
+          await call(host.runtime, "providers.mcpAuth", 1, {
+            providerId: "opencode",
+            action: {
+              action: "login",
+              scope: "global",
+              workspaceRoot: null,
+              serverName: "srv",
+            },
+          }),
+        ),
+      ).result.kind,
+    ).toBe("unsupported");
+
+    expect(
+      providersModelProviderAuthResponseSchema.parse(
+        readResult(
+          await call(host.runtime, "providers.modelProviderAuth", 1, {
+            providerId: "opencode",
+            action: {
+              action: "startOauth",
+              modelProviderId: "anthropic",
+              methodIndex: 0,
+              inputs: {},
+            },
+          }),
+        ),
+      ).result.kind,
+    ).toBe("unsupported");
+
+    // Nothing can be pending, so nothing was torn down.
+    expect(
+      providersCancelMcpAuthResponseSchema.parse(
+        readResult(
+          await call(host.runtime, "providers.cancelMcpAuth", 1, {
+            providerId: "opencode",
+            context: {
+              scope: "global",
+              workspaceRoot: null,
+              serverName: "srv",
+            },
+          }),
+        ),
+      ),
+    ).toMatchObject({ cancelled: false, result: { kind: "unsupported" } });
   });
 
   function call(

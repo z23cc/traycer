@@ -33,8 +33,14 @@ import {
 import {
   handleAgentGetProviderProfileRateLimits,
   handleAgentListProviderProfiles,
+  handleProvidersAwaitMcpAuth,
+  handleProvidersAwaitModelProviderAuth,
+  handleProvidersCancelMcpAuth,
+  handleProvidersCancelModelProviderAuth,
   handleProvidersConsumeRateLimitResetCredit,
   handleProvidersListModelProviders,
+  handleProvidersMcpAuth,
+  handleProvidersModelProviderAuth,
   handleProvidersRefreshProfileStatus,
   handleProvidersSetProfileEnabled,
 } from "./handlers/provider-profile-handlers";
@@ -328,6 +334,12 @@ const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "providers.consumeRateLimitResetCredit":
     handleProvidersConsumeRateLimitResetCredit,
   "providers.listModelProviders": handleProvidersListModelProviders,
+  "providers.mcpAuth": handleProvidersMcpAuth,
+  "providers.awaitMcpAuth": handleProvidersAwaitMcpAuth,
+  "providers.cancelMcpAuth": handleProvidersCancelMcpAuth,
+  "providers.modelProviderAuth": handleProvidersModelProviderAuth,
+  "providers.awaitModelProviderAuth": handleProvidersAwaitModelProviderAuth,
+  "providers.cancelModelProviderAuth": handleProvidersCancelModelProviderAuth,
   "host.status": handleHostStatus,
   "host.restart": handleHostRestart,
   "host.getRuntimeCapabilities": handleRuntimeCapabilities,

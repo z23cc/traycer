@@ -5,7 +5,13 @@ import {
 import type { ProviderId } from "@traycer/protocol/host/provider-ids";
 import {
   PROVIDER_DISPLAY_NAMES,
+  providersAwaitMcpAuthRequestSchema,
+  providersAwaitModelProviderAuthRequestSchema,
+  providersCancelMcpAuthRequestSchema,
+  providersCancelModelProviderAuthRequestSchema,
   providersListModelProvidersRequestSchema,
+  providersMcpAuthRequestSchema,
+  providersModelProviderAuthRequestSchema,
   providersSetProfileEnabledRequestSchema,
 } from "@traycer/protocol/host/provider-schemas";
 import {
@@ -23,7 +29,7 @@ import {
   setProviderEnabled,
 } from "../../providers/service";
 import type { HostRuntime } from "../../runtime";
-import type { RpcHandler } from "./types";
+import type { RpcHandler, RpcHandlerResult } from "./types";
 
 /**
  * Provider PROFILES, of which this host has exactly one kind: the ambient CLI
@@ -245,4 +251,90 @@ function ambientAuthStatus(
   return providerCliIdentity(runtime.store, providerId).path === null
     ? "unknown"
     : "configured";
+}
+
+/**
+ * The two auth flows, both answered `unsupported`.
+ *
+ * An MCP server's credential lives in the provider CLI's own config, which
+ * this host does not manage - `providers.nativeMutate` already refuses that
+ * whole surface with `unsupported_action` - and a model provider's credential
+ * is connected through the managed server this host does not run. Both result
+ * unions carry an `unsupported` arm with a reason, which is the answer.
+ *
+ * The analog picked the FIRST arm instead: `{kind: "authorizationUrl",
+ * authorizationUrl: "oss"}`. That is not a vague answer, it is an OAuth flow
+ * the client would start by opening `oss` in a browser.
+ */
+function unsupportedAuth(reason: string): {
+  readonly ok: true;
+  readonly result: {
+    readonly result: { readonly kind: "unsupported"; readonly reason: string };
+  };
+} {
+  return { ok: true, result: { result: { kind: "unsupported", reason } } };
+}
+
+const MCP_REASON =
+  "This host does not manage MCP server credentials; each provider CLI owns its own config.";
+const MODEL_PROVIDER_REASON =
+  "This host runs no managed model-provider server to connect a credential through.";
+
+export const handleProvidersMcpAuth: RpcHandler = (params) => {
+  const parsed = providersMcpAuthRequestSchema.safeParse(params);
+  return parsed.success
+    ? unsupportedAuth(MCP_REASON)
+    : malformed(parsed.error.message);
+};
+
+export const handleProvidersAwaitMcpAuth: RpcHandler = (params) => {
+  const parsed = providersAwaitMcpAuthRequestSchema.safeParse(params);
+  return parsed.success
+    ? unsupportedAuth(MCP_REASON)
+    : malformed(parsed.error.message);
+};
+
+export const handleProvidersCancelMcpAuth: RpcHandler = (params) => {
+  const parsed = providersCancelMcpAuthRequestSchema.safeParse(params);
+  return parsed.success
+    ? unsupportedCancel(MCP_REASON)
+    : malformed(parsed.error.message);
+};
+
+export const handleProvidersModelProviderAuth: RpcHandler = (params) => {
+  const parsed = providersModelProviderAuthRequestSchema.safeParse(params);
+  return parsed.success
+    ? unsupportedAuth(MODEL_PROVIDER_REASON)
+    : malformed(parsed.error.message);
+};
+
+export const handleProvidersAwaitModelProviderAuth: RpcHandler = (params) => {
+  const parsed = providersAwaitModelProviderAuthRequestSchema.safeParse(params);
+  return parsed.success
+    ? unsupportedAuth(MODEL_PROVIDER_REASON)
+    : malformed(parsed.error.message);
+};
+
+export const handleProvidersCancelModelProviderAuth: RpcHandler = (params) => {
+  const parsed =
+    providersCancelModelProviderAuthRequestSchema.safeParse(params);
+  return parsed.success
+    ? unsupportedCancel(MODEL_PROVIDER_REASON)
+    : malformed(parsed.error.message);
+};
+
+/**
+ * `cancelled` is whether a pending attempt was found and torn down, which is
+ * a different question from the result: none can be pending here, so it is
+ * false rather than a courtesy true.
+ */
+function unsupportedCancel(reason: string): RpcHandlerResult {
+  return {
+    ok: true,
+    result: { cancelled: false, result: { kind: "unsupported", reason } },
+  };
+}
+
+function malformed(message: string): RpcHandlerResult {
+  return { ok: false, code: "RPC_ERROR", message };
 }
