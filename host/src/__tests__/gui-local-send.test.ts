@@ -1210,6 +1210,52 @@ describe("local GUI send without cloud login", () => {
       }),
     );
   });
+
+  /**
+   * The host's own gate on Undo. The GUI disables the button while a turn
+   * runs, but a click and a turn start can cross on the wire - and a revert
+   * accepted mid-turn writes the first before back under an agent still
+   * working on the file. Seen live; reproduced here by opening a print
+   * directly rather than racing a CLI.
+   */
+  it("refuses a revert while a turn is running", async () => {
+    const setup = await boot();
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-13", "chat-13");
+    started.runtime.guiRuns.beginPrint("chat-13", {
+      harnessId: "claude",
+      model: "default",
+      userMessageId: null,
+      assistantMessageId: "assistant-13",
+      turnId: "turn:13",
+      resumed: false,
+      compact: false,
+      startedAt: Date.now(),
+    });
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    const frames = await sendActionUntil(
+      streamUrl,
+      {
+        kind: "revertFileChanges",
+        epicId: "epic-13",
+        chatId: "chat-13",
+        clientActionId: "revert-13",
+        fromMessageId: null,
+        filePaths: null,
+        revertArtifacts: true,
+      },
+      "actionAck",
+    );
+    expect(frames).toContainEqual(
+      expect.objectContaining({
+        kind: "actionAck",
+        status: "rejected",
+        code: "TURN_IN_PROGRESS",
+      }),
+    );
+    started.runtime.guiRuns.endPrint("chat-13", "assistant-13");
+  });
 });
 
 /**

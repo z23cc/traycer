@@ -243,6 +243,20 @@ async function handleChatRevertFileChanges(
     );
     return;
   }
+  // The GUI disables Undo while a turn runs, but the host is the authority
+  // and the two can race - seen live, where a revert accepted mid-turn wrote
+  // the first before back under an agent that was still working on the file.
+  if (runtime.guiRuns.printState(ids.chatId) !== null) {
+    ack(
+      socket,
+      ids,
+      "revertFileChanges",
+      "rejected",
+      "Wait for the active turn to finish before reverting.",
+      "TURN_IN_PROGRESS",
+    );
+    return;
+  }
   const filePaths = readStringArrayField(parsed, "filePaths");
   const chat = runtime.store
     .snapshot()
