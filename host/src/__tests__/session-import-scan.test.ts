@@ -15,8 +15,11 @@ import {
   readableProviders,
   readProvider,
   type DiscoveredSession,
+  type ProviderRoots,
 } from "../session-import/discover";
+import { importSession } from "../session-import/import";
 import { serveSessionImportScan } from "../stream/session-import-scan";
+import { startHost, type StartedHost } from "../start-host";
 
 type Frame = { readonly kind: string; readonly [key: string]: unknown };
 
@@ -40,12 +43,26 @@ class FakeSocket {
  */
 describe("session import discovery", () => {
   const dirs: string[] = [];
+  let started: StartedHost | null = null;
 
-  afterEach(() => {
+  afterEach(async () => {
+    if (started !== null) {
+      await started.close();
+      started = null;
+    }
     for (const dir of dirs.splice(0)) {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  async function boot(): Promise<StartedHost> {
+    started = await startHost({
+      argv: ["--host-data-dir", temp()],
+      listenHost: "127.0.0.1",
+      listenPort: 0,
+    });
+    return started;
+  }
 
   function temp(): string {
     const dir = mkdtempSync(join(tmpdir(), "traycer-scan-"));
@@ -226,7 +243,8 @@ describe("session import discovery", () => {
     ]);
   });
 
-  it("sends started, then a failure, then groups, then complete", () => {
+  it("sends started, then a failure, then groups, then complete", async () => {
+    const host = await boot();
     const root = temp();
     const repo = temp();
     claudeSession(root, "-x", "iii", turns(repo, "iii", "work"));
@@ -234,6 +252,7 @@ describe("session import discovery", () => {
 
     const served = serveSessionImportScan(
       socket as never,
+      host.runtime,
       { providers: ["claude", "opencode"], updatedAfter: null },
       new Map([["claude", root]]),
     );
@@ -260,17 +279,51 @@ describe("session import discovery", () => {
     });
   });
 
-  it("refuses a malformed open request", () => {
+  it("refuses a malformed open request", async () => {
+    const host = await boot();
     const socket = new FakeSocket();
 
     expect(
       serveSessionImportScan(
         socket as never,
+        host.runtime,
         { providers: [], updatedAfter: null },
         new Map(),
       ),
     ).toBe(false);
     expect(socket.frames).toHaveLength(0);
+  });
+
+  it("stops offering a session that already has a chat here", async () => {
+    const host = await boot();
+    const root = temp();
+    const repo = temp();
+    claudeSession(root, "-x", "jjj", turns(repo, "jjj", "work"));
+    const roots: ProviderRoots = new Map([["claude", root]]);
+    const request = { providers: null, updatedAfter: null };
+    const before = new FakeSocket();
+    serveSessionImportScan(before as never, host.runtime, request, roots);
+    expect(before.frames[before.frames.length - 1].totals).toMatchObject({
+      sessions: 1,
+    });
+
+    const found = readProvider("claude", root, null);
+    await importSession(
+      host.runtime,
+      { harness: "claude", nativeSessionId: "jjj" },
+      "supervised",
+      found[0],
+    );
+
+    // Hidden, not marked: `already_in_traycer` exists only so a client can
+    // parse what an OLDER host emits.
+    const after = new FakeSocket();
+    serveSessionImportScan(after as never, host.runtime, request, roots);
+    expect(after.frames.map((frame) => frame.kind)).toStrictEqual([
+      "started",
+      "complete",
+    ]);
+    expect(after.frames[1].totals).toMatchObject({ groups: 0, sessions: 0 });
   });
 
   it("orders groups and sessions newest first", () => {

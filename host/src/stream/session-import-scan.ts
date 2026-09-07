@@ -5,6 +5,8 @@ import {
   sessionImportScanOpenRequestSchema,
   type SessionImportScanTotals,
 } from "@traycer/protocol/host/session-import/scan";
+import type { HostRuntime } from "../runtime";
+import { sessionsAlreadyInTraycer } from "../session-import/import";
 import {
   groupSessions,
   readableProviders,
@@ -29,6 +31,7 @@ import {
  */
 export function serveSessionImportScan(
   socket: WebSocket,
+  runtime: HostRuntime,
   params: unknown,
   roots: ProviderRoots,
 ): boolean {
@@ -56,7 +59,18 @@ export function serveSessionImportScan(
       fail(socket, harness, "source_unreadable", String(error));
     }
   }
-  const groups = groupSessions(found);
+  // A session that already has a chat here is hidden, not marked: the
+  // wizard's second visit shows what is new, and the chats carrying
+  // `providerSession` are the index that decides it.
+  const imported = sessionsAlreadyInTraycer(runtime);
+  const groups = groupSessions(
+    found.filter(
+      (session) =>
+        !imported.has(
+          `${session.candidate.harness}:${session.candidate.nativeSessionId}`,
+        ),
+    ),
+  );
   for (const group of groups) {
     send(socket, { kind: "group", hasBinaryPayload: false, group });
   }

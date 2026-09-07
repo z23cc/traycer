@@ -140,6 +140,29 @@ export async function importSession(
 }
 
 /**
+ * Every native session that already has a chat here, as
+ * `harness:nativeSessionId`. The scan hides these rather than offering them:
+ * the contract keeps an `already_in_traycer` state only so a client can parse
+ * what an OLDER host emits, and says a current host shows the user what is
+ * new.
+ *
+ * Wider than "already imported", and deliberately so: a chat that RAN a
+ * harness here carries the same `providerSession`, and its transcript is
+ * sitting in the vendor's directory like any other. Offering that one back
+ * would import a conversation the user is already looking at.
+ */
+export function sessionsAlreadyInTraycer(runtime: HostRuntime): Set<string> {
+  const keys = new Set<string>();
+  for (const chat of runtime.store.snapshot().chats) {
+    const session = chat.providerSession;
+    if (session !== null) {
+      keys.add(`${session.harnessId}:${session.sessionId}`);
+    }
+  }
+  return keys;
+}
+
+/**
  * The previous import of this pair, by the `providerSession` it was stamped
  * with. The derived chat id would find the chat too, but only the stored row
  * carries the epic it ended up in, which the outcome has to name.

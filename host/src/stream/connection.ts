@@ -553,6 +553,7 @@ export function attachStreamConnection(
       if (
         !serveSessionImportScan(
           socket,
+          runtime,
           subscribe.data.params,
           defaultProviderRoots(),
         )
