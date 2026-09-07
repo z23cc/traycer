@@ -2882,7 +2882,20 @@ describe("local GUI send without cloud login", () => {
       80,
       50,
     );
-  });
+    // A stopped task reports no turn of its own, so the kept process has
+    // nothing left to say: after the grace it is let go.
+    expect(started.runtime.guiRuns.isDetached("chat-32")).toBe(true);
+    await new Promise<void>((resolve) => {
+      const poll = (): void => {
+        if (!started?.runtime.guiRuns.isDetached("chat-32")) {
+          resolve();
+          return;
+        }
+        setTimeout(poll, 100);
+      };
+      poll();
+    });
+  }, 12_000);
 });
 
 /**

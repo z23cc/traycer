@@ -154,7 +154,17 @@ type DetachedRun = {
   readonly buffered: string[];
   lineBuffer: string;
   hooks: DetachedHooks | null;
+  /** Armed when nothing runs any more: a process with nothing to say is let go. */
+  idleTimer: NodeJS.Timeout | null;
 };
+
+/**
+ * How long a kept process with no background task left gets to begin a turn
+ * of its own before its stdin is ended. Recorded live, the CLI opens that
+ * turn within about a second of the last task ending - and never after a
+ * task it was told to stop.
+ */
+const DETACHED_IDLE_MS = 5_000;
 
 export class GuiRunRegistry {
   private readonly runs = new Map<string, ChildProcess>();
@@ -397,6 +407,7 @@ export class GuiRunRegistry {
       buffered: [],
       lineBuffer: "",
       hooks: null,
+      idleTimer: null,
     };
     this.detached.set(agentId, run);
     carrier.sink = (chunk) => {
@@ -433,6 +444,10 @@ export class GuiRunRegistry {
     }
     this.detached.delete(agentId);
     run.hooks = null;
+    if (run.idleTimer !== null) {
+      clearTimeout(run.idleTimer);
+      run.idleTimer = null;
+    }
     return run;
   }
 
@@ -479,11 +494,16 @@ export class GuiRunRegistry {
         } else if (event.kind === "background_tasks") {
           this.applyBackgroundTasks(agentId, event.tasks);
           run.hooks?.onItemsChanged();
+          this.armDetachedIdle(agentId, run);
         } else if (!isBookkeeping(event)) {
           content = true;
         }
       }
       if (content) {
+        if (run.idleTimer !== null) {
+          clearTimeout(run.idleTimer);
+          run.idleTimer = null;
+        }
         run.buffered.push(line);
         // After this chunk's remaining lines are buffered: the turn that
         // answers takes the buffer at once, and would miss what this loop
@@ -493,6 +513,32 @@ export class GuiRunRegistry {
         });
       }
     }
+  }
+
+  /**
+   * With no task left, the process either speaks up (a turn of its own
+   * about the one that ended) or it is done: after the grace its stdin is
+   * ended, and its exit clears the rest.
+   */
+  private armDetachedIdle(agentId: string, run: DetachedRun): void {
+    if (run.idleTimer !== null) {
+      clearTimeout(run.idleTimer);
+      run.idleTimer = null;
+    }
+    if (this.backgroundItemsOf(agentId).length > 0) {
+      return;
+    }
+    run.idleTimer = setTimeout(() => {
+      run.idleTimer = null;
+      if (
+        this.detached.get(agentId) === run &&
+        run.buffered.length === 0 &&
+        this.backgroundItemsOf(agentId).length === 0
+      ) {
+        run.carrier.child.stdin?.end();
+      }
+    }, DETACHED_IDLE_MS);
+    run.idleTimer.unref();
   }
 
   backgroundItemsOf(agentId: string): readonly CommandBackgroundItem[] {
