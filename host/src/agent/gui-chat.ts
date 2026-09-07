@@ -958,6 +958,21 @@ async function runAndPersistAssistant(
         ...(event.postTokens === null ? {} : { postTokens: event.postTokens }),
         ...(event.durationMs === null ? {} : { durationMs: event.durationMs }),
       });
+      // The context is now what the boundary says it is. The compact turn's
+      // own `result` counts nothing (recorded live), so this is the only
+      // reading the meter gets - the released host's, field for field.
+      if (event.postTokens !== null) {
+        applyUsage({
+          inputTokens: event.postTokens,
+          outputTokens: 0,
+          totalTokens: event.postTokens,
+          cacheReadInputTokens: undefined,
+          contextTokens: event.postTokens,
+          contextWindow:
+            lastUsage?.contextWindow ?? chat?.lastUsage?.contextWindow,
+          costUsd: undefined,
+        });
+      }
       return;
     }
     if (event.kind === "subagent_progress") {
@@ -1106,25 +1121,29 @@ async function runAndPersistAssistant(
       if (nestUnder !== null) {
         return;
       }
-      emit({
-        type: "usage.updated",
-        blockId: input.turnId,
-        timestamp: now,
-        turnId: input.turnId,
-        usage: event.usage,
-      });
-      lastUsage = event.usage;
-      void runtime.store.mutate((state) => {
-        const row = state.chats.find(
-          (chatRow) => chatRow.chatId === input.chatId,
-        );
-        if (row === undefined) {
-          return;
-        }
-        row.lastUsage = event.usage;
-      });
+      applyUsage(event.usage);
     }
   };
+  /** The turn's latest usage: the GUI's meter, and the fact recorded at its end. */
+  function applyUsage(usage: ProviderTokenUsage): void {
+    emit({
+      type: "usage.updated",
+      blockId: input.turnId,
+      timestamp: Date.now(),
+      turnId: input.turnId,
+      usage,
+    });
+    lastUsage = usage;
+    void runtime.store.mutate((state) => {
+      const row = state.chats.find(
+        (chatRow) => chatRow.chatId === input.chatId,
+      );
+      if (row === undefined) {
+        return;
+      }
+      row.lastUsage = usage;
+    });
+  }
   try {
     const replyText = await runGuiPrintTurn(runtime, {
       agentId: input.chatId,

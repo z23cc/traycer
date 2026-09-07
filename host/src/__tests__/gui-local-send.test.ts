@@ -2659,6 +2659,18 @@ describe("local GUI send without cloud login", () => {
       "snapshot",
     );
     expect(Reflect.get(snapshot, "runStatus")).toBe("idle");
+    // The meter reads what the boundary said, not the count of a result
+    // that counted nothing.
+    expect(
+      Reflect.get(
+        Reflect.get(snapshot, "derived") ?? {},
+        "latestAssistantUsage",
+      ),
+    ).toMatchObject({
+      contextTokens: 2118,
+      inputTokens: 2118,
+      outputTokens: 0,
+    });
     expect(
       readArray(Reflect.get(snapshot, "tail") ?? {}, "events").map((e) =>
         Reflect.get(e ?? {}, "type"),
