@@ -95,9 +95,17 @@ export async function notify(
 export function notificationRows(
   runtime: HostRuntime,
 ): readonly StoredNotification[] {
-  return [...runtime.store.snapshot().notifications].sort(
-    (left, right) => right.updatedAt - left.updatedAt,
-  );
+  // Newest first. Two rows born in the same millisecond tie on `updatedAt`,
+  // and the later-recorded one is the newer - so the store's order breaks
+  // the tie rather than leaving it to the sort.
+  return runtime.store
+    .snapshot()
+    .notifications.map((row, index) => ({ row, index }))
+    .sort(
+      (left, right) =>
+        right.row.updatedAt - left.row.updatedAt || right.index - left.index,
+    )
+    .map((entry) => entry.row);
 }
 
 /** Blocking prompts first, then unread failures - the Attention tier. */
