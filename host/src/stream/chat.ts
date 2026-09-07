@@ -20,6 +20,7 @@ import {
   startContentFingerprint,
 } from "@traycer/protocol/utils/text/digest";
 import { guiHarnessIdSchema } from "@traycer/protocol/host/agent/shared";
+import type { RuntimeEvent } from "@traycer/protocol/host/agent/gui/agent-runtime";
 import type { WorktreeBinding } from "@traycer/protocol/host/worktree-schemas";
 import { derivedChatTitle } from "../agent/gui-chat";
 import { LOCAL_USER_ID } from "../local-user";
@@ -201,17 +202,24 @@ export function broadcastTurnStateChanged(
   }
 }
 
+/**
+ * Send one block delta to every subscriber of this chat, and fold it into the
+ * turn's block state on the way out.
+ *
+ * The fold lives HERE rather than at the emission sites because this is the
+ * only door: a delta the GUI sees but the fold missed would be a block that
+ * exists until the chat is reopened and then does not, which is the exact
+ * failure this is closing. Typed as a `RuntimeEvent` for the same reason -
+ * the reducer only understands real ones, and a loose shape would have let a
+ * near-miss through to be silently ignored.
+ */
 export function broadcastBlockDelta(
   runtime: HostRuntime,
   epicId: string,
   chatId: string,
-  event: {
-    readonly type: string;
-    readonly blockId: string;
-    readonly timestamp: number;
-    readonly [key: string]: unknown;
-  },
+  event: RuntimeEvent,
 ): void {
+  runtime.guiRuns.foldTurnBlock(chatId, event);
   const frame = {
     kind: "blockDelta",
     hasBinaryPayload: false,
@@ -665,7 +673,12 @@ export function turnToMessage(turn: StoredTurn) {
       role: "assistant" as const,
       messageId: turn.messageId,
       sender: agentSender,
-      blocks: [
+      // What the turn actually did, when the run recorded it. The lone text
+      // block is the fallback for a turn that recorded nothing - one written
+      // before this host folded blocks, or one whose harness produced no
+      // stream at all - and it is why every tool call, edit and error used to
+      // vanish the moment a chat was reopened.
+      blocks: turn.blocks ?? [
         {
           blockId: assistantTextBlockId(turn.messageId),
           status: "completed" as const,

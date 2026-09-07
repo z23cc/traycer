@@ -128,6 +128,7 @@ export async function sendLocalAgentMessage(
     userId: null,
     content: null,
     turnId: null,
+    blocks: null,
   };
   await runtime.store.mutate((state) => {
     let chat = state.chats.find((row) => row.chatId === receiver.id);
@@ -206,6 +207,7 @@ export async function sendLocalAgentMessage(
     userId: null,
     content: null,
     turnId: null,
+    blocks: null,
   };
   await runtime.store.mutate((state) => {
     const chat = state.chats.find((row) => row.chatId === receiver.id);

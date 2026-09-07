@@ -86,6 +86,7 @@ function user(messageId: string, prompt: string): StoredTurn {
     userId: "local",
     content: null,
     turnId: null,
+    blocks: null,
   };
 }
 
@@ -103,6 +104,7 @@ function assistant(messageId: string, prompt: string): StoredTurn {
     userId: null,
     content: null,
     turnId: "turn:a1",
+    blocks: null,
   };
 }
 

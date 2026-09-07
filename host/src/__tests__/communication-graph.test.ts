@@ -222,5 +222,6 @@ function turn(
     userId: "local",
     content: null,
     turnId: null,
+    blocks: null,
   };
 }

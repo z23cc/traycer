@@ -369,6 +369,7 @@ function storedTurn(
     // builds a document from `prompt` when there is none.
     content: null,
     turnId: null,
+    blocks: null,
   };
 }
 

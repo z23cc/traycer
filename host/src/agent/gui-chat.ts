@@ -4,8 +4,11 @@ import {
   AUTH_ERROR_CODE,
   ENV_CREDENTIAL_AUTH_ERROR_CODE,
 } from "@traycer/protocol/host/agent/gui/agent-runtime";
+import type { UserMessageAnchorResolvedEvent } from "@traycer/protocol/host/agent/gui/agent-runtime";
+import { guiHarnessIdSchema } from "@traycer/protocol/host/agent/shared";
 import { assistantRowId } from "@traycer/protocol/persistence/chat-transcript/row-projection";
 import type { CheckpointFileOperation } from "@traycer/protocol/persistence/epic/checkpoint-manifests";
+import type { ContentBlock } from "@traycer/protocol/persistence/epic/content-blocks";
 import { providerIdForHarness } from "../gui/harness-map";
 import { envCredentialVarForProvider } from "../providers/service";
 import { runGuiPrintTurn } from "../gui/deliver";
@@ -62,6 +65,7 @@ export async function persistGuiUserTurn(
     userId: input.userId,
     content: input.content,
     turnId: null,
+    blocks: null,
   };
   return runtime.store.mutate((state) => {
     const chat = state.chats.find((row) => row.chatId === input.chatId);
@@ -202,7 +206,14 @@ export function beginGuiPrintTurn(
     assistantMessageId,
     turnId,
   }).then(
-    () => finishPrint(runtime, input.epicId, input.chatId, assistantMessageId),
+    () =>
+      finishPrint(
+        runtime,
+        input.epicId,
+        input.chatId,
+        assistantMessageId,
+        null,
+      ),
     (error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       return persistAssistantTurn(runtime, {
@@ -215,7 +226,13 @@ export function beginGuiPrintTurn(
         messageId: assistantMessageId,
         turnId,
       }).then(() =>
-        finishPrint(runtime, input.epicId, input.chatId, assistantMessageId),
+        finishPrint(
+          runtime,
+          input.epicId,
+          input.chatId,
+          assistantMessageId,
+          message,
+        ),
       );
     },
   );
@@ -428,16 +445,22 @@ async function runAndPersistAssistant(
         return;
       }
       announcedSession = true;
-      broadcastBlockDelta(runtime, input.epicId, input.chatId, {
-        type: print?.resumed === true ? "session.resumed" : "session.created",
-        blockId: input.turnId,
-        timestamp: now,
-        session: {
-          id: event.sessionId,
-          harnessId: input.harnessId,
-          createdAt: now,
-        },
-      });
+      // The event names a GUI harness, not any string. Every harness this host
+      // spawns is one, so a parse failure here means a caller invented an id -
+      // and the run itself is still fine, so the session block is what drops.
+      const harness = guiHarnessIdSchema.safeParse(input.harnessId);
+      if (harness.success) {
+        broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+          type: print?.resumed === true ? "session.resumed" : "session.created",
+          blockId: input.turnId,
+          timestamp: now,
+          session: {
+            id: event.sessionId,
+            harnessId: harness.data,
+            createdAt: now,
+          },
+        });
+      }
       const userMessageId = print?.userMessageId ?? null;
       const anchor = userMessageAnchor(
         input.harnessId,
@@ -547,7 +570,7 @@ async function runAndPersistAssistant(
         type: "todo.updated",
         blockId: event.toolId,
         timestamp: now,
-        items: event.items,
+        items: [...event.items],
       });
       // Stored as well as broadcast: the dock is painted from the snapshot,
       // and a block delta is live-only here.
@@ -889,6 +912,7 @@ async function persistAssistantTurn(
     userId: null,
     content: null,
     turnId: input.turnId,
+    blocks: null,
   };
   await runtime.store.mutate((state) => {
     const chat = state.chats.find((row) => row.chatId === input.chatId);
@@ -907,11 +931,23 @@ async function persistAssistantTurn(
   });
 }
 
-async function stampAssistantTurn(
+/**
+ * Write the finished turn's blocks onto it, and stamp it.
+ *
+ * Both happen here and not at persist time because both are only true once
+ * the terminal event has gone out: the blocks are still streaming until then,
+ * and the stamp has to beat the live `text.completed` beside it.
+ *
+ * An empty fold leaves the stored blocks alone rather than clearing them. A
+ * turn that produced no delta at all has nothing to say, and the reader falls
+ * back to a lone text block from the prompt - which is what such a turn is.
+ */
+async function sealAssistantTurn(
   runtime: HostRuntime,
   chatId: string,
   messageId: string,
   timestamp: number,
+  blocks: readonly ContentBlock[],
 ): Promise<void> {
   await runtime.store.mutate((state) => {
     const chat = state.chats.find((row) => row.chatId === chatId);
@@ -926,7 +962,11 @@ async function stampAssistantTurn(
     if (turn === undefined) {
       return;
     }
-    chat.turns[index] = { ...turn, timestamp };
+    chat.turns[index] = {
+      ...turn,
+      timestamp,
+      blocks: blocks.length === 0 ? turn.blocks : [...blocks],
+    };
   });
 }
 
@@ -997,11 +1037,22 @@ function matchingProviderSession(
   return session.sessionId;
 }
 
+/**
+ * Close out a turn: finalize its blocks, persist them, and let the next
+ * queued prompt run.
+ *
+ * `failure` is the message the run rejected with, and it decides which
+ * terminal event goes out. That is not cosmetic: every block still streaming
+ * adopts a status from this event, so a turn whose harness died mid-tool-call
+ * used to stamp that call `completed` - and now that the blocks are kept, it
+ * would stamp it completed forever.
+ */
 async function finishPrint(
   runtime: HostRuntime,
   epicId: string,
   chatId: string,
   assistantMessageId: string,
+  failure: string | null,
 ): Promise<void> {
   const print = runtime.guiRuns.printState(chatId);
   const stopped = runtime.guiRuns.wasStopped(chatId);
@@ -1020,24 +1071,46 @@ async function finishPrint(
     blockId: assistantTextBlockId(assistantMessageId),
     timestamp: now,
   });
-  broadcastBlockDelta(runtime, epicId, chatId, {
-    type: stopped ? "turn.stopped" : "turn.completed",
-    blockId: turnId,
-    timestamp: now,
-    turnId,
-  });
+  // A stop is a stop even though it also makes the run reject: the user asked
+  // for it, and `turn.stopped` is the word for that.
+  const outcome = stopped
+    ? "turn.stopped"
+    : failure === null
+      ? "turn.completed"
+      : "turn.interrupted";
+  broadcastBlockDelta(
+    runtime,
+    epicId,
+    chatId,
+    outcome === "turn.interrupted"
+      ? {
+          type: outcome,
+          blockId: turnId,
+          timestamp: now,
+          turnId,
+          reason: failure ?? "",
+        }
+      : { type: outcome, blockId: turnId, timestamp: now, turnId },
+  );
   broadcastEventAppended(runtime, epicId, chatId, {
-    type: stopped ? "turn.stopped" : "turn.completed",
-    message: stopped ? "Turn stopped." : "Turn completed.",
+    type: outcome,
+    message:
+      outcome === "turn.stopped"
+        ? "Turn stopped."
+        : outcome === "turn.completed"
+          ? "Turn completed."
+          : "Turn interrupted.",
     turnId,
     messageId: assistantMessageId,
     clientActionId: null,
-    severity: "info",
+    severity: outcome === "turn.interrupted" ? "error" : "info",
   });
+  // Read before `endPrint`, which is what a next turn resets.
+  const blocks = runtime.guiRuns.blocksOf(chatId);
   runtime.guiRuns.endPrint(chatId, assistantMessageId);
   // Live `text.completed` uses `now`. Equal stamps keep live when snapshot
   // blocks differ, so the persisted turn must be strictly newer.
-  await stampAssistantTurn(runtime, chatId, assistantMessageId, now + 1);
+  await sealAssistantTurn(runtime, chatId, assistantMessageId, now + 1, blocks);
   broadcastTurnStateChanged(runtime, epicId, chatId);
   broadcastChatSnapshot(runtime, epicId, chatId);
   drainGuiQueue(runtime, epicId, chatId);
@@ -1048,7 +1121,7 @@ function userMessageAnchor(
   sessionId: string,
   userMessageId: string,
   turnId: string,
-): { readonly [key: string]: unknown } | null {
+): UserMessageAnchorResolvedEvent["anchor"] | null {
   if (harnessId === "claude") {
     return {
       harnessId: "claude",

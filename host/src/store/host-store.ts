@@ -48,6 +48,16 @@ export type StoredTurn = {
   readonly userId: string | null;
   readonly content: unknown | null;
   readonly turnId: string | null;
+  /**
+   * The blocks this turn produced, as the protocol's own reducer folded them.
+   *
+   * Typed loosely for the same reason `content` is: the store is a JSON file
+   * and this is what came out of it, so the wire schema on the way back to a
+   * client is what says whether it is still a block. `null` is a turn written
+   * before the fold existed (or one that streamed nothing), and reads as a
+   * single text block from `prompt`.
+   */
+  readonly blocks: readonly unknown[] | null;
 };
 
 export type StoredProviderSession = {
@@ -927,6 +937,7 @@ function normalizeTurns(value: unknown): StoredTurn[] {
       userId: typeof record.userId === "string" ? record.userId : null,
       content: record.content === undefined ? null : record.content,
       turnId: typeof record.turnId === "string" ? record.turnId : null,
+      blocks: Array.isArray(record.blocks) ? record.blocks : null,
     });
   }
   return rows;

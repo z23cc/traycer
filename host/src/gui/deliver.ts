@@ -1,4 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { accumulateEvent } from "@traycer/protocol/host/agent/gui/agent-runtime-accumulator";
+import type { RuntimeEvent } from "@traycer/protocol/host/agent/gui/agent-runtime";
+import type { ContentBlock } from "@traycer/protocol/persistence/epic/content-blocks";
 import { providerCliIdentity, spawnEnvForProvider } from "../providers/service";
 import type { HostRuntime } from "../runtime";
 import { providerIdForHarness } from "./harness-map";
@@ -25,6 +28,17 @@ export type GuiPrintTurnState = {
 export class GuiRunRegistry {
   private readonly runs = new Map<string, ChildProcess>();
   private readonly prints = new Map<string, GuiPrintTurnState>();
+  /**
+   * The blocks each running turn has produced so far, folded from the same
+   * deltas the GUI receives.
+   *
+   * Kept here rather than in the turn's own scope because the turn's terminal
+   * events are emitted from `finishPrint`, which runs outside it - and those
+   * are the events that finalize every still-streaming block. Reset when a
+   * turn begins; deliberately NOT cleared when one ends, since `endPrint` runs
+   * before the completed turn is written to disk.
+   */
+  private readonly turnBlocks = new Map<string, ContentBlock[]>();
   private readonly stopped = new Set<string>();
   private readonly inflight = new Set<Promise<void>>();
   private disposing = false;
@@ -32,6 +46,27 @@ export class GuiRunRegistry {
   beginPrint(agentId: string, state: GuiPrintTurnState): void {
     this.stopped.delete(agentId);
     this.prints.set(agentId, state);
+    this.turnBlocks.set(agentId, []);
+  }
+
+  /**
+   * Fold one broadcast delta into the running turn's blocks.
+   *
+   * This is the protocol's own reducer, the same one the GUI runs over the
+   * same events, so the persisted turn and the live one cannot disagree about
+   * what happened - and the raw tool input the reducer drops on the way stays
+   * out of the store.
+   */
+  foldTurnBlock(agentId: string, event: RuntimeEvent): void {
+    const current = this.turnBlocks.get(agentId);
+    if (current === undefined) {
+      return;
+    }
+    this.turnBlocks.set(agentId, accumulateEvent(current, event));
+  }
+
+  blocksOf(agentId: string): readonly ContentBlock[] {
+    return this.turnBlocks.get(agentId) ?? [];
   }
 
   endPrint(agentId: string, assistantMessageId: string | null): void {
@@ -298,7 +333,16 @@ export async function runGuiPrintTurn(
         applyStructuredLine(lineBuffer);
       }
       flushPlain();
-      const text = streamed.trim().length > 0 ? streamed.trim() : stdout.trim();
+      // Raw stdout is a reply only on the unstructured path. On the structured
+      // one it is the event stream itself, and handing that back as the
+      // assistant's words files a run that said nothing as a run that said
+      // several kilobytes of JSON.
+      const text =
+        streamed.trim().length > 0
+          ? streamed.trim()
+          : structured
+            ? ""
+            : stdout.trim();
       const errText = stderr.trim();
       if (runtime.guiRuns.wasStopped(input.agentId)) {
         resolve(text.length > 0 ? text : "Stopped.");

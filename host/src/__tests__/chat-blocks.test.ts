@@ -21,6 +21,7 @@ describe("assistant snapshot blocks", () => {
       userId: null,
       content: null,
       turnId: "turn:b79c69fd-d208-4787-a90e-f49cc33088ea",
+      blocks: null,
     };
     const message = turnToMessage(turn);
     expect(message).toMatchObject({
@@ -59,6 +60,7 @@ describe("assistant snapshot blocks", () => {
       userId: null,
       content: null,
       turnId: "turn:1",
+      blocks: null,
     };
     expect(turnToMessage(turn)).toMatchObject({
       timestamp: 42,

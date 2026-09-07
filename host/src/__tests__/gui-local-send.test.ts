@@ -793,7 +793,201 @@ describe("local GUI send without cloud login", () => {
     expect(fact?.toolCallCount).toBe(1);
     expect(fact?.toolCallErrorCount).toBe(1);
   });
+
+  /**
+   * The whole point of persisting blocks: a chat reopened tomorrow shows what
+   * the turn DID, not just what it said. This subscribes fresh - no live
+   * deltas - so the only thing that can carry a tool call or an edit here is
+   * the stored turn.
+   */
+  it("keeps a reopened turn's tool call and edit", async () => {
+    const target = join(tmpdir(), `traycer-blocks-${String(Date.now())}.ts`);
+    const stdout = [
+      '{"type":"system","subtype":"init","session_id":"sess-blocks"}',
+      '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_b1","name":"Bash","input":{"command":"ls"}}]}}',
+      '{"type":"user","message":{"content":[{"type":"tool_result","content":"ok","tool_use_id":"toolu_b1"}]}}',
+      `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_b2","name":"Write","input":{"file_path":"${target}","content":"x"}}]}}`,
+      '{"type":"user","message":{"content":[{"type":"tool_result","content":"ok","tool_use_id":"toolu_b2"}]}}',
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"blocks-ok"}]}}',
+      '{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}',
+    ];
+    const setup = await bootWithCli(
+      [
+        "#!/bin/sh",
+        ...stdout.map((line) => `printf '%s\n' '${line}'`),
+        "",
+      ].join("\n"),
+    );
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-9", "chat-9");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-9",
+      chatId: "chat-9",
+      clientActionId: "action-9",
+      messageId: "msg-user-9",
+      text: "do things",
+    });
+    await waitForChatText(streamUrl, "epic-9", "chat-9", "blocks-ok", 80, 50);
+
+    const frames = await collectChatFrames(streamUrl, "epic-9", "chat-9");
+    const blocks = assistantBlocks(frames, "epic-9", "chat-9");
+    // Both calls survive, the Write included: hiding the edit call behind its
+    // file card is the GUI's job, and it needs both blocks to do it.
+    expect(blocks.map((block) => Reflect.get(block, "type")).sort()).toEqual([
+      "file_change",
+      "text",
+      "tool_call",
+      "tool_call",
+    ]);
+    // The raw input is dropped by the reducer on the way in - it is the file
+    // body for an edit, and this store is a JSON file - so the persisted call
+    // keeps the derived header instead.
+    const bash = blocks.find(
+      (block) => Reflect.get(block, "toolName") === "Bash",
+    );
+    expect(bash).toMatchObject({ status: "completed" });
+    expect(Reflect.get(bash ?? {}, "input")).toBeUndefined();
+    expect(Reflect.get(bash ?? {}, "inputSummary")).toContain("ls");
+    // Still paired the way the GUI folds them: the card carries the call's id.
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "file_change"),
+    ).toMatchObject({
+      blockId: `toolu_b2:${target}`,
+      filePath: target,
+      operation: "create",
+    });
+  });
+
+  /**
+   * A harness that dies mid-call, with no reply to show for it. The turn ends
+   * either way, and the status the reopened chat shows is now permanent - so
+   * a call that never returned must not read "completed" forever.
+   *
+   * No text on purpose: text is what makes this host file a non-zero exit as
+   * a normal reply, and a normal reply IS a clean end for everything still
+   * open. This one has nothing to file.
+   */
+  it("reopens a turn that died mid-call as interrupted, not completed", async () => {
+    const stdout = [
+      '{"type":"system","subtype":"init","session_id":"sess-dead"}',
+      '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_d1","name":"Bash","input":{"command":"sleep 1"}}]}}',
+    ];
+    const setup = await bootWithCli(
+      [
+        "#!/bin/sh",
+        ...stdout.map((line) => `printf '%s\n' '${line}'`),
+        "exit 3",
+        "",
+      ].join("\n"),
+    );
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-10", "chat-10");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-10",
+      chatId: "chat-10",
+      clientActionId: "action-10",
+      messageId: "msg-user-10",
+      text: "die halfway",
+    });
+    await waitForChatText(streamUrl, "epic-10", "chat-10", "exit 3", 80, 50);
+
+    const frames = await collectChatFrames(streamUrl, "epic-10", "chat-10");
+    const blocks = assistantBlocks(frames, "epic-10", "chat-10");
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "tool_call"),
+    ).toMatchObject({ toolName: "Bash", status: "interrupted" });
+    // And the reason it stopped is still there, which is the other half of
+    // reopening a failed turn: the error used to be a live-only block.
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "error"),
+    ).toMatchObject({ recoverable: false, status: "errored" });
+  });
 });
+
+/** The blocks of the last assistant message in a fresh subscribe's snapshot. */
+function assistantBlocks(
+  frames: readonly unknown[],
+  epicId: string,
+  chatId: string,
+): readonly object[] {
+  for (const frame of frames) {
+    if (
+      frame === null ||
+      typeof frame !== "object" ||
+      Reflect.get(frame, "kind") !== "snapshot" ||
+      Reflect.get(frame, "epicId") !== epicId ||
+      Reflect.get(frame, "chatId") !== chatId
+    ) {
+      continue;
+    }
+    const messages = Reflect.get(
+      Reflect.get(Reflect.get(frame, "snapshot") ?? {}, "tail") ?? {},
+      "messages",
+    );
+    if (!Array.isArray(messages)) {
+      continue;
+    }
+    const assistant = messages.filter(
+      (message: unknown) =>
+        typeof message === "object" &&
+        message !== null &&
+        Reflect.get(message, "role") === "assistant",
+    );
+    const last: unknown = assistant[assistant.length - 1];
+    const blocks = Reflect.get(last ?? {}, "blocks");
+    return Array.isArray(blocks)
+      ? blocks.filter(
+          (block: unknown): block is object =>
+            typeof block === "object" && block !== null,
+        )
+      : [];
+  }
+  return [];
+}
+
+/** One epic with one root chat, the shape every send test starts from. */
+async function seedChat(
+  started: StartedHost,
+  workspace: string,
+  epicId: string,
+  chatId: string,
+): Promise<void> {
+  await call(
+    started.rpcUrl,
+    "epic.create",
+    { major: 1, minor: 0 },
+    {
+      epic: {
+        id: epicId,
+        title: "Blocks",
+        initialUserPrompt: "",
+        ticketCount: 0,
+        specCount: 0,
+        storyCount: 0,
+        reviewCount: 0,
+        status: "active",
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        createdBy: "local",
+        version: "2.0.0",
+      },
+      repoIdentifiers: [],
+      workspaces: [{ workspacePath: workspace }],
+      chat: {
+        chatId,
+        parentId: null,
+        hostId: started.runtime.hostId,
+        title: "Root",
+        worktreeIntent: null,
+        initialMessage: null,
+      },
+    },
+  );
+}
 
 /**
  * Every frame a fresh subscribe produces, collected for a moment rather than

@@ -257,5 +257,6 @@ function turn(
     userId: role === "user" ? "local" : null,
     content: null,
     turnId: role === "assistant" ? `turn:${messageId}` : null,
+    blocks: null,
   };
 }
