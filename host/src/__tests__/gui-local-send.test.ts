@@ -2136,6 +2136,300 @@ describe("local GUI send without cloud login", () => {
     expect(markdown.startsWith("# Add README")).toBe(true);
     expect(markdown.length).toBeGreaterThan(4000);
   });
+
+  /**
+   * Same-turn steering, recorded live: a second user record on Claude's
+   * stdin before its `result` is taken at the next tool boundary and answered
+   * in the same `result`. The fake CLI blocks on that second record, so the
+   * reply can only carry the steer's words if the host actually wrote them.
+   */
+  it("steers a queued prompt into the running Claude turn", async () => {
+    const setup = await bootWithCli(steeringCli(), "claude");
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-24", "chat-24");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-24",
+      chatId: "chat-24",
+      clientActionId: "action-24",
+      messageId: "msg-user-24",
+      text: "start",
+      permissionMode: null,
+      harnessId: null,
+    });
+    const running = await waitForSnapshot(
+      streamUrl,
+      "epic-24",
+      "chat-24",
+      (snapshot) => Reflect.get(snapshot, "activeTurn") !== null,
+      80,
+      50,
+    );
+    expect(Reflect.get(running, "activeTurn")).toMatchObject({
+      sameTurnSteeringSupported: true,
+    });
+    const queueItemId = await queueFollowUp(
+      streamUrl,
+      "epic-24",
+      "chat-24",
+      "msg-user-24b",
+      "also mention pineapple",
+      "auto",
+    );
+    const steered = await sendActionUntil(
+      streamUrl,
+      {
+        kind: "queueSteerNow",
+        epicId: "epic-24",
+        chatId: "chat-24",
+        clientActionId: "steer-24",
+        queueItemId,
+        newSettings: null,
+      },
+      "eventAppended",
+    );
+    expect(steered).toContainEqual(
+      expect.objectContaining({
+        kind: "actionAck",
+        action: "queueSteerNow",
+        status: "accepted",
+      }),
+    );
+    const frames = await waitForSealedBlocks(
+      streamUrl,
+      "epic-24",
+      "chat-24",
+      "steer",
+      80,
+      50,
+    );
+    const blocks = assistantBlocks(frames, "epic-24", "chat-24");
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "steer"),
+    ).toMatchObject({
+      blockId: `steer:${queueItemId}`,
+      queueItemId,
+      messageId: "msg-user-24b",
+      mode: "safe_point",
+      content: promptDoc("also mention pineapple"),
+      sender: { type: "user", userId: "local" },
+    });
+    // The reply carries the steer's words - the CLI got the record.
+    expect(
+      blocks
+        .filter((block) => Reflect.get(block, "type") === "text")
+        .map((block) => Reflect.get(block, "text"))
+        .join(""),
+    ).toContain("steered:also mention pineapple");
+    const snapshot = Reflect.get(
+      frames.find((f) => Reflect.get(f ?? {}, "kind") === "snapshot") ?? {},
+      "snapshot",
+    );
+    expect(readArray(Reflect.get(snapshot, "queue") ?? {}, "items")).toEqual(
+      [],
+    );
+    expect(
+      readArray(Reflect.get(snapshot, "tail") ?? {}, "events").map((e) =>
+        Reflect.get(e ?? {}, "type"),
+      ),
+    ).toEqual(
+      expect.arrayContaining(["queue.steerRequested", "queue.steered"]),
+    );
+  });
+
+  /** Mod-Enter: the send itself asks for the running turn, no queue action. */
+  it("steers a send marked after_safe_point straight into the running turn", async () => {
+    const setup = await bootWithCli(steeringCli(), "claude");
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-25", "chat-25");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-25",
+      chatId: "chat-25",
+      clientActionId: "action-25",
+      messageId: "msg-user-25",
+      text: "start",
+      permissionMode: null,
+      harnessId: null,
+    });
+    await waitForSnapshot(
+      streamUrl,
+      "epic-25",
+      "chat-25",
+      (snapshot) => Reflect.get(snapshot, "activeTurn") !== null,
+      80,
+      50,
+    );
+    const queueItemId = await queueFollowUp(
+      streamUrl,
+      "epic-25",
+      "chat-25",
+      "msg-user-25b",
+      "and cherries",
+      "after_safe_point",
+    );
+    const frames = await waitForSealedBlocks(
+      streamUrl,
+      "epic-25",
+      "chat-25",
+      "steer",
+      80,
+      50,
+    );
+    const blocks = assistantBlocks(frames, "epic-25", "chat-25");
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "steer"),
+    ).toMatchObject({ queueItemId, messageId: "msg-user-25b" });
+    expect(JSON.stringify(blocks)).toContain("steered:and cherries");
+  });
+
+  /**
+   * Codex takes a steer over `turn/steer`, quoting the running turn's id.
+   * The fake app-server answers it, then speaks the steer's words.
+   */
+  it("steers a queued prompt into the running Codex turn over turn/steer", async () => {
+    const setup = await bootWithCli(steeringCodexAppServer(false), "codex");
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-26", "chat-26");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-26",
+      chatId: "chat-26",
+      clientActionId: "action-26",
+      messageId: "msg-user-26",
+      text: "start",
+      permissionMode: null,
+      harnessId: "codex",
+    });
+    await waitForSnapshot(
+      streamUrl,
+      "epic-26",
+      "chat-26",
+      (snapshot) => Reflect.get(snapshot, "activeTurn") !== null,
+      80,
+      50,
+    );
+    const queueItemId = await queueFollowUp(
+      streamUrl,
+      "epic-26",
+      "chat-26",
+      "msg-user-26b",
+      "use turn steer",
+      "auto",
+    );
+    await sendActionUntil(
+      streamUrl,
+      {
+        kind: "queueSteerNow",
+        epicId: "epic-26",
+        chatId: "chat-26",
+        clientActionId: "steer-26",
+        queueItemId,
+        newSettings: null,
+      },
+      "eventAppended",
+    );
+    const frames = await waitForSealedBlocks(
+      streamUrl,
+      "epic-26",
+      "chat-26",
+      "steer",
+      80,
+      50,
+    );
+    const blocks = assistantBlocks(frames, "epic-26", "chat-26");
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "steer"),
+    ).toMatchObject({ queueItemId, mode: "safe_point" });
+    expect(JSON.stringify(blocks)).toContain(
+      "steered:turn-fake-1:use turn steer",
+    );
+  });
+
+  /**
+   * A steer the app-server refuses is the follow-up's problem, not the
+   * turn's: the turn goes on, the item waits for the next one and says why.
+   */
+  it("falls back to the next turn when Codex refuses the steer", async () => {
+    const setup = await bootWithCli(steeringCodexAppServer(true), "codex");
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-27", "chat-27");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-27",
+      chatId: "chat-27",
+      clientActionId: "action-27",
+      messageId: "msg-user-27",
+      text: "start",
+      permissionMode: null,
+      harnessId: "codex",
+    });
+    await waitForSnapshot(
+      streamUrl,
+      "epic-27",
+      "chat-27",
+      (snapshot) => Reflect.get(snapshot, "activeTurn") !== null,
+      80,
+      50,
+    );
+    const queueItemId = await queueFollowUp(
+      streamUrl,
+      "epic-27",
+      "chat-27",
+      "msg-user-27b",
+      "refused",
+      "auto",
+    );
+    await sendActionUntil(
+      streamUrl,
+      {
+        kind: "queueSteerNow",
+        epicId: "epic-27",
+        chatId: "chat-27",
+        clientActionId: "steer-27",
+        queueItemId,
+        newSettings: null,
+      },
+      "eventAppended",
+    );
+    const fellBack = await waitForSnapshot(
+      streamUrl,
+      "epic-27",
+      "chat-27",
+      (snapshot) =>
+        readArray(Reflect.get(snapshot, "tail") ?? {}, "events").some(
+          (e) => Reflect.get(e ?? {}, "type") === "queue.fallback",
+        ),
+      80,
+      50,
+    );
+    expect(
+      readArray(Reflect.get(fellBack, "tail") ?? {}, "events").find(
+        (e) => Reflect.get(e ?? {}, "type") === "queue.fallback",
+      ),
+    ).toMatchObject({
+      queueItemId,
+      message: expect.stringContaining("no active turn to steer"),
+    });
+    // The first turn sealed without a steer block; the item ran after it.
+    const frames = await waitForSealedBlocks(
+      streamUrl,
+      "epic-27",
+      "chat-27",
+      "text",
+      80,
+      50,
+    );
+    const blocks = assistantBlocks(frames, "epic-27", "chat-27");
+    expect(blocks.some((block) => Reflect.get(block, "type") === "steer")).toBe(
+      false,
+    );
+    expect(JSON.stringify(blocks)).toContain("first");
+  });
 });
 
 /**
@@ -2238,6 +2532,100 @@ function fakeCodexAppServer(target: string): string {
  * A fake CLI asking the user a question over the stdio channel, and reading
  * the answer back the way the real one does: as `answers` on its own input.
  */
+/**
+ * Queue a second send while a turn runs and return its queue item id, read
+ * from the `queueChanged` that follows the ack.
+ */
+async function queueFollowUp(
+  url: string,
+  epicId: string,
+  chatId: string,
+  messageId: string,
+  text: string,
+  deliveryPolicy: "auto" | "after_safe_point",
+): Promise<string> {
+  const frames = await sendActionUntil(
+    url,
+    {
+      kind: "send",
+      epicId,
+      chatId,
+      clientActionId: `${messageId}-action`,
+      messageId,
+      content: promptDoc(text),
+      sender: { type: "user", userId: "local" },
+      settings: null,
+      accountContext: { type: "PERSONAL" },
+      deliveryPolicy,
+      worktreeIntent: null,
+    },
+    "queueChanged",
+  );
+  const changed = frames.find(
+    (f) => Reflect.get(f ?? {}, "kind") === "queueChanged",
+  );
+  const item = readArray(
+    Reflect.get(changed ?? {}, "queue") ?? {},
+    "items",
+  ).find((row) => Reflect.get(row ?? {}, "messageId") === messageId);
+  const queueItemId = Reflect.get(item ?? {}, "queueItemId");
+  if (typeof queueItemId !== "string") {
+    throw new Error(
+      `follow-up was not queued: ${JSON.stringify(frames).slice(0, 400)}`,
+    );
+  }
+  return queueItemId;
+}
+
+/**
+ * A fake Claude that blocks on a second stdin record mid-turn, the way the
+ * real one waits at a tool boundary, and answers with that record's text.
+ */
+function steeringCli(): string {
+  return [
+    "#!/bin/sh",
+    "read -r prompt",
+    `printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-steer"}'`,
+    `printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"first "}]}}'`,
+    "read -r steer",
+    `text=$(printf '%s' "$steer" | sed -e 's/.*"text":"\\([^"]*\\)".*/\\1/')`,
+    `printf '%s\n' "{\\"type\\":\\"assistant\\",\\"message\\":{\\"content\\":[{\\"type\\":\\"text\\",\\"text\\":\\"steered:$text\\"}]}}"`,
+    `printf '%s\n' '{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}'`,
+    "",
+  ].join("\n");
+}
+
+/**
+ * A fake Codex app-server that waits for a `turn/steer` mid-turn and either
+ * takes it (speaking its text and the turn id it quoted) or refuses it with
+ * the real server's error, then finishes the turn either way.
+ */
+function steeringCodexAppServer(refuse: boolean): string {
+  return [
+    "#!/bin/sh",
+    "read -r init",
+    `printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"userAgent":"fake"}}'`,
+    "read -r threadstart",
+    `printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"thread":{"id":"thread-fake-1"}}}'`,
+    "read -r turnstart",
+    `printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"turn":{"id":"turn-fake-1","status":"inProgress"}}}'`,
+    `printf '%s\n' '{"jsonrpc":"2.0","method":"item/agentMessage/delta","params":{"itemId":"msg-1","delta":"first "}}'`,
+    "read -r steer",
+    `text=$(printf '%s' "$steer" | sed -e 's/.*"text":"\\([^"]*\\)".*/\\1/')`,
+    `expected=$(printf '%s' "$steer" | sed -e 's/.*"expectedTurnId":"\\([^"]*\\)".*/\\1/')`,
+    refuse
+      ? `printf '%s\n' '{"id":4,"error":{"code":-32600,"message":"no active turn to steer"}}'`
+      : `printf '%s\n' '{"id":4,"result":{"turnId":"turn-fake-1"}}'`,
+    refuse
+      ? "true"
+      : `printf '%s\n' "{\\"method\\":\\"item/agentMessage/delta\\",\\"params\\":{\\"itemId\\":\\"msg-1\\",\\"delta\\":\\"steered:$expected:$text\\"}}"`,
+    `printf '%s\n' '{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg-1","text":"first"},"threadId":"thread-fake-1","turnId":"turn-fake-1"}}'`,
+    `printf '%s\n' '{"jsonrpc":"2.0","method":"turn/completed","params":{"threadId":"thread-fake-1","turn":{"id":"turn-fake-1","status":"completed","error":null}}}'`,
+    "read -r eof || true",
+    "",
+  ].join("\n");
+}
+
 function askingInterviewCli(): string {
   const input =
     '{"questions":[{"question":"Which color?","header":"Color","options":[{"label":"Red"},{"label":"Blue","description":"The color blue"}],"multiSelect":false}]}';

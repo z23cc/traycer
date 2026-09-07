@@ -78,7 +78,7 @@ export type StoredChatEvent = {
   readonly message: string | null;
   readonly turnId: string | null;
   readonly messageId: string | null;
-  readonly queueItemId: null;
+  readonly queueItemId: string | null;
   readonly approvalId: null;
   readonly blockId: null;
   readonly severity: "info" | "warning" | "error";
@@ -867,7 +867,7 @@ function normalizeChatEvents(value: unknown): StoredChatEvent[] {
       message: readNullableString(entry, "message"),
       turnId: readNullableString(entry, "turnId"),
       messageId: readNullableString(entry, "messageId"),
-      queueItemId: null,
+      queueItemId: readNullableString(entry, "queueItemId"),
       approvalId: null,
       blockId: null,
       severity:

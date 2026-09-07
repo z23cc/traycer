@@ -12,6 +12,15 @@ export type QueuedPrompt = {
   readonly model: string | null;
   readonly createdAt: number;
   updatedAt: number;
+  /**
+   * `steering` while the item is being handed to the running turn; `fallback`
+   * once a steer failed and the item waits for the next turn instead, with
+   * `fallbackReason` saying why.
+   */
+  status: "pending" | "steering" | "fallback";
+  fallbackReason: string | null;
+  /** The turn a steering item targets; null otherwise. */
+  targetTurnId: string | null;
 };
 
 export type ChatQueueSnapshot = {
@@ -31,11 +40,15 @@ type QueueWireItem = {
   readonly sender: { readonly type: "user"; readonly userId: string };
   readonly settings: unknown;
   readonly accountContext: unknown;
-  readonly delivery: "next_turn";
-  readonly status: "pending" | "paused";
-  readonly targetTurnId: null;
-  readonly steerRequest: null;
-  readonly fallbackReason: null;
+  readonly delivery: "same_turn" | "next_turn";
+  readonly status: "pending" | "steering" | "fallback" | "paused";
+  readonly targetTurnId: string | null;
+  readonly steerRequest: {
+    readonly mode: "safe_point";
+    readonly targetTurnId: string;
+    readonly requestedAt: number;
+  } | null;
+  readonly fallbackReason: string | null;
   readonly createdAt: number;
   readonly updatedAt: number;
 };
@@ -53,13 +66,27 @@ export class ChatQueue {
     };
   }
 
-  enqueue(chatId: string, input: Omit<QueuedPrompt, "queueItemId" | "createdAt" | "updatedAt">): QueuedPrompt {
+  enqueue(
+    chatId: string,
+    input: Omit<
+      QueuedPrompt,
+      | "queueItemId"
+      | "createdAt"
+      | "updatedAt"
+      | "status"
+      | "fallbackReason"
+      | "targetTurnId"
+    >,
+  ): QueuedPrompt {
     const now = Date.now();
     const row: QueuedPrompt = {
       ...input,
       queueItemId: randomUUID(),
       createdAt: now,
       updatedAt: now,
+      status: "pending",
+      fallbackReason: null,
+      targetTurnId: null,
     };
     const current = this.items.get(chatId);
     if (current === undefined) {
@@ -70,6 +97,7 @@ export class ChatQueue {
     return row;
   }
 
+  /** The next item to run as a turn of its own - never one mid-steer. */
   peek(chatId: string): QueuedPrompt | null {
     if (this.paused.has(chatId)) {
       return null;
@@ -78,7 +106,40 @@ export class ChatQueue {
     if (current === undefined || current.length === 0) {
       return null;
     }
-    return current[0] ?? null;
+    return current.find((row) => row.status !== "steering") ?? null;
+  }
+
+  find(chatId: string, queueItemId: string): QueuedPrompt | null {
+    return (
+      this.items.get(chatId)?.find((row) => row.queueItemId === queueItemId) ??
+      null
+    );
+  }
+
+  /** Whether any item of this chat is being steered right now. */
+  isSteering(chatId: string): boolean {
+    return (
+      this.items.get(chatId)?.some((row) => row.status === "steering") === true
+    );
+  }
+
+  /** Move an item between the steer states; false when it is gone. */
+  setStatus(
+    chatId: string,
+    queueItemId: string,
+    status: "pending" | "steering" | "fallback",
+    fallbackReason: string | null,
+    targetTurnId: string | null,
+  ): boolean {
+    const row = this.find(chatId, queueItemId);
+    if (row === null) {
+      return false;
+    }
+    row.status = status;
+    row.fallbackReason = fallbackReason;
+    row.targetTurnId = targetTurnId;
+    row.updatedAt = Date.now();
+    return true;
   }
 
   has(chatId: string, queueItemId: string): boolean {
@@ -121,7 +182,12 @@ export class ChatQueue {
     return true;
   }
 
-  edit(chatId: string, queueItemId: string, content: unknown, prompt: string): boolean {
+  edit(
+    chatId: string,
+    queueItemId: string,
+    content: unknown,
+    prompt: string,
+  ): boolean {
     const current = this.items.get(chatId);
     if (current === undefined) {
       return false;
@@ -164,7 +230,9 @@ export class ChatQueue {
       current.push(moved);
       return true;
     }
-    const before = current.findIndex((row) => row.queueItemId === beforeQueueItemId);
+    const before = current.findIndex(
+      (row) => row.queueItemId === beforeQueueItemId,
+    );
     if (before < 0) {
       current.push(moved);
       return true;
@@ -216,11 +284,18 @@ function toWireItem(row: QueuedPrompt, paused: boolean): QueueWireItem {
     sender: { type: "user", userId: row.userId },
     settings: row.settings,
     accountContext: row.accountContext,
-    delivery: "next_turn",
-    status: paused ? "paused" : "pending",
-    targetTurnId: null,
-    steerRequest: null,
-    fallbackReason: null,
+    delivery: row.status === "steering" ? "same_turn" : "next_turn",
+    status: paused ? "paused" : row.status,
+    targetTurnId: row.targetTurnId,
+    steerRequest:
+      row.status === "steering" && row.targetTurnId !== null
+        ? {
+            mode: "safe_point",
+            targetTurnId: row.targetTurnId,
+            requestedAt: row.updatedAt,
+          }
+        : null,
+    fallbackReason: row.fallbackReason,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };

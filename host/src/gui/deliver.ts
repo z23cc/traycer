@@ -15,6 +15,9 @@ const PRINT_TIMEOUT_MS = 600_000;
 const KILL_GRACE_MS = 2_000;
 const OUTPUT_FLUSH_MS = 250;
 
+const STEER_UNSUPPORTED =
+  "This turn does not take same-turn steering; queued for the next turn.";
+
 export type GuiPrintTurnState = {
   readonly harnessId: string;
   readonly model: string;
@@ -126,6 +129,11 @@ export class GuiRunRegistry {
   private readonly runs = new Map<string, ChildProcess>();
   /** How each run's permission answers are written: Claude's control frames or Codex's JSON-RPC results. */
   private readonly channels = new Map<string, "claude" | "codex">();
+  /** How a follow-up is handed to each running turn - see `steer`. */
+  private readonly steerers = new Map<
+    string,
+    (text: string) => Promise<string | null>
+  >();
   /** Open permission questions per chat, answered by the GUI or abandoned at turn end. */
   private readonly approvals = new Map<string, Map<string, PendingApproval>>();
   private readonly prints = new Map<string, GuiPrintTurnState>();
@@ -314,6 +322,27 @@ export class GuiRunRegistry {
     }
     this.runs.set(agentId, child);
     this.channels.set(agentId, channel);
+    this.steerers.delete(agentId);
+  }
+
+  setSteerer(
+    agentId: string,
+    steerer: (text: string) => Promise<string | null>,
+  ): void {
+    this.steerers.set(agentId, steerer);
+  }
+
+  /**
+   * Hand a follow-up to the running turn, to be taken at its next safe
+   * point. Null once delivered; otherwise why the turn could not take it -
+   * it has no channel for one, or its input already closed - and the item
+   * waits for the next turn instead.
+   */
+  steer(agentId: string, text: string): Promise<string | null> {
+    const steerer = this.steerers.get(agentId);
+    return steerer === undefined
+      ? Promise.resolve(STEER_UNSUPPORTED)
+      : steerer(text);
   }
 
   kill(agentId: string): void {
@@ -404,20 +433,35 @@ export async function runGuiPrintTurn(
         ? codexDriver(child, { ...input, onEvent: (event) => emit(event) })
         : null;
     codex?.start();
+    if (codex !== null) {
+      runtime.guiRuns.setSteerer(input.agentId, (text) => codex.steer(text));
+    }
     if (channel === "claude" && child.stdin !== null) {
       // The prompt, as the user record the stream-json input format takes.
       // Stdin stays open after it: the permission answers ride the same pipe,
       // and the run does not end until it closes - see the `result` handling
       // below.
-      child.stdin.write(
+      const stdin = child.stdin;
+      const userRecord = (text: string): string =>
         `${JSON.stringify({
           type: "user",
-          message: {
-            role: "user",
-            content: [{ type: "text", text: input.prompt }],
-          },
-        })}\n`,
-      );
+          message: { role: "user", content: [{ type: "text", text }] },
+        })}\n`;
+      stdin.write(userRecord(input.prompt));
+      // A second user record before the `result` is same-turn steering:
+      // recorded live, the CLI took it at the next tool boundary and answered
+      // both in one `result` (`num_turns: 2`). It is not echoed back, so
+      // delivery is the write itself; once stdin has ended there is no turn
+      // left to steer.
+      runtime.guiRuns.setSteerer(input.agentId, (text) => {
+        if (!stdin.writable) {
+          return Promise.resolve(
+            "Claude reached the end of the active turn before this follow-up could be steered.",
+          );
+        }
+        stdin.write(userRecord(text));
+        return Promise.resolve(null);
+      });
     }
     // Declared before `emit`, which arms it when the provider rejects the
     // credential.
@@ -670,29 +714,37 @@ function codexDriver(
   readonly start: () => void;
   readonly consumeResponse: (line: string) => boolean;
   readonly refuse: (requestId: string, method: string) => void;
+  /** `turn/steer` into the running turn; null once taken, else why not. */
+  readonly steer: (text: string) => Promise<string | null>;
 } {
   let nextId = 0;
-  const pending = new Map<number, "initialize" | "thread" | "turn">();
-  const write = (frame: unknown): void => {
+  type Pending =
+    | { readonly purpose: "initialize" | "thread" | "turn" }
+    | {
+        readonly purpose: "steer";
+        readonly settle: (refusal: string | null) => void;
+      };
+  const pending = new Map<number, Pending>();
+  let threadId: string | null = null;
+  let turnId: string | null = null;
+  const write = (frame: unknown): boolean => {
     if (child.stdin !== null && child.stdin.writable) {
       child.stdin.write(`${JSON.stringify(frame)}\n`);
+      return true;
     }
+    return false;
   };
-  const send = (
-    purpose: "initialize" | "thread" | "turn",
-    method: string,
-    params: unknown,
-  ): void => {
+  const send = (entry: Pending, method: string, params: unknown): boolean => {
     nextId += 1;
-    pending.set(nextId, purpose);
-    write({ jsonrpc: "2.0", id: nextId, method, params });
+    pending.set(nextId, entry);
+    return write({ jsonrpc: "2.0", id: nextId, method, params });
   };
   const model =
     input.model === null || input.model === "default" ? null : input.model;
   const policy = { approvalPolicy: "untrusted", approvalsReviewer: "user" };
   return {
     start: () => {
-      send("initialize", "initialize", {
+      send({ purpose: "initialize" }, "initialize", {
         protocolVersion: "2025-01-01",
         capabilities: { experimentalApi: true },
         clientInfo: { name: "traycer-oss-host", version: "0.1.0" },
@@ -715,27 +767,38 @@ function codexDriver(
       ) {
         return false;
       }
-      const purpose = pending.get(id);
-      if (purpose === undefined) {
+      const entry = pending.get(id);
+      if (entry === undefined) {
         return false;
       }
       pending.delete(id);
+      const purpose = entry.purpose;
       const error = Reflect.get(parsed, "error");
       if (error !== null && error !== undefined) {
+        const message =
+          typeof error === "object" && error !== null
+            ? (readStringOf(error, "message") ?? JSON.stringify(error))
+            : String(error);
+        if (entry.purpose === "steer") {
+          // A refused steer is the follow-up's problem, not the turn's: the
+          // turn goes on, and the item waits for the next one.
+          entry.settle(message);
+          return true;
+        }
         input.onEvent({
           kind: "transport_error",
-          message: `${purpose}: ${
-            typeof error === "object" && error !== null
-              ? (readStringOf(error, "message") ?? JSON.stringify(error))
-              : String(error)
-          }`,
+          message: `${purpose}: ${message}`,
         });
         return true;
       }
       const result = Reflect.get(parsed, "result");
+      if (entry.purpose === "steer") {
+        entry.settle(null);
+        return true;
+      }
       if (purpose === "initialize") {
         send(
-          "thread",
+          { purpose: "thread" },
           input.sessionId === null ? "thread/start" : "thread/resume",
           {
             ...(input.sessionId === null ? {} : { threadId: input.sessionId }),
@@ -751,7 +814,7 @@ function codexDriver(
           result !== null && typeof result === "object"
             ? Reflect.get(result, "thread")
             : null;
-        const threadId =
+        threadId =
           (thread !== null && typeof thread === "object"
             ? readStringOf(thread, "id")
             : null) ??
@@ -767,7 +830,7 @@ function codexDriver(
           return true;
         }
         input.onEvent({ kind: "session", sessionId: threadId });
-        send("turn", "turn/start", {
+        send({ purpose: "turn" }, "turn/start", {
           threadId,
           input: [{ type: "text", text: input.prompt, text_elements: [] }],
           cwd: input.cwd,
@@ -779,7 +842,34 @@ function codexDriver(
         });
         return true;
       }
+      // `turn/start` answers with the turn, whose id a steer must quote back.
+      const turn =
+        result !== null && typeof result === "object"
+          ? Reflect.get(result, "turn")
+          : null;
+      turnId =
+        turn !== null && typeof turn === "object"
+          ? readStringOf(turn, "id")
+          : null;
       return true;
+    },
+    steer: (text: string): Promise<string | null> => {
+      const ended = "The turn ended before this follow-up could be sent.";
+      if (threadId === null || turnId === null) {
+        return Promise.resolve(ended);
+      }
+      const activeThread = threadId;
+      const activeTurn = turnId;
+      return new Promise<string | null>((settle) => {
+        const sent = send({ purpose: "steer", settle }, "turn/steer", {
+          threadId: activeThread,
+          input: [{ type: "text", text, text_elements: [] }],
+          expectedTurnId: activeTurn,
+        });
+        if (!sent) {
+          settle(ended);
+        }
+      });
     },
     refuse: (requestId: string, method: string): void => {
       // An unanswered server request holds the turn open forever; an honest

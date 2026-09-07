@@ -19,6 +19,7 @@ import {
   failInterview,
   readUserId,
   resolveApproval,
+  steerQueuedPrompt,
 } from "../agent/gui-chat";
 import type { HostRuntime } from "../runtime";
 import {
@@ -93,6 +94,14 @@ export function handleChatClientFrame(
     handleChatQueueEdit(parsed, socket, runtime);
     return true;
   }
+  if (kind === "queueSteerNow") {
+    void handleChatQueueSteerNow(parsed, socket, runtime);
+    return true;
+  }
+  if (kind === "queueAbortSteer") {
+    handleChatQueueAbortSteer(parsed, socket, runtime);
+    return true;
+  }
   if (kind === "queueReorder") {
     handleChatQueueReorder(parsed, socket, runtime);
     return true;
@@ -133,7 +142,7 @@ async function handleChatSend(
     runtime.queue.pendingCount(ids.chatId) > 0 ||
     runtime.queue.isPaused(ids.chatId);
   if (busy) {
-    runtime.queue.enqueue(ids.chatId, {
+    const item = runtime.queue.enqueue(ids.chatId, {
       messageId,
       prompt,
       content: content ?? null,
@@ -148,6 +157,16 @@ async function handleChatSend(
     ack(socket, ids, "send", "accepted", null, null);
     broadcastQueueChanged(runtime, ids.epicId, ids.chatId);
     sendChatSnapshot(socket, runtime, ids.epicId, ids.chatId);
+    // Mod-Enter: the sender wants this in the running turn, not after it.
+    // With no turn running, or one already being steered, it runs next like
+    // any other queued item - the released host's "downgrade".
+    if (
+      Reflect.get(parsed, "deliveryPolicy") === "after_safe_point" &&
+      runtime.guiRuns.printState(ids.chatId) !== null &&
+      !runtime.queue.isSteering(ids.chatId)
+    ) {
+      await steerQueuedPrompt(runtime, ids.epicId, ids.chatId, item);
+    }
     return;
   }
   const turn = await persistGuiUserTurn(runtime, {
@@ -757,6 +776,101 @@ function handleChatQueueEdit(
     broadcastQueueChanged(runtime, ids.epicId, ids.chatId);
     sendChatSnapshot(socket, runtime, ids.epicId, ids.chatId);
   }
+}
+
+/**
+ * "Steer now" on a queued item. The checks and their words are the released
+ * host's; what follows an accepted ack is `steerQueuedPrompt`. `newSettings`
+ * is read and ignored: a steer here always folds into the running turn, and
+ * the settings that would need a restart (model, effort, tier) are baked into
+ * the turn that already runs.
+ */
+async function handleChatQueueSteerNow(
+  parsed: object,
+  socket: WebSocket,
+  runtime: HostRuntime,
+): Promise<void> {
+  const ids = readActionIds(parsed);
+  const queueItemId = readStringField(parsed, "queueItemId");
+  if (ids === null || queueItemId === null) {
+    return;
+  }
+  const reject = (reason: string, code: string): void => {
+    ack(socket, ids, "queueSteerNow", "rejected", reason, code);
+  };
+  if (runtime.guiRuns.printState(ids.chatId) === null) {
+    reject("There is no active turn to steer.", "NO_ACTIVE_TURN");
+    return;
+  }
+  const item = runtime.queue.find(ids.chatId, queueItemId);
+  if (item === null) {
+    reject("Queue item not found", "QUEUE_ITEM_NOT_FOUND");
+    return;
+  }
+  if (item.status === "steering") {
+    reject(
+      "The queued prompt is already being submitted.",
+      "QUEUE_ITEM_STEERING",
+    );
+    return;
+  }
+  if (runtime.queue.isSteering(ids.chatId)) {
+    reject(
+      "A queued prompt is already being steered.",
+      "QUEUE_STEER_IN_FLIGHT",
+    );
+    return;
+  }
+  if (runtime.queue.isPaused(ids.chatId)) {
+    reject(
+      "Resume the queue before steering this queued prompt.",
+      "QUEUE_ITEM_PAUSED",
+    );
+    return;
+  }
+  ack(socket, ids, "queueSteerNow", "accepted", null, null);
+  await steerQueuedPrompt(runtime, ids.epicId, ids.chatId, item);
+}
+
+/**
+ * A steer can only be called off while it is still waiting to be handed
+ * over, and this host hands one over as soon as it is asked for - so there
+ * is never one to abort, and the answer is the released host's for that case.
+ */
+function handleChatQueueAbortSteer(
+  parsed: object,
+  socket: WebSocket,
+  runtime: HostRuntime,
+): void {
+  const ids = readActionIds(parsed);
+  const queueItemId = readStringField(parsed, "queueItemId");
+  if (ids === null || queueItemId === null) {
+    return;
+  }
+  const item = runtime.queue.find(ids.chatId, queueItemId);
+  if (item === null) {
+    ack(
+      socket,
+      ids,
+      "queueAbortSteer",
+      "rejected",
+      "Queue item not found",
+      "QUEUE_ITEM_NOT_FOUND",
+    );
+    return;
+  }
+  ack(
+    socket,
+    ids,
+    "queueAbortSteer",
+    "rejected",
+    item.status === "steering"
+      ? "The queued prompt is already being submitted."
+      : "The queued prompt is not waiting to steer.",
+    item.status === "steering"
+      ? "QUEUE_ITEM_STEERING"
+      : "QUEUE_ITEM_NOT_STEERING",
+  );
 }
 
 function handleChatQueueReorder(

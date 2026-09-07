@@ -223,7 +223,7 @@ export function broadcastTurnStateChanged(
     epicId,
     chatId,
     runStatus: print === null ? "idle" : "running",
-    activeTurn: activeTurnFrame(print, chatId),
+    activeTurn: activeTurnFrame(runtime, print, chatId),
     backgroundItems: [],
     turnInProgress: print !== null,
   };
@@ -275,6 +275,24 @@ export function broadcastEventAppended(
     readonly severity: "info" | "warning" | "error";
   },
 ): void {
+  broadcastQueueEvent(runtime, epicId, chatId, { ...event, queueItemId: null });
+}
+
+/** `broadcastEventAppended` for the events that are about one queue item. */
+export function broadcastQueueEvent(
+  runtime: HostRuntime,
+  epicId: string,
+  chatId: string,
+  event: {
+    readonly type: string;
+    readonly message: string | null;
+    readonly turnId: string | null;
+    readonly messageId: string | null;
+    readonly queueItemId: string | null;
+    readonly clientActionId: string | null;
+    readonly severity: "info" | "warning" | "error";
+  },
+): void {
   const stored: StoredChatEvent = {
     eventId: randomUUID(),
     type: event.type,
@@ -284,7 +302,7 @@ export function broadcastEventAppended(
     message: event.message,
     turnId: event.turnId,
     messageId: event.messageId,
-    queueItemId: null,
+    queueItemId: event.queueItemId,
     approvalId: null,
     blockId: null,
     severity: event.severity,
@@ -403,7 +421,7 @@ export function chatWindowedTranscript(
         },
         queue: runtime.queue.snapshot(chatId),
         runStatus: print === null ? "idle" : "running",
-        activeTurn: activeTurnFrame(print, chatId),
+        activeTurn: activeTurnFrame(runtime, print, chatId),
         pendingApprovals: runtime.guiRuns
           .approvalsOf(chatId)
           .filter((pending) => pending.kind === "tool")
@@ -665,7 +683,11 @@ function plainTextFromUnknown(value: unknown): string {
   return "";
 }
 
-function activeTurnFrame(print: GuiPrintTurnState | null, chatId: string) {
+function activeTurnFrame(
+  runtime: HostRuntime,
+  print: GuiPrintTurnState | null,
+  chatId: string,
+) {
   if (print === null) {
     return null;
   }
@@ -673,20 +695,38 @@ function activeTurnFrame(print: GuiPrintTurnState | null, chatId: string) {
   if (!harness.success) {
     return null;
   }
+  // The GUI compares its toolbar against these to decide whether a steer can
+  // fold into this turn silently or must restart it - so they must be what
+  // the turn actually runs under, which is the chat's settings at its start.
+  const settings =
+    runtime.store.snapshot().chats.find((row) => row.chatId === chatId)
+      ?.runSettings ?? null;
   return {
     turnId: print.turnId,
     status: "running" as const,
     harnessId: harness.data,
     model: print.model.length > 0 ? print.model : "default",
-    reasoningEffort: null,
-    serviceTier: null,
+    reasoningEffort: readSettingString(settings, "reasoningEffort"),
+    serviceTier: readSettingString(settings, "serviceTier"),
     agentMode: "regular" as const,
-    profileId: null,
+    profileId: readSettingString(settings, "profileId"),
     userMessageId: print.userMessageId,
     startedAt: print.startedAt,
     updatedAt: Date.now(),
-    sameTurnSteeringSupported: false,
+    // Recorded live against both CLIs: a user record on Claude's stdin and
+    // Codex's `turn/steer` are each taken at the running turn's next safe
+    // point. Every other harness queues for the next turn.
+    sameTurnSteeringSupported:
+      print.harnessId === "claude" || print.harnessId === "codex",
   };
+}
+
+function readSettingString(settings: unknown, key: string): string | null {
+  if (settings === null || typeof settings !== "object") {
+    return null;
+  }
+  const value = Reflect.get(settings, key);
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 export function chatOwnerUserId(chat: StoredChat): string {

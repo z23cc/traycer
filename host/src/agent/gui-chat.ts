@@ -3,9 +3,11 @@ import { existsSync } from "node:fs";
 import {
   AUTH_ERROR_CODE,
   ENV_CREDENTIAL_AUTH_ERROR_CODE,
+  steerSubmittedEventSchema,
 } from "@traycer/protocol/host/agent/gui/agent-runtime";
 import type {
   RuntimeEvent,
+  SteerSubmittedEvent,
   UserMessageAnchorResolvedEvent,
 } from "@traycer/protocol/host/agent/gui/agent-runtime";
 import { nestChildRuntimeEvent } from "@traycer/protocol/host/agent/gui/subagent-nesting";
@@ -55,6 +57,7 @@ import {
   broadcastChatSnapshot,
   broadcastEventAppended,
   broadcastQueueChanged,
+  broadcastQueueEvent,
   broadcastTurnStateChanged,
 } from "../stream/chat";
 
@@ -261,6 +264,109 @@ export function beginGuiPrintTurn(
     },
   );
   runtime.guiRuns.track(work);
+}
+
+/**
+ * Hand a queued prompt to the running turn instead of waiting for it to end.
+ *
+ * The turn takes it at its next safe point, in its own way (see
+ * `GuiRunRegistry.steer`); this host's part is to say so - the item leaves
+ * the queue, the transcript gets a `steer` block where the follow-up landed,
+ * and the events say it was steered. When the turn cannot take it, the item
+ * stays and runs next, and `fallbackReason` says why. Resolves to whether it
+ * was steered.
+ */
+export async function steerQueuedPrompt(
+  runtime: HostRuntime,
+  epicId: string,
+  chatId: string,
+  item: QueuedPrompt,
+): Promise<boolean> {
+  const print = runtime.guiRuns.printState(chatId);
+  if (print === null) {
+    return false;
+  }
+  runtime.queue.setStatus(
+    chatId,
+    item.queueItemId,
+    "steering",
+    null,
+    print.turnId,
+  );
+  broadcastQueueEvent(runtime, epicId, chatId, {
+    type: "queue.steerRequested",
+    message: "Queued prompt will steer into the active turn.",
+    turnId: print.turnId,
+    messageId: item.messageId,
+    queueItemId: item.queueItemId,
+    clientActionId: null,
+    severity: "info",
+  });
+  broadcastQueueChanged(runtime, epicId, chatId);
+  const refusal = await runtime.guiRuns.steer(chatId, item.prompt);
+  // Gone meanwhile - cancelled, or the chat's history was cut - is nobody's
+  // to report on.
+  if (!runtime.queue.has(chatId, item.queueItemId)) {
+    return false;
+  }
+  const reason =
+    refusal ??
+    (runtime.guiRuns.printState(chatId)?.turnId === print.turnId
+      ? null
+      : "The turn ended before this follow-up could be steered.");
+  if (reason !== null) {
+    runtime.queue.setStatus(chatId, item.queueItemId, "fallback", reason, null);
+    broadcastQueueEvent(runtime, epicId, chatId, {
+      type: "queue.fallback",
+      message: reason,
+      turnId: print.turnId,
+      messageId: item.messageId,
+      queueItemId: item.queueItemId,
+      clientActionId: null,
+      severity: "info",
+    });
+    broadcastQueueChanged(runtime, epicId, chatId);
+    drainGuiQueue(runtime, epicId, chatId);
+    return false;
+  }
+  runtime.queue.cancel(chatId, item.queueItemId);
+  broadcastQueueEvent(runtime, epicId, chatId, {
+    type: "queue.steered",
+    message: "Queued follow-up steered into the active turn.",
+    turnId: print.turnId,
+    messageId: item.messageId,
+    queueItemId: item.queueItemId,
+    clientActionId: null,
+    severity: "info",
+  });
+  broadcastBlockDelta(runtime, epicId, chatId, {
+    type: "steer.submitted",
+    blockId: `steer:${item.queueItemId}`,
+    timestamp: Date.now(),
+    queueItemId: item.queueItemId,
+    messageId: item.messageId,
+    content: steeredContent(item),
+    mode: "safe_point",
+    sender: { type: "user", userId: item.userId },
+  });
+  broadcastQueueChanged(runtime, epicId, chatId);
+  return true;
+}
+
+/** The steered message as the GUI's document, from what was queued or from its text. */
+function steeredContent(item: QueuedPrompt): SteerSubmittedEvent["content"] {
+  const parsed = steerSubmittedEventSchema.shape.content.safeParse(
+    item.content,
+  );
+  if (parsed.success) {
+    return parsed.data;
+  }
+  return {
+    type: "doc",
+    content: [
+      { type: "paragraph", content: [{ type: "text", text: item.prompt }] },
+    ],
+  };
 }
 
 export function drainGuiQueue(
