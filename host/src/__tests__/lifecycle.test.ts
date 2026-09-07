@@ -255,4 +255,114 @@ describe("host lifecycle", () => {
     });
     expect(shutdowns).toEqual(["restart", "shutdown"]);
   });
+
+  it("starts no new work while a shutdown claim is held", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "traycer-lifecycle-"));
+    started = await startHost({
+      argv: ["--host-data-dir", tempDir],
+      listenHost: "127.0.0.1",
+      listenPort: 0,
+    });
+    started.runtime.requestShutdown = () => undefined;
+    const claim = started.runtime.shutdown.claimFor(
+      "tr-hold",
+      60_000,
+      "shutdown",
+      Date.now(),
+    );
+    expect(claim).not.toBeNull();
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    const socket = new WebSocket(streamUrl);
+    await new Promise<void>((resolve, reject) => {
+      socket.once("open", () => resolve());
+      socket.once("error", reject);
+    });
+    const frames: unknown[] = [];
+    const done = new Promise<void>((resolve) => {
+      socket.on("message", (data) => {
+        const frame: unknown = JSON.parse(String(data));
+        frames.push(frame);
+        const kind = Reflect.get(frame ?? {}, "kind");
+        if (frames.length === 1) {
+          socket.send(
+            JSON.stringify({
+              kind: "subscribe",
+              method: "chat.subscribe",
+              schemaVersion: { major: 1, minor: 8 },
+              params: { epicId: "epic-hold", chatId: "chat-hold" },
+            }),
+          );
+          return;
+        }
+        if (kind === "snapshot" && frames.length === 2) {
+          socket.send(
+            JSON.stringify({
+              kind: "send",
+              hasBinaryPayload: false,
+              epicId: "epic-hold",
+              chatId: "chat-hold",
+              clientActionId: "send-hold",
+              messageId: "msg-hold",
+              content: {
+                type: "doc",
+                content: [
+                  {
+                    type: "paragraph",
+                    content: [{ type: "text", text: "hello" }],
+                  },
+                ],
+              },
+              sender: { type: "user", userId: "local" },
+              settings: null,
+              accountContext: { type: "PERSONAL" },
+              deliveryPolicy: "auto",
+              worktreeIntent: null,
+            }),
+          );
+          return;
+        }
+        if (kind === "errorNotice") {
+          socket.close();
+        }
+      });
+      socket.once("close", () => resolve());
+    });
+    socket.send(
+      JSON.stringify({
+        kind: "open",
+        token: "test-token",
+        manifest: {},
+        clientIdentity: {
+          kind: "cli",
+          compatibilityEpoch: CURRENT_CLIENT_COMPATIBILITY_EPOCH,
+          appVersion: "0.1.0",
+        },
+      }),
+    );
+    await done;
+    expect(frames).toContainEqual(
+      expect.objectContaining({
+        kind: "actionAck",
+        action: "send",
+        status: "rejected",
+        code: "HOST_SHUTDOWN_CLAIMED",
+      }),
+    );
+    expect(frames).toContainEqual(
+      expect.objectContaining({
+        kind: "eventAppended",
+        event: expect.objectContaining({
+          type: "send.failed",
+          messageId: "msg-hold",
+          severity: "warning",
+        }),
+      }),
+    );
+    expect(frames).toContainEqual(
+      expect.objectContaining({
+        kind: "errorNotice",
+        notice: expect.objectContaining({ code: "HOST_SHUTDOWN_CLAIMED" }),
+      }),
+    );
+  });
 });

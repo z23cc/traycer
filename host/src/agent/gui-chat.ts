@@ -2702,6 +2702,17 @@ async function startQueuedPrompt(
     drainGuiQueue(runtime, epicId, chatId);
     return;
   }
+  runtime.queue.cancel(chatId, item.queueItemId);
+  broadcastChatEvent(runtime, epicId, chatId, {
+    type: "queue.started",
+    message: "Queued prompt started.",
+    turnId: null,
+    messageId: null,
+    queueItemId: item.queueItemId,
+    clientActionId: null,
+    severity: "info",
+    metadata: null,
+  });
   beginGuiPrintTurn(runtime, {
     epicId,
     chatId,
@@ -2711,7 +2722,6 @@ async function startQueuedPrompt(
     model: item.model,
     autonomous: false,
   });
-  runtime.queue.cancel(chatId, item.queueItemId);
   broadcastQueueChanged(runtime, epicId, chatId);
 }
 

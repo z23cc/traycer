@@ -159,6 +159,30 @@ async function handleChatSend(
       runtime.store.snapshot().chats.find((row) => row.chatId === ids.chatId)
         ?.runSettings,
     );
+  // A host under a shutdown claim starts no new work, as released: the
+  // send is refused with the claim's code, and the refusal is on the
+  // timeline as `send.failed`.
+  if (runtime.shutdown.current(Date.now()) !== null) {
+    const reason = "The host is shutting down and cannot start new work.";
+    ack(socket, ids, "send", "rejected", reason, "HOST_SHUTDOWN_CLAIMED");
+    broadcastChatEvent(runtime, ids.epicId, ids.chatId, {
+      type: "send.failed",
+      message: reason,
+      turnId: runtime.guiRuns.printState(ids.chatId)?.turnId ?? null,
+      messageId,
+      queueItemId: null,
+      clientActionId: ids.clientActionId,
+      severity: "warning",
+      metadata: null,
+    });
+    broadcastErrorNotice(runtime, ids.epicId, ids.chatId, {
+      code: "HOST_SHUTDOWN_CLAIMED",
+      message: reason,
+      severity: "warning",
+      clientActionId: ids.clientActionId,
+    });
+    return;
+  }
   const busy =
     runtime.guiRuns.printState(ids.chatId) !== null ||
     runtime.queue.pendingCount(ids.chatId) > 0 ||
@@ -177,6 +201,16 @@ async function handleChatSend(
       model,
     });
     ack(socket, ids, "send", "accepted", null, null);
+    broadcastChatEvent(runtime, ids.epicId, ids.chatId, {
+      type: "queue.added",
+      message: "Queued message accepted.",
+      turnId: runtime.guiRuns.printState(ids.chatId)?.turnId ?? null,
+      messageId,
+      queueItemId: item.queueItemId,
+      clientActionId: ids.clientActionId,
+      severity: "info",
+      metadata: { item: queueWireItem(runtime, ids.chatId, item.queueItemId) },
+    });
     broadcastQueueChanged(runtime, ids.epicId, ids.chatId);
     sendChatSnapshot(socket, runtime, ids.epicId, ids.chatId);
     // Mod-Enter: the sender wants this in the running turn, not after it.
@@ -854,6 +888,43 @@ async function handleChatEditUser(
   });
 }
 
+/** One queued item as the wire shows it, for an event's `{item}` metadata. */
+function queueWireItem(
+  runtime: HostRuntime,
+  chatId: string,
+  queueItemId: string,
+): unknown {
+  return (
+    runtime.queue
+      .snapshot(chatId)
+      .items.find((item) => item.queueItemId === queueItemId) ?? null
+  );
+}
+
+/**
+ * An accepted queue mutation's timeline entry, the released host's: the
+ * event names the action's item, and its metadata carries the whole queue
+ * as it now stands (`{items}`), so a replay can rebuild it.
+ */
+function recordQueueMutation(
+  runtime: HostRuntime,
+  ids: ActionIds,
+  type: string,
+  message: string,
+  queueItemId: string | null,
+): void {
+  broadcastChatEvent(runtime, ids.epicId, ids.chatId, {
+    type,
+    message,
+    turnId: runtime.guiRuns.printState(ids.chatId)?.turnId ?? null,
+    messageId: null,
+    queueItemId,
+    clientActionId: ids.clientActionId,
+    severity: "info",
+    metadata: { items: [...runtime.queue.snapshot(ids.chatId).items] },
+  });
+}
+
 function handleChatPauseQueue(
   parsed: object,
   socket: WebSocket,
@@ -873,6 +944,7 @@ function handleChatPauseQueue(
     paused ? null : "QUEUE_NOT_ACTIVE",
   );
   if (paused) {
+    recordQueueMutation(runtime, ids, "queue.paused", "Queue paused.", null);
     broadcastQueueChanged(runtime, ids.epicId, ids.chatId);
     sendChatSnapshot(socket, runtime, ids.epicId, ids.chatId);
   }
@@ -897,6 +969,7 @@ function handleChatResumeQueue(
     resumed ? null : "QUEUE_NOT_PAUSED",
   );
   if (resumed) {
+    recordQueueMutation(runtime, ids, "queue.resumed", "Queue resumed.", null);
     drainGuiQueue(runtime, ids.epicId, ids.chatId);
   }
 }
@@ -921,6 +994,13 @@ function handleChatQueueCancel(
     cancelled ? null : "QUEUE_ITEM_NOT_FOUND",
   );
   if (cancelled) {
+    recordQueueMutation(
+      runtime,
+      ids,
+      "queue.cancelled",
+      "Queue updated.",
+      queueItemId,
+    );
     broadcastQueueChanged(runtime, ids.epicId, ids.chatId);
     sendChatSnapshot(socket, runtime, ids.epicId, ids.chatId);
   }
@@ -952,6 +1032,13 @@ function handleChatQueueEdit(
     edited ? null : "QUEUE_ITEM_NOT_FOUND",
   );
   if (edited) {
+    recordQueueMutation(
+      runtime,
+      ids,
+      "queue.edited",
+      "Queue updated.",
+      queueItemId,
+    );
     broadcastQueueChanged(runtime, ids.epicId, ids.chatId);
     sendChatSnapshot(socket, runtime, ids.epicId, ids.chatId);
   }
@@ -1159,6 +1246,13 @@ function handleChatQueueReorder(
     reordered ? null : "QUEUE_ITEM_NOT_FOUND",
   );
   if (reordered) {
+    recordQueueMutation(
+      runtime,
+      ids,
+      "queue.reordered",
+      "Queue updated.",
+      queueItemId,
+    );
     broadcastQueueChanged(runtime, ids.epicId, ids.chatId);
     sendChatSnapshot(socket, runtime, ids.epicId, ids.chatId);
   }

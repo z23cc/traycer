@@ -540,6 +540,32 @@ describe("local GUI send without cloud login", () => {
     expect(blob).toContain("first-turn");
     expect(blob).toContain("queued-followup");
     expect(blob).toContain("slow-ok");
+    // The queue's life is on the timeline, as released: the item accepted
+    // with itself as metadata, then started.
+    const events = readArray(
+      Reflect.get(
+        Reflect.get(snapshot ?? {}, "snapshot") ?? snapshot ?? {},
+        "tail",
+      ) ?? {},
+      "events",
+    );
+    const added = events.find(
+      (e) => Reflect.get(e ?? {}, "type") === "queue.added",
+    );
+    expect(added).toMatchObject({
+      message: "Queued message accepted.",
+      queueItemId: expect.any(String),
+      metadata: {
+        item: { queueItemId: Reflect.get(added ?? {}, "queueItemId") },
+      },
+    });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "queue.started",
+        message: "Queued prompt started.",
+        queueItemId: Reflect.get(added ?? {}, "queueItemId"),
+      }),
+    );
   });
   /**
    * A failing tool call, in the record shapes a real `claude -p
