@@ -745,6 +745,20 @@ function codexServerRequest(
       },
     ];
   }
+  if (method === "item/tool/requestUserInput") {
+    // Codex's question to the user. The tool name is the released host's,
+    // and it is what routes this to an interview rather than an approval.
+    return [
+      {
+        kind: "permission_request",
+        requestId,
+        toolUseId: itemId ?? requestId,
+        toolName: "request_user_input",
+        description: "Codex needs your input",
+        input: params,
+      },
+    ];
+  }
   return [{ kind: "rpc_unsupported", requestId, method }];
 }
 

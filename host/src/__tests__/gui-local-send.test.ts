@@ -1967,7 +1967,121 @@ describe("local GUI send without cloud login", () => {
     ).toMatchObject({ diffSource: "snapshot", operation: "create" });
     await rm(target, { force: true });
   });
+
+  /**
+   * Codex asking the user a question. The fake sends the schema's
+   * `item/tool/requestUserInput` and reads the answer back the way the real
+   * server does - keyed by question id - which is the released host's
+   * mapping, not the text-keyed one Claude takes.
+   */
+  it("opens an interview for Codex's request_user_input and answers by id", async () => {
+    const setup = await bootWithCli(askingCodexAppServer(), "codex");
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-22", "chat-22");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-22",
+      chatId: "chat-22",
+      clientActionId: "action-22",
+      messageId: "msg-user-22",
+      text: "ask me",
+      permissionMode: "full_access",
+      harnessId: "codex",
+    });
+    const asked = await waitForSnapshot(
+      streamUrl,
+      "epic-22",
+      "chat-22",
+      (snapshot) => readArray(snapshot, "pendingInterviews").length === 1,
+      80,
+      50,
+    );
+    const blockId = String(
+      Reflect.get(readArray(asked, "pendingInterviews")[0] ?? {}, "blockId"),
+    );
+    expect(blockId).toBe("q-item-1:interview");
+    const answered = await sendActionUntil(
+      streamUrl,
+      {
+        kind: "interviewAnswer",
+        epicId: "epic-22",
+        chatId: "chat-22",
+        clientActionId: "answer-22",
+        blockId,
+        answers: [
+          {
+            questionId: "q1",
+            question: "Which color?",
+            values: ["Blue"],
+            notes: null,
+          },
+        ],
+      },
+      "interviewAnswered",
+    );
+    expect(answered).toContainEqual(
+      expect.objectContaining({ kind: "actionAck", status: "accepted" }),
+    );
+    const frames = await waitForSealedBlocks(
+      streamUrl,
+      "epic-22",
+      "chat-22",
+      "interview",
+      80,
+      50,
+    );
+    const blocks = assistantBlocks(frames, "epic-22", "chat-22");
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "interview"),
+    ).toMatchObject({
+      blockId,
+      toolName: "request_user_input",
+      title: "Codex needs your input",
+      status: "completed",
+      questions: [
+        expect.objectContaining({
+          questionId: "q1",
+          question: "Which color?",
+          header: "Color",
+        }),
+      ],
+      answers: [expect.objectContaining({ values: ["Blue"] })],
+    });
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "text"),
+    ).toMatchObject({ text: "you chose Blue" });
+  });
 });
+
+/**
+ * A fake Codex app-server that asks the user one question over
+ * `item/tool/requestUserInput` and reads the answer by question id.
+ */
+function askingCodexAppServer(): string {
+  return [
+    "#!/bin/sh",
+    "read -r init",
+    `printf '%s\n' '{"id":1,"result":{"userAgent":"fake"}}'`,
+    "read -r threadstart",
+    `printf '%s\n' '{"id":2,"result":{"thread":{"id":"thread-fake-2"}}}'`,
+    "read -r turnstart",
+    `printf '%s\n' '{"id":3,"result":{"turn":{"id":"turn-fake-2","status":"inProgress"}}}'`,
+    `printf '%s\n' '{"id":9,"method":"item/tool/requestUserInput","params":{"threadId":"thread-fake-2","turnId":"turn-fake-2","itemId":"q-item-1","isBlocking":true,"questions":[{"id":"q1","header":"Color","question":"Which color?","options":[{"label":"Red","description":"r"},{"label":"Blue","description":"b"}]}]}}'`,
+    "read -r answer",
+    'case "$answer" in',
+    '  *\'"q1":{"answers":["Blue"]}\'*)',
+    `    printf '%s\n' '{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg-2","text":"you chose Blue"},"threadId":"thread-fake-2","turnId":"turn-fake-2"}}'`,
+    "    ;;",
+    "  *)",
+    `    printf '%s\n' '{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg-2","text":"no-answer"},"threadId":"thread-fake-2","turnId":"turn-fake-2"}}'`,
+    "    ;;",
+    "esac",
+    `printf '%s\n' '{"method":"turn/completed","params":{"threadId":"thread-fake-2","turn":{"id":"turn-fake-2","status":"completed","error":null}}}'`,
+    "read -r eof || true",
+    "",
+  ].join("\n");
+}
 
 /**
  * A fake Codex app-server: answers the three requests this host sends, then

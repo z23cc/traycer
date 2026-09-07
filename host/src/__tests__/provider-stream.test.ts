@@ -476,15 +476,29 @@ describe("parseProviderStdoutLine", () => {
         description: "rm -rf build",
       }),
     ]);
+    // Codex's question to the user, by the schema: questions keyed by id.
     expect(
       parseProviderStdoutLine(
-        '{"jsonrpc":"2.0","id":4,"method":"item/tool/requestUserInput","params":{"itemId":"x","questions":[]}}',
+        '{"id":4,"method":"item/tool/requestUserInput","params":{"threadId":"t","turnId":"u","itemId":"q-item","isBlocking":true,"questions":[{"id":"q1","header":"Color","question":"Which color?","options":[{"label":"Red","description":"r"}]}]}}',
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        kind: "permission_request",
+        requestId: "4",
+        toolUseId: "q-item",
+        toolName: "request_user_input",
+        description: "Codex needs your input",
+      }),
+    ]);
+    expect(
+      parseProviderStdoutLine(
+        '{"id":5,"method":"thread/realtime/negotiate","params":{"threadId":"t"}}',
       ),
     ).toEqual([
       {
         kind: "rpc_unsupported",
-        requestId: "4",
-        method: "item/tool/requestUserInput",
+        requestId: "5",
+        method: "thread/realtime/negotiate",
       },
     ]);
     expect(

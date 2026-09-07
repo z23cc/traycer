@@ -1180,7 +1180,11 @@ async function decidePermission(
 ): Promise<void> {
   const answer = (
     response:
-      | { readonly behavior: "allow"; readonly updatedInput: unknown }
+      | {
+          readonly behavior: "allow";
+          readonly updatedInput: unknown;
+          readonly interviewAnswers: null;
+        }
       | { readonly behavior: "deny"; readonly message: string },
   ): void => {
     runtime.guiRuns.answerPermission(
@@ -1213,7 +1217,11 @@ async function decidePermission(
     return;
   }
   if (permissionMode === "full_access") {
-    answer({ behavior: "allow", updatedInput: request.input });
+    answer({
+      behavior: "allow",
+      updatedInput: request.input,
+      interviewAnswers: null,
+    });
     return;
   }
   const paths = EDIT_TOOLS.has(request.toolName)
@@ -1227,7 +1235,11 @@ async function decidePermission(
     permissionMode === "auto_accept_edits" &&
     paths.every((path) => isInside(cwd, path))
   ) {
-    answer({ behavior: "allow", updatedInput: request.input });
+    answer({
+      behavior: "allow",
+      updatedInput: request.input,
+      interviewAnswers: null,
+    });
     return;
   }
   const id = request.toolUseId ?? request.requestId;
@@ -1375,7 +1387,11 @@ export async function resolveApproval(
     input.chatId,
     pending.requestId,
     input.decision.approved
-      ? { behavior: "allow", updatedInput: pending.input }
+      ? {
+          behavior: "allow",
+          updatedInput: pending.input,
+          interviewAnswers: null,
+        }
       : {
           behavior: "deny",
           message: input.decision.reason ?? "Permission denied by user",
@@ -1540,7 +1556,12 @@ async function openInterview(
     blockId: pending.approvalId,
     timestamp: now,
     toolName: request.toolName,
-    title: request.toolName,
+    // The released host's titles: Claude's card is named after the tool,
+    // Codex's says who is asking.
+    title:
+      request.toolName === "request_user_input"
+        ? "Codex needs your input"
+        : request.toolName,
     questions: questions.map((question) => ({
       ...question,
       options: [...question.options],
@@ -1616,6 +1637,12 @@ export async function answerInterview(
         answers,
         ...(Object.keys(annotations).length === 0 ? {} : { annotations }),
       },
+      // Codex reads the answers by question id, not by the input above.
+      interviewAnswers: input.answers.map((answer) => ({
+        questionId: answer.questionId,
+        question: answer.question,
+        values: answer.values,
+      })),
     },
     pending,
   );

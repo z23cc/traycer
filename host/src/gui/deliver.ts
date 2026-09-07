@@ -52,10 +52,38 @@ export type PendingApproval = {
  * permissions back (or none) for the turn. The released host answers the
  * same three the same way.
  */
+export type InterviewAnswerValues = {
+  readonly questionId: string | null;
+  readonly question: string | null;
+  readonly values: readonly string[];
+};
+
 function codexApprovalResult(
   allowed: boolean,
   about: { readonly toolName: string; readonly input: unknown },
+  interviewAnswers: readonly InterviewAnswerValues[] | null,
 ): unknown {
+  if (about.toolName === "request_user_input") {
+    // The released host's mapping: every question the request carried gets
+    // an entry keyed by its id, matched to an answer by id, then by question
+    // text, then by position - empty when nothing matched, or when the user
+    // declined.
+    const questions = requestUserInputQuestions(about.input);
+    const answers: { [id: string]: { readonly answers: readonly string[] } } =
+      {};
+    questions.forEach((question, index) => {
+      const given = interviewAnswers ?? [];
+      const match =
+        given.find((answer) => answer.questionId === question.id) ??
+        given.find((answer) => answer.question === question.question) ??
+        given[index] ??
+        null;
+      answers[question.id] = {
+        answers: allowed && match !== null ? [...match.values] : [],
+      };
+    });
+    return { answers };
+  }
   if (about.toolName === "permissions") {
     const requested =
       about.input !== null && typeof about.input === "object"
@@ -70,6 +98,28 @@ function codexApprovalResult(
     };
   }
   return { decision: allowed ? "accept" : "decline" };
+}
+
+function requestUserInputQuestions(
+  input: unknown,
+): readonly { readonly id: string; readonly question: string }[] {
+  if (input === null || typeof input !== "object") {
+    return [];
+  }
+  const questions = Reflect.get(input, "questions");
+  if (!Array.isArray(questions)) {
+    return [];
+  }
+  return questions.flatMap((question: unknown) => {
+    if (question === null || typeof question !== "object") {
+      return [];
+    }
+    const id = Reflect.get(question, "id");
+    const text = Reflect.get(question, "question");
+    return typeof id === "string" && typeof text === "string"
+      ? [{ id, question: text }]
+      : [];
+  });
 }
 
 export class GuiRunRegistry {
@@ -154,7 +204,12 @@ export class GuiRunRegistry {
     agentId: string,
     requestId: string,
     response:
-      | { readonly behavior: "allow"; readonly updatedInput: unknown }
+      | {
+          readonly behavior: "allow";
+          readonly updatedInput: unknown;
+          /** The user's answers when the question was an interview; null otherwise. */
+          readonly interviewAnswers: readonly InterviewAnswerValues[] | null;
+        }
       | { readonly behavior: "deny"; readonly message: string },
     /** What was asked, for the channels whose answer shape depends on it. */
     about: { readonly toolName: string; readonly input: unknown },
@@ -170,7 +225,11 @@ export class GuiRunRegistry {
         `${JSON.stringify({
           jsonrpc: "2.0",
           id,
-          result: codexApprovalResult(response.behavior === "allow", about),
+          result: codexApprovalResult(
+            response.behavior === "allow",
+            about,
+            response.behavior === "allow" ? response.interviewAnswers : null,
+          ),
         })}\n`,
       );
       return true;
