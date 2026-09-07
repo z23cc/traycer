@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,7 @@ import {
 } from "@traycer/protocol/host/asset-stream-schemas";
 import {
   AssetStreamSession,
+  readGitAsset,
   readWorkspaceAsset,
 } from "../workspace/asset-stream";
 
@@ -129,6 +131,59 @@ describe("asset streams", () => {
       width: null,
       height: null,
     });
+  });
+
+  it("reads each git side from the revision its stage describes", async () => {
+    const root = await workspace();
+    const git = (...args: string[]): void => {
+      const run = spawnSync("git", args, { cwd: root, encoding: "utf8" });
+      if (run.status !== 0) throw new Error(run.stderr);
+    };
+    git("init", "-q");
+    git("config", "user.email", "probe@example.com");
+    git("config", "user.name", "probe");
+    await writeFile(join(root, "a.png"), PNG);
+    git("add", "a.png");
+    git("commit", "-qm", "first");
+    // Committed bytes differ from staged, which differ from the worktree.
+    const staged = Buffer.concat([PNG, Buffer.from("staged")]);
+    await writeFile(join(root, "a.png"), staged);
+    git("add", "a.png");
+    const working = Buffer.concat([PNG, Buffer.from("working")]);
+    await writeFile(join(root, "a.png"), working);
+
+    const read = async (
+      side: "old" | "new",
+      stage: "staged" | "unstaged",
+    ): Promise<Uint8Array> => {
+      const got = await readGitAsset({
+        runningDir: root,
+        filePath: "a.png",
+        previousPath: null,
+        side,
+        stage,
+      });
+      if (typeof got === "string") throw new Error(`${side}/${stage}: ${got}`);
+      return got.bytes;
+    };
+
+    // A staged diff runs HEAD -> index; an unstaged one runs index -> worktree.
+    expect(Buffer.from(await read("old", "staged"))).toEqual(PNG);
+    expect(Buffer.from(await read("new", "staged"))).toEqual(staged);
+    expect(Buffer.from(await read("old", "unstaged"))).toEqual(staged);
+    expect(Buffer.from(await read("new", "unstaged"))).toEqual(working);
+
+    // Only the worktree side is a file on disk; every object side is a blob,
+    // so its identity is the oid rather than a size:mtime fingerprint.
+    const object = await readGitAsset({
+      runningDir: root,
+      filePath: "a.png",
+      previousPath: null,
+      side: "old",
+      stage: "staged",
+    });
+    if (typeof object === "string") throw new Error(object);
+    expect(object.contentIdentity).toMatch(/^[0-9a-f]{40}$/);
   });
 
   async function workspace(): Promise<string> {
