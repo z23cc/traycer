@@ -1916,6 +1916,10 @@ describe("local GUI send without cloud login", () => {
     expect(
       blocks.find((block) => Reflect.get(block, "type") === "text"),
     ).toMatchObject({ text: "codex-ok" });
+    // The item opened no tool row - its card is the file - so none closes.
+    expect(
+      blocks.some((block) => Reflect.get(block, "type") === "tool_call"),
+    ).toBe(false);
     expect(latestSummaries(frames, "epic-20", "chat-20")[0]).toMatchObject({
       filePath: target,
       operation: "create",

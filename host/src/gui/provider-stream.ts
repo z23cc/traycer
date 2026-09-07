@@ -166,7 +166,16 @@ export function parseProviderStdoutLine(line: string): ProviderStreamEvent[] {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     return [];
   }
-  if (Reflect.get(parsed, "jsonrpc") === "2.0") {
+  // The app-server's frames are JSON-RPC by shape and not by label: recorded
+  // live, neither its responses nor its notifications carry a `jsonrpc`
+  // field. A Claude record always has a `type`; a frame with a method, or an
+  // id with a result or error, is the server talking.
+  if (
+    typeof Reflect.get(parsed, "type") !== "string" &&
+    (typeof Reflect.get(parsed, "method") === "string" ||
+      (Reflect.get(parsed, "id") !== undefined &&
+        ("result" in parsed || "error" in parsed)))
+  ) {
     return codexRpcEvents(parsed);
   }
   return [

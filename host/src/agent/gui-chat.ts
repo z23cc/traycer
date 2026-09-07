@@ -676,22 +676,31 @@ async function runAndPersistAssistant(
       return;
     }
     if (event.kind === "tool_end") {
-      const toolName = openTools.get(event.toolId) ?? "tool";
-      openTools.delete(event.toolId);
-      emit({
-        type: "tool_call.completed",
-        blockId: event.toolId,
-        timestamp: now,
-        toolName,
-        // Empty for the reason given at `tool_call.started` above.
-        agentMessageSend: null,
-        imageResults: [],
-      });
+      // A result for a call this turn opened closes its row. A Codex
+      // file-change item ends the same way and opened no row - its cards
+      // are the files - so it only settles the edits.
+      const toolName = openTools.get(event.toolId);
+      if (toolName !== undefined) {
+        openTools.delete(event.toolId);
+        emit({
+          type: "tool_call.completed",
+          blockId: event.toolId,
+          timestamp: now,
+          toolName,
+          // Empty for the reason given at `tool_call.started` above.
+          agentMessageSend: null,
+          imageResults: [],
+        });
+      }
       settling.push(settleEditOf(event.toolId, false));
       return;
     }
     if (event.kind === "tool_error") {
-      const toolName = openTools.get(event.toolId) ?? "tool";
+      const toolName = openTools.get(event.toolId);
+      if (toolName === undefined) {
+        settling.push(settleEditOf(event.toolId, true));
+        return;
+      }
       openTools.delete(event.toolId);
       if (nestUnder === null) {
         toolCallErrorCount += 1;

@@ -376,7 +376,8 @@ describe("parseProviderStdoutLine", () => {
   it("reads the Codex app-server's thread, deltas, command, and file-change items", () => {
     expect(
       parseProviderStdoutLine(
-        '{"jsonrpc":"2.0","method":"thread/started","params":{"thread":{"id":"01a07bdc-4486-7b80-a6a8-9fef5936d3e9","status":{"type":"idle"}}}}',
+        // As recorded: no `jsonrpc` label on the wire, an `emittedAtMs` beside it.
+        '{"method":"thread/started","params":{"thread":{"id":"01a07bdc-4486-7b80-a6a8-9fef5936d3e9","status":{"type":"idle"}}},"emittedAtMs":1788786268145}',
       ),
     ).toEqual([
       { kind: "session", sessionId: "01a07bdc-4486-7b80-a6a8-9fef5936d3e9" },
@@ -511,7 +512,7 @@ describe("parseProviderStdoutLine", () => {
     ).toEqual([{ kind: "turn_end", status: "failed", error: "boom" }]);
     expect(
       parseProviderStdoutLine(
-        '{"jsonrpc":"2.0","id":2,"error":{"code":-32600,"message":"bad thread"}}',
+        '{"id":2,"error":{"code":-32600,"message":"bad thread"}}',
       ),
     ).toEqual([{ kind: "transport_error", message: "bad thread" }]);
   });

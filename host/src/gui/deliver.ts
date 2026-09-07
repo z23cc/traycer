@@ -337,7 +337,13 @@ export async function runGuiPrintTurn(
     // which is the close handler's story to tell - not an unhandled stream
     // error's.
     child.stdin?.on("error", () => undefined);
-    const codex = channel === "codex" ? codexDriver(child, input) : null;
+    // Late-bound on purpose: the driver's own events - the session it opened,
+    // an error answering one of its requests - must take the same door every
+    // other event takes, `emit` below, which is what ends the run on a fault.
+    const codex =
+      channel === "codex"
+        ? codexDriver(child, { ...input, onEvent: (event) => emit(event) })
+        : null;
     codex?.start();
     if (channel === "claude" && child.stdin !== null) {
       // The prompt, as the user record the stream-json input format takes.
