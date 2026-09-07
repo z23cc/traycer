@@ -36,8 +36,10 @@ import {
 import { providerIdForHarness } from "../gui/harness-map";
 import { envCredentialVarForProvider } from "../providers/service";
 import { runGuiPrintTurn, type PendingApproval } from "../gui/deliver";
-import { isAbsolute, relative, resolve } from "node:path";
+import { basename, isAbsolute, relative, resolve } from "node:path";
 import type { QueuedPrompt } from "../gui/queue";
+import { epicArtifactKindRecordV100 } from "@traycer/protocol/common/registry";
+import { epicArtifactsRoot, resolveArtifactByPath } from "../epic/artifacts";
 import { LOCAL_USER_ID } from "../local-user";
 import type { HostRuntime } from "../runtime";
 import type {
@@ -1490,6 +1492,21 @@ async function decidePermission(
       : editPaths(request.input)
     : [];
   const isFileEdit = paths.length > 0;
+  // An artifact is the agent's to write, in every mode: the released host's
+  // auto-approved edit root is the epic's artifact directory.
+  if (
+    isFileEdit &&
+    paths.every((path) =>
+      isInside(epicArtifactsRoot(runtime, input.epicId), path),
+    )
+  ) {
+    answer({
+      behavior: "allow",
+      updatedInput: request.input,
+      interviewAnswers: null,
+    });
+    return;
+  }
   if (
     isFileEdit &&
     permissionMode === "auto_accept_edits" &&
@@ -2309,6 +2326,31 @@ async function completeEdit(
     });
   }
   broadcastAccumulatedChanges(runtime, input.epicId, input.chatId);
+  // An `index.md` under the epic's artifact root is an artifact, and its
+  // edit is an artifact operation as well as a file change: the released
+  // host tags the checkpoint entry and, for an artifact it can name, adds
+  // the operation card. One it cannot name yet (a folder no artifact owns)
+  // is tagged with nulls and gets no card.
+  const artifact = artifactOf(runtime, input.epicId, edit.path);
+  if (artifact !== null && artifact.artifactId !== null) {
+    broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+      type: "artifact_operation",
+      blockId: `${edit.blockId}:artifact`,
+      timestamp: Date.now(),
+      ...nested,
+      operation:
+        operation === "create"
+          ? "create"
+          : operation === "delete"
+            ? "delete"
+            : "update",
+      kind: artifact.kind,
+      artifactId: artifact.artifactId,
+      title: artifact.title,
+      beforeHash: snapshot ? before.hash : null,
+      afterHash: snapshot ? after.hash : null,
+    });
+  }
   // This edit as the turn's checkpoint will list it: its own before and
   // after, undoable only when both were actually captured.
   return {
@@ -2318,7 +2360,41 @@ async function completeEdit(
     afterHash: snapshot ? after.hash : null,
     undoable: snapshot,
     reason,
+    ...(artifact === null ? {} : { artifact }),
   };
+}
+
+/**
+ * The artifact an edited path is, if it is one: an `index.md` under the
+ * epic's artifact root, resolved through the artifact registry by its
+ * folder chain. Null for any other path; an artifact-root path no artifact
+ * owns is the released host's "not yet minted" tag.
+ */
+function artifactOf(
+  runtime: HostRuntime,
+  epicId: string,
+  filePath: string,
+):
+  | {
+      readonly artifactId: string;
+      readonly kind: "spec" | "ticket" | "story" | "review";
+      readonly title: string;
+    }
+  | { readonly artifactId: null; readonly kind: null; readonly title: null }
+  | null {
+  if (
+    !isInside(epicArtifactsRoot(runtime, epicId), filePath) ||
+    basename(filePath) !== "index.md"
+  ) {
+    return null;
+  }
+  const row = resolveArtifactByPath(runtime, epicId, filePath);
+  const kind =
+    row === null ? null : epicArtifactKindRecordV100.schema.safeParse(row.kind);
+  if (row === null || kind === null || !kind.success) {
+    return { artifactId: null, kind: null, title: null };
+  }
+  return { artifactId: row.artifactId, kind: kind.data, title: row.title };
 }
 
 /**

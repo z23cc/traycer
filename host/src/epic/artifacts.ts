@@ -377,16 +377,25 @@ function wouldCycle(
   return false;
 }
 
+/**
+ * Where an epic's artifacts live on disk - the released host's one
+ * auto-approved edit root: an agent editing an `index.md` under it is
+ * editing an artifact, not a workspace file.
+ */
+export function epicArtifactsRoot(
+  runtime: HostRuntime,
+  epicId: string,
+): string {
+  return join(runtime.dataDir, "epics", epicId, "artifacts");
+}
+
 function artifactDir(
   runtime: HostRuntime,
   rows: readonly StoredArtifact[],
   artifact: StoredArtifact,
 ): string {
   return join(
-    runtime.dataDir,
-    "epics",
-    artifact.epicId,
-    "artifacts",
+    epicArtifactsRoot(runtime, artifact.epicId),
     ...artifactFolderSegments(rows, artifact),
   );
 }

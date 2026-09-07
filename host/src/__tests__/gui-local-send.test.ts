@@ -3055,6 +3055,142 @@ describe("local GUI send without cloud login", () => {
     );
     expect(readArray(snapshot, "pendingFileEditApprovals")).toEqual([]);
   });
+
+  /**
+   * An artifact is the agent's to write: an edit to an `index.md` under the
+   * epic's artifact root is approved in every mode (the released host's
+   * auto-approved edit root), shows as an artifact operation beside the file
+   * change, and the turn's checkpoint tags the entry with the artifact.
+   */
+  it("approves an artifact edit without asking and files it as an artifact operation", async () => {
+    const stdout = [
+      '{"type":"system","subtype":"init","session_id":"sess-art"}',
+      '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_art","name":"Edit","input":{"file_path":"__TARGET__","old_string":"a","new_string":"b"}}]}}',
+      '{"type":"control_request","request_id":"req-art","request":{"subtype":"can_use_tool","tool_name":"Edit","input":{"file_path":"__TARGET__","old_string":"a","new_string":"b"},"description":"Edit the spec","tool_use_id":"toolu_art"}}',
+    ];
+    const script = [
+      "#!/bin/sh",
+      "read -r prompt",
+      ...stdout.map(printfLine),
+      "read -r answer",
+      'case "$answer" in',
+      '  *\'"behavior":"allow"\'*)',
+      `    printf '%s\\n' '{"type":"user","message":{"content":[{"type":"tool_result","content":"ok","tool_use_id":"toolu_art"}]}}'`,
+      `    printf '%s\\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"artifact-ok"}]}}'`,
+      "    ;;",
+      "  *)",
+      `    printf '%s\\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"artifact-denied"}]}}'`,
+      "    ;;",
+      "esac",
+      `printf '%s\\n' '{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}'`,
+      "",
+    ].join("\n");
+    const setup = await bootWithCli(script, "claude");
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-36", "chat-36");
+    const created = (await call(
+      started.rpcUrl,
+      "epic.createArtifact",
+      { major: 1, minor: 0 },
+      {
+        epicId: "epic-36",
+        parentId: null,
+        artifactType: "spec",
+        title: "Overview",
+      },
+    )) as { artifactId: string };
+    const row = started.runtime.store
+      .snapshot()
+      .artifacts.find((entry) => entry.artifactId === created.artifactId);
+    if (row === undefined) {
+      throw new Error("artifact not stored");
+    }
+    const target = join(
+      tempDir,
+      "epics",
+      "epic-36",
+      "artifacts",
+      row.folderName,
+      "index.md",
+    );
+    process.env.TRAYCER_TEST_EDIT_TARGET = target;
+    const before = await playHook(
+      tempDir,
+      "toolu_art",
+      "pre",
+      "# Overview\na\n",
+    );
+    const after = await playHook(
+      tempDir,
+      "toolu_art",
+      "post",
+      "# Overview\nb\n",
+    );
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-36",
+      chatId: "chat-36",
+      clientActionId: "action-36",
+      messageId: "msg-user-36",
+      text: "update the spec",
+      permissionMode: "supervised",
+      harnessId: null,
+    });
+    // Supervised, and still no question: the fake got the allow and said so.
+    await waitForChatText(
+      streamUrl,
+      "epic-36",
+      "chat-36",
+      "artifact-ok",
+      80,
+      50,
+    );
+    const frames = await waitForSealedBlocks(
+      streamUrl,
+      "epic-36",
+      "chat-36",
+      "artifact_operation",
+      80,
+      50,
+    );
+    const blocks = assistantBlocks(frames, "epic-36", "chat-36");
+    expect(
+      blocks.find(
+        (block) => Reflect.get(block, "type") === "artifact_operation",
+      ),
+    ).toMatchObject({
+      blockId: `toolu_art:${target}:artifact`,
+      operation: "update",
+      kind: "spec",
+      artifactId: created.artifactId,
+      title: "Overview",
+      beforeHash: before,
+      afterHash: after,
+    });
+    const snapshot = Reflect.get(
+      frames.find((f) => Reflect.get(f ?? {}, "kind") === "snapshot") ?? {},
+      "snapshot",
+    );
+    const captured = readArray(
+      Reflect.get(snapshot, "tail") ?? {},
+      "events",
+    ).find((e) => Reflect.get(e ?? {}, "type") === "checkpoint.captured");
+    expect(captured).toMatchObject({
+      metadata: {
+        entries: [
+          {
+            filePath: target,
+            artifact: {
+              artifactId: created.artifactId,
+              kind: "spec",
+              title: "Overview",
+            },
+          },
+        ],
+      },
+    });
+  });
 });
 
 /**
