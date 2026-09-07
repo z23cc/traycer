@@ -2645,6 +2645,13 @@ describe("local GUI send without cloud login", () => {
     );
     tempDir = setup.tempDir;
     started = setup.started;
+    // The hook cannot run under a fake CLI; the test leaves what it would
+    // have left, keyed by the session the records name.
+    await mkdir(join(tempDir, "snapshots", "pending"), { recursive: true });
+    await writeFile(
+      join(tempDir, "snapshots", "pending", "compact.sess-compact.json"),
+      JSON.stringify({ summary: "three." }),
+    );
     await seedChat(started, setup.workspace, "epic-28", "chat-28");
     const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
     await sendOnChat(streamUrl, {
@@ -2675,6 +2682,8 @@ describe("local GUI send without cloud login", () => {
       preTokens: 24157,
       postTokens: 2118,
       durationMs: 4378,
+      // The hook's words, on the same card as the boundary's numbers.
+      summary: "three.",
     });
     expect(String(Reflect.get(cards[0] ?? {}, "blockId"))).toMatch(
       /^compaction:sess-compact:1:[0-9a-f-]{36}$/u,

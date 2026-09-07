@@ -11,6 +11,7 @@ import {
   runSnapshotHook,
   settleEdit,
   snapshotHookSettings,
+  takeCompactSummary,
 } from "../snapshots/snapshots";
 
 describe("edit snapshots", () => {
@@ -83,6 +84,28 @@ describe("edit snapshots", () => {
     });
   });
 
+  /** The PostCompact hook's stdin, recorded live around `/compact`. */
+  it("keeps the compaction summary the PostCompact hook was handed, once", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "traycer-snap-"));
+    const dir = join(tempDir, "snapshots");
+    await runSnapshotHook(
+      '{"session_id":"87e99722-eb10-4c7d-8b77-3db9e9917b98","transcript_path":"/x.jsonl","cwd":"/w","prompt_id":"b686585b-a28e-4f22-8d81-ebe58e270c6a","hook_event_name":"PostCompact","trigger":"manual","compact_summary":"three."}',
+      dir,
+    );
+    expect(
+      await takeCompactSummary(dir, "87e99722-eb10-4c7d-8b77-3db9e9917b98"),
+    ).toBe("three.");
+    expect(
+      await takeCompactSummary(dir, "87e99722-eb10-4c7d-8b77-3db9e9917b98"),
+    ).toBeNull();
+    // An empty summary is no summary.
+    await runSnapshotHook(
+      '{"session_id":"s2","hook_event_name":"PostCompact","trigger":"auto","compact_summary":""}',
+      dir,
+    );
+    expect(await takeCompactSummary(dir, "s2")).toBeNull();
+  });
+
   it("names this host's own binary as the hook", () => {
     const settings: unknown = JSON.parse(snapshotHookSettings("/data"));
     const pre = Reflect.get(
@@ -94,6 +117,10 @@ describe("edit snapshots", () => {
       "PostToolUse",
     );
     expect(pre).toEqual(post);
+    // And the compaction hook, unmatched: every compaction reports.
+    expect(
+      Reflect.get(Reflect.get(settings ?? {}, "hooks") ?? {}, "PostCompact"),
+    ).toEqual([{ hooks: pre[0].hooks }]);
     const command = String(
       Reflect.get(
         (Reflect.get(pre[0], "hooks") as unknown[])[0] ?? {},

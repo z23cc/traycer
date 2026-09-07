@@ -31,6 +31,7 @@ import {
   settleEdit,
   snapshotDir,
   type SnapshotCapture,
+  takeCompactSummary,
 } from "../snapshots/snapshots";
 import { providerIdForHarness } from "../gui/harness-map";
 import { envCredentialVarForProvider } from "../providers/service";
@@ -958,6 +959,28 @@ async function runAndPersistAssistant(
         ...(event.postTokens === null ? {} : { postTokens: event.postTokens }),
         ...(event.durationMs === null ? {} : { durationMs: event.durationMs }),
       });
+      // The words, when the PostCompact hook left them: a second completed
+      // event on the same card, which keeps the numbers it has and takes the
+      // summary - the released host's way of delivering it.
+      const compactionId = compactionBlockId();
+      const sessionForSummary = providerSessionId;
+      if (sessionForSummary !== null) {
+        settling.push(
+          takeCompactSummaryWithRetry(
+            snapshotDir(runtime.dataDir),
+            sessionForSummary,
+          ).then((summary) => {
+            if (summary !== null) {
+              emit({
+                type: "compaction.completed",
+                blockId: compactionId,
+                timestamp: Date.now(),
+                summary,
+              });
+            }
+          }),
+        );
+      }
       // The context is now what the boundary says it is. The compact turn's
       // own `result` counts nothing (recorded live), so this is the only
       // reading the meter gets - the released host's, field for field.
@@ -2272,6 +2295,25 @@ async function completeEdit(
     undoable: snapshot,
     reason,
   };
+}
+
+/**
+ * The hook and the boundary record race by a few milliseconds, and the
+ * sidecar may not be there yet when the boundary arrives; one short second
+ * look is enough, recorded live.
+ */
+async function takeCompactSummaryWithRetry(
+  dir: string,
+  sessionId: string,
+): Promise<string | null> {
+  const first = await takeCompactSummary(dir, sessionId);
+  if (first !== null) {
+    return first;
+  }
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 500);
+  });
+  return takeCompactSummary(dir, sessionId);
 }
 
 /**

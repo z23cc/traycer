@@ -280,9 +280,45 @@ export function snapshotHookSettings(dataDir: string): string {
     matcher: "Edit|Write|MultiEdit|NotebookEdit",
     hooks: [{ type: "command", command }],
   };
+  // The same re-entry after a compaction: the CLI hands the hook the summary
+  // it wrote (`compact_summary`, recorded live), which is the one place that
+  // text exists outside the transcript.
+  const compact = { hooks: [{ type: "command", command }] };
   return JSON.stringify({
-    hooks: { PreToolUse: [hook], PostToolUse: [hook] },
+    hooks: { PreToolUse: [hook], PostToolUse: [hook], PostCompact: [compact] },
   });
+}
+
+function compactSidecarPath(dir: string, sessionId: string): string {
+  return join(dir, "pending", `compact.${encodeURIComponent(sessionId)}.json`);
+}
+
+/**
+ * The summary the PostCompact hook left for this session, consumed: the
+ * sidecar is deleted on the way out. Null when there is none, or it is empty.
+ */
+export async function takeCompactSummary(
+  dir: string,
+  sessionId: string,
+): Promise<string | null> {
+  const path = compactSidecarPath(dir, sessionId);
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch {
+    return null;
+  }
+  await rm(path, { force: true });
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    const summary =
+      parsed !== null && typeof parsed === "object"
+        ? Reflect.get(parsed, "summary")
+        : null;
+    return typeof summary === "string" && summary.length > 0 ? summary : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -304,6 +340,23 @@ export async function runSnapshotHook(
     return;
   }
   const event = Reflect.get(payload, "hook_event_name");
+  if (event === "PostCompact") {
+    const sessionId = Reflect.get(payload, "session_id");
+    const summary = Reflect.get(payload, "compact_summary");
+    if (typeof sessionId !== "string" || typeof summary !== "string") {
+      return;
+    }
+    try {
+      await mkdir(join(dir, "pending"), { recursive: true });
+      await writeFile(
+        compactSidecarPath(dir, sessionId),
+        JSON.stringify({ summary }),
+      );
+    } catch {
+      // The card then shows the numbers without the words.
+    }
+    return;
+  }
   const toolUseId = Reflect.get(payload, "tool_use_id");
   const input = Reflect.get(payload, "tool_input");
   const side =
