@@ -312,6 +312,19 @@ function claudeTaskStarted(record: object): ProviderStreamEvent[] {
   if (taskId === null) {
     return [];
   }
+  // Every task the CLI runs reports here, a plain Bash call included
+  // (`task_type: "local_bash"`, recorded live around a `sleep`). Only one
+  // with a prompt of its own is an agent's; the rest are the tool call they
+  // belong to, already on its own card.
+  const prompt = readString(record, "prompt");
+  if (
+    prompt === null ||
+    prompt.trim().length === 0 ||
+    readString(record, "task_type") === "local_workflow" ||
+    Reflect.get(record, "skip_transcript") === true
+  ) {
+    return [];
+  }
   const description = readString(record, "description");
   const subagentType = readString(record, "subagent_type");
   return [

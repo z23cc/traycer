@@ -222,6 +222,17 @@ describe("parseProviderStdoutLine", () => {
    * subagent. Claude reports the whole life of it on the PARENT's stream, and
    * the ids are two: the task owns the card, the tool call spawned it.
    */
+  /** Recorded live around `Bash: sleep 3` - a task record, but no agent. */
+  it("does not read a Bash call's task record as a subagent", () => {
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"system","subtype":"task_started","task_id":"bdkdss7vl","tool_use_id":"toolu_01V6TaFSyuxKrDmxHGjnBdke","description":"Sleep for 3 seconds","is_backgrounded":false,"task_type":"local_bash","uuid":"751cee38-2d29-40a4-9a53-2d03213ec7ff","session_id":"8ce0aabb-f3b1-4b02-8156-b5f592e5d6d7"}',
+      ),
+    ).toEqual([
+      { kind: "session", sessionId: "8ce0aabb-f3b1-4b02-8156-b5f592e5d6d7" },
+    ]);
+  });
+
   it("reads a subagent's life off the parent's task records", () => {
     expect(
       parseProviderStdoutLine(

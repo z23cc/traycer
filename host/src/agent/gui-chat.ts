@@ -574,6 +574,8 @@ async function runAndPersistAssistant(
    * becomes the card its events nest under.
    */
   const cardByTool = new Map<string, string>();
+  /** Tasks that opened a card, so a stray progress or end record opens none. */
+  const startedTasks = new Set<string>();
   /**
    * The spawning call above each tool call a CHILD made. A nested sub-agent's
    * `task_started` names the child's own spawn call, and this is the one hop
@@ -861,6 +863,7 @@ async function runAndPersistAssistant(
       return;
     }
     if (event.kind === "subagent_start") {
+      startedTasks.add(event.taskId);
       if (event.spawnToolId !== null) {
         cardByTool.set(event.spawnToolId, event.taskId);
       }
@@ -893,6 +896,9 @@ async function runAndPersistAssistant(
       return;
     }
     if (event.kind === "subagent_progress") {
+      if (!startedTasks.has(event.taskId)) {
+        return;
+      }
       emit({
         type: "subagent.progress",
         blockId: event.taskId,
@@ -902,6 +908,10 @@ async function runAndPersistAssistant(
       return;
     }
     if (event.kind === "subagent_end") {
+      // A task that never opened a card - a Bash call's - ends on no card.
+      if (!startedTasks.has(event.taskId)) {
+        return;
+      }
       emit({
         type: "subagent.completed",
         blockId: event.taskId,

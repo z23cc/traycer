@@ -967,12 +967,16 @@ describe("local GUI send without cloud login", () => {
       // child's record, the nested task names that call, and the nested
       // agent's transcript is not in this stream at all.
       '{"type":"assistant","parent_tool_use_id":"toolu_p1","message":{"content":[{"type":"tool_use","id":"toolu_c2","name":"Agent","input":{"description":"Nested","subagent_type":"Explore","prompt":"ls again"}}]}}',
-      '{"type":"system","subtype":"task_started","task_id":"task-88","tool_use_id":"toolu_c2","description":"Nested","subagent_type":"Explore","spawn_depth":2}',
+      '{"type":"system","subtype":"task_started","task_id":"task-88","tool_use_id":"toolu_c2","description":"Nested","subagent_type":"Explore","spawn_depth":2,"prompt":"ls again"}',
       '{"type":"system","subtype":"task_notification","task_id":"task-88","tool_use_id":"toolu_c2","status":"completed","summary":"nested done"}',
       '{"type":"user","parent_tool_use_id":"toolu_p1","message":{"content":[{"type":"tool_result","content":"nested done","tool_use_id":"toolu_c2"}]}}',
       // A task whose spawn call this stream never carried.
-      '{"type":"system","subtype":"task_started","task_id":"task-99","tool_use_id":"toolu_never","description":"Orphan","subagent_type":"Explore","spawn_depth":3}',
+      '{"type":"system","subtype":"task_started","task_id":"task-99","tool_use_id":"toolu_never","description":"Orphan","subagent_type":"Explore","spawn_depth":3,"prompt":"orphan work"}',
       '{"type":"assistant","parent_tool_use_id":"toolu_p1","message":{"content":[{"type":"text","text":"CHILD-TEXT-LEAK"}]}}',
+      // A plain Bash call reports as a task too (recorded live: `local_bash`,
+      // no prompt). It is the tool call's own card, not a subagent's.
+      '{"type":"system","subtype":"task_started","task_id":"task-bash","tool_use_id":"toolu_c1","description":"List files","is_backgrounded":false,"task_type":"local_bash"}',
+      '{"type":"system","subtype":"task_notification","task_id":"task-bash","tool_use_id":"toolu_c1","status":"completed","output_file":"","summary":"List files"}',
       '{"type":"system","subtype":"task_notification","task_id":"task-77","tool_use_id":"toolu_p1","status":"completed","summary":"one file"}',
       '{"type":"user","message":{"content":[{"type":"tool_result","content":"one file","tool_use_id":"toolu_p1"}]}}',
       '{"type":"assistant","message":{"content":[{"type":"text","text":"task-ok"}]}}',
@@ -1035,6 +1039,8 @@ describe("local GUI send without cloud login", () => {
     });
     // And no hop for a spawn call this stream never carried.
     expect(card("task-99")).toMatchObject({ parentBlockId: null });
+    // The Bash call's task opened no card - and its end closed none.
+    expect(card("task-bash")).toBeUndefined();
     // The child's Bash call is the child's: nested under the card, not the
     // turn's. Only the spawning `Task` call is the turn's own.
     const calls = blocks.filter(
