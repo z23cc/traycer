@@ -3191,6 +3191,72 @@ describe("local GUI send without cloud login", () => {
       },
     });
   });
+
+  /**
+   * A plain file command on an artifact - `cat`, `mkdir`, `rm`, `mv`... with
+   * every operand under the artifact root - is the agent's to run in every
+   * mode, as the released host allows it; nothing is asked and no approval
+   * is recorded.
+   */
+  it("runs a plain file command on an artifact without asking", async () => {
+    const stdout = [
+      '{"type":"system","subtype":"init","session_id":"sess-artcmd"}',
+      '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_artcmd","name":"Bash","input":{"command":"cat __TARGET__"}}]}}',
+      '{"type":"control_request","request_id":"req-artcmd","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"cat __TARGET__"},"description":"Read the spec","tool_use_id":"toolu_artcmd"}}',
+    ];
+    const script = [
+      "#!/bin/sh",
+      "read -r prompt",
+      ...stdout.map(printfLine),
+      "read -r answer",
+      'case "$answer" in',
+      '  *\'"behavior":"allow"\'*)',
+      `    printf '%s\\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"artcmd-ok"}]}}'`,
+      "    ;;",
+      "  *)",
+      `    printf '%s\\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"artcmd-denied"}]}}'`,
+      "    ;;",
+      "esac",
+      `printf '%s\\n' '{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}'`,
+      "",
+    ].join("\n");
+    const setup = await bootWithCli(script, "claude");
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-37", "chat-37");
+    process.env.TRAYCER_TEST_EDIT_TARGET = join(
+      tempDir,
+      "epics",
+      "epic-37",
+      "artifacts",
+      "overview",
+      "index.md",
+    );
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-37",
+      chatId: "chat-37",
+      clientActionId: "action-37",
+      messageId: "msg-user-37",
+      text: "read the spec",
+      permissionMode: "supervised",
+      harnessId: null,
+    });
+    await waitForChatText(streamUrl, "epic-37", "chat-37", "artcmd-ok", 80, 50);
+    const snapshot = await waitForSnapshot(
+      streamUrl,
+      "epic-37",
+      "chat-37",
+      (s) => Reflect.get(s, "runStatus") === "idle",
+      40,
+      50,
+    );
+    expect(
+      readArray(Reflect.get(snapshot, "tail") ?? {}, "events").map((e) =>
+        Reflect.get(e ?? {}, "type"),
+      ),
+    ).not.toContain("approval.requested");
+  });
 });
 
 /**

@@ -40,6 +40,7 @@ import { basename, isAbsolute, relative, resolve } from "node:path";
 import type { QueuedPrompt } from "../gui/queue";
 import { epicArtifactKindRecordV100 } from "@traycer/protocol/common/registry";
 import { epicArtifactsRoot, resolveArtifactByPath } from "../epic/artifacts";
+import { artifactCommand, isInside } from "./artifact-command";
 import { LOCAL_USER_ID } from "../local-user";
 import type { HostRuntime } from "../runtime";
 import type {
@@ -1389,13 +1390,6 @@ function editPaths(input: unknown): string[] {
  * relative to the ROOT, not to wherever this process happens to run), and
  * the root itself counts as inside.
  */
-function isInside(root: string, filePath: string): boolean {
-  if (root.trim().length === 0 || filePath.trim().length === 0) {
-    return false;
-  }
-  const rel = relative(resolve(root), resolve(root, filePath));
-  return rel.length === 0 || (!rel.startsWith("..") && !isAbsolute(rel));
-}
 
 /**
  * The host's answer to "may this tool run", which is the one place every
@@ -1499,6 +1493,26 @@ async function decidePermission(
     paths.every((path) =>
       isInside(epicArtifactsRoot(runtime, input.epicId), path),
     )
+  ) {
+    answer({
+      behavior: "allow",
+      updatedInput: request.input,
+      interviewAnswers: null,
+    });
+    return;
+  }
+  // A plain file command on the artifacts is the agent's too: `cat`,
+  // `mkdir`, `rm`, `mv`... with every operand under the artifact root, as
+  // the released host allows it in every mode.
+  if (
+    !isFileEdit &&
+    artifactCommand(
+      request.toolName,
+      request.input,
+      request.description,
+      cwd,
+      epicArtifactsRoot(runtime, input.epicId),
+    ) !== null
   ) {
     answer({
       behavior: "allow",
