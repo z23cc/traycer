@@ -435,6 +435,7 @@ function chatOf(
     lastUsage: null,
     archivedAt: null,
     lastAuthFailureTurnId: null,
+    pinnedTodo: null,
     fastMode: false,
   };
 }

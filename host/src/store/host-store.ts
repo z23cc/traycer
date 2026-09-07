@@ -1,5 +1,10 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { z } from "zod";
+import {
+  todoItemSchema,
+  type TodoItem,
+} from "@traycer/protocol/persistence/epic/content-blocks";
 import type { JsonContent } from "@traycer/protocol/common/registry";
 import type { TaskRepoIdentifier } from "@traycer/protocol/host/epic/unary-schemas";
 import type {
@@ -184,6 +189,21 @@ export type StoredChat = {
    * a log of every failure.
    */
   lastAuthFailureTurnId: string | null;
+  /**
+   * The chat's pinned todo list - the most recent non-empty one the agent
+   * wrote, which is exactly what the client's own fold selects (a semantic
+   * todo carries forward until a newer one replaces it; the user-row reset in
+   * that fold applies to the Traycer task tools, which this host does not
+   * serve).
+   *
+   * Durable because the dock is painted from the SNAPSHOT: the block deltas
+   * that carry a todo are live-only here, so without this a reopened chat
+   * loses the list the agent is working through.
+   */
+  pinnedTodo: {
+    readonly id: string;
+    readonly items: readonly TodoItem[];
+  } | null;
 };
 
 /**
@@ -719,9 +739,26 @@ function normalizeChats(value: unknown): StoredChat[] {
         typeof record.lastAuthFailureTurnId === "string"
           ? record.lastAuthFailureTurnId
           : null,
+      pinnedTodo: normalizePinnedTodo(record.pinnedTodo),
     });
   }
   return rows;
+}
+
+const pinnedTodoStoreSchema = z.object({
+  id: z.string().min(1),
+  items: z.array(todoItemSchema),
+});
+
+/** Dropped whole rather than repaired: a half-parsed checklist is not one. */
+function normalizePinnedTodo(
+  value: unknown,
+): { readonly id: string; readonly items: readonly TodoItem[] } | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const parsed = pinnedTodoStoreSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
 }
 
 function normalizeChatEvents(value: unknown): StoredChatEvent[] {

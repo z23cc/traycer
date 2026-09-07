@@ -221,6 +221,7 @@ describe("epic.state.subscribe", () => {
         lastUsage: null,
         archivedAt: null,
         lastAuthFailureTurnId: null,
+        pinnedTodo: null,
       });
     });
     expect(socket.frames).toHaveLength(1);

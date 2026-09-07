@@ -245,6 +245,7 @@ function chat(host: StartedHost, chatId: string): StoredChat {
     lastUsage: null,
     archivedAt: null,
     lastAuthFailureTurnId: null,
+    pinnedTodo: null,
     fastMode: false,
   };
 }

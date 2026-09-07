@@ -532,6 +532,32 @@ async function runAndPersistAssistant(
       });
       return;
     }
+    if (event.kind === "todo") {
+      const items = event.items.map((item) => ({
+        id: item.id ?? null,
+        text: item.text,
+        status: item.status,
+        priority: item.priority ?? null,
+        activeForm: item.activeForm ?? null,
+      }));
+      broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+        type: "todo.updated",
+        blockId: event.toolId,
+        timestamp: now,
+        items: event.items,
+      });
+      // Stored as well as broadcast: the dock is painted from the snapshot,
+      // and a block delta is live-only here.
+      void runtime.store.mutate((state) => {
+        const row = state.chats.find(
+          (chatRow) => chatRow.chatId === input.chatId,
+        );
+        if (row !== undefined) {
+          row.pinnedTodo = { id: event.toolId, items };
+        }
+      });
+      return;
+    }
     if (event.kind === "auth_failure") {
       authFailure = event;
       return;

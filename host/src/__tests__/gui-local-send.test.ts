@@ -542,6 +542,92 @@ describe("local GUI send without cloud login", () => {
    * `content_block_start` with an empty input, then the complete `assistant`
    * record), which the counter used to charge twice.
    */
+  /**
+   * The pinned todo dock is painted from the SNAPSHOT, not from the rows, so a
+   * `TodoWrite` has to reach the store to survive a reopen. The list also has
+   * to be the LATEST one - the client's fold carries a semantic todo forward
+   * until a newer one replaces it, and this is the host answering that fold.
+   */
+  it("pins the latest TodoWrite list onto the snapshot", async () => {
+    const stdout = [
+      '{"type":"system","subtype":"init","session_id":"sess-todo"}',
+      '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_t1","name":"TodoWrite","input":{"todos":[{"content":"first pass","status":"in_progress","activeForm":"First pass"}]}}]}}',
+      '{"type":"user","message":{"content":[{"type":"tool_result","content":"ok","tool_use_id":"toolu_t1"}]}}',
+      '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_t2","name":"TodoWrite","input":{"todos":[{"content":"first pass","status":"completed","activeForm":"First pass"},{"content":"second pass","status":"in_progress","activeForm":"Second pass"}]}}]}}',
+      '{"type":"user","message":{"content":[{"type":"tool_result","content":"ok","tool_use_id":"toolu_t2"}]}}',
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"todo-ok"}]}}',
+      '{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}',
+    ];
+    const setup = await bootWithCli(
+      [
+        "#!/bin/sh",
+        ...stdout.map((line) => `printf '%s\n' '${line}'`),
+        "",
+      ].join("\n"),
+    );
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await call(
+      started.rpcUrl,
+      "epic.create",
+      { major: 1, minor: 0 },
+      {
+        epic: {
+          id: "epic-7",
+          title: "Todos",
+          initialUserPrompt: "",
+          ticketCount: 0,
+          specCount: 0,
+          storyCount: 0,
+          reviewCount: 0,
+          status: "active",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          createdBy: "local",
+          version: "2.0.0",
+        },
+        repoIdentifiers: [],
+        workspaces: [{ workspacePath: setup.workspace }],
+        chat: {
+          chatId: "chat-7",
+          parentId: null,
+          hostId: started.runtime.hostId,
+          title: "Root",
+          worktreeIntent: null,
+          initialMessage: null,
+        },
+      },
+    );
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-7",
+      chatId: "chat-7",
+      clientActionId: "action-7",
+      messageId: "msg-user-7",
+      text: "plan it",
+    });
+    const snapshot = await waitForChatText(
+      streamUrl,
+      "epic-7",
+      "chat-7",
+      "todo-ok",
+      80,
+      50,
+    );
+
+    const chat = started.runtime.store
+      .snapshot()
+      .chats.find((row) => row.chatId === "chat-7");
+    expect(chat?.pinnedTodo?.id).toBe("toolu_t2");
+    expect(chat?.pinnedTodo?.items.map((item) => item.status)).toEqual([
+      "completed",
+      "in_progress",
+    ]);
+    // On the wire, where the dock reads it. The text appears nowhere else:
+    // a persisted assistant turn carries only its text block.
+    expect(JSON.stringify(snapshot)).toContain("second pass");
+  });
+
   it("records a failed tool call once, as a failure", async () => {
     const stdout = [
       '{"type":"system","subtype":"init","session_id":"sess-err"}',

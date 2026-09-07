@@ -205,6 +205,7 @@ async function seedBinding(host: StartedHost): Promise<void> {
     lastUsage: null,
     archivedAt: null,
     lastAuthFailureTurnId: null,
+    pinnedTodo: null,
   };
   const binding: StoredBinding = {
     epicId: "epic-1",

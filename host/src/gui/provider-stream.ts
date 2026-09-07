@@ -1,3 +1,6 @@
+import type { RuntimeTodoItem } from "@traycer/protocol/host/agent/gui/agent-runtime";
+import { todoStatusFromValue } from "@traycer/protocol/host/agent/gui/task-todo-tools";
+
 export type ProviderTokenUsage = {
   readonly inputTokens: number;
   readonly outputTokens: number;
@@ -53,6 +56,16 @@ export type ProviderStreamEvent =
       readonly kind: "file_change";
       readonly path: string;
       readonly operation: string;
+    }
+  /**
+   * The harness's own todo list, from a `TodoWrite` call's input. Carries the
+   * call's id so the block it produces is the one that call owns - a later
+   * write replaces it in place rather than stacking a second list.
+   */
+  | {
+      readonly kind: "todo";
+      readonly toolId: string;
+      readonly items: readonly RuntimeTodoItem[];
     }
   | { readonly kind: "usage"; readonly usage: ProviderTokenUsage };
 
@@ -136,6 +149,52 @@ function claudeSystemEvent(record: object): ProviderStreamEvent[] {
       detail: readString(record, "error") ?? "authentication_failed",
     },
   ];
+}
+
+/**
+ * `TodoWrite` is Claude Code's own checklist tool, and its input IS the list -
+ * the whole list, every time, which is why a later call replaces the block
+ * rather than merging into it.
+ *
+ * Emitted BESIDE the tool call rather than instead of it: the call happened,
+ * and the pinned dock is a projection of it. The partial
+ * `content_block_start` record carries `input: {}` and so produces nothing
+ * here; the complete `assistant` record carries the list.
+ */
+function todoEvents(
+  toolId: string,
+  toolName: string,
+  input: unknown,
+): ProviderStreamEvent[] {
+  if (toolName.toLowerCase() !== "todowrite") {
+    return [];
+  }
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    return [];
+  }
+  const todos = Reflect.get(input, "todos");
+  if (!Array.isArray(todos)) {
+    return [];
+  }
+  const items: RuntimeTodoItem[] = [];
+  for (const entry of todos) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+    const text = readString(entry, "content") ?? readString(entry, "text");
+    const status = todoStatusFromValue(Reflect.get(entry, "status"));
+    if (text === null || status === null) {
+      continue;
+    }
+    const activeForm = readString(entry, "activeForm");
+    items.push({
+      id: `${toolId}:${String(items.length)}`,
+      text,
+      status,
+      ...(activeForm === null ? {} : { activeForm }),
+    });
+  }
+  return items.length === 0 ? [] : [{ kind: "todo", toolId, items }];
 }
 
 function claudeToolResults(message: unknown): ProviderStreamEvent[] {
@@ -308,12 +367,9 @@ function claudeAssistantContent(message: unknown): ProviderStreamEvent[] {
       const toolName = readString(entry, "name") ?? "tool";
       // Opened only. It closes when its `tool_result` arrives, which is the
       // only record that knows whether the call actually worked.
-      events.push({
-        kind: "tool_start",
-        toolId,
-        toolName,
-        input: Reflect.get(entry, "input") ?? null,
-      });
+      const input = Reflect.get(entry, "input") ?? null;
+      events.push({ kind: "tool_start", toolId, toolName, input });
+      events.push(...todoEvents(toolId, toolName, input));
     }
   }
   return events;

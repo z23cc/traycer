@@ -232,6 +232,7 @@ async function seed(host: StartedHost): Promise<void> {
     lastUsage: null,
     archivedAt: null,
     lastAuthFailureTurnId: null,
+    pinnedTodo: null,
   };
   await host.runtime.store.mutate((state) => {
     state.chats.push(chat);

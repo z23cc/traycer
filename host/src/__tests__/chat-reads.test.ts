@@ -238,6 +238,7 @@ async function seedChat(host: StartedHost, epoch: number): Promise<void> {
     lastUsage: null,
     archivedAt: null,
     lastAuthFailureTurnId: null,
+    pinnedTodo: null,
     fastMode: false,
   };
   await host.runtime.store.mutate((state) => {

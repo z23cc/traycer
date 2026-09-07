@@ -320,7 +320,13 @@ export function chatWindowedTranscript(
         },
         derived: {
           latestAssistantUsage: chat.lastUsage,
-          pinnedTodo: null,
+          // The client's fold selects the most recent non-empty todo and
+          // carries it forward, so the stored one IS that answer. Painted from
+          // here rather than from the rows, which on this line are a window.
+          pinnedTodo: chat.pinnedTodo,
+          // The Traycer task tools (`TaskCreate`/`TaskUpdate`/...) are the
+          // other half of that fold, and this host serves none of them - no
+          // tool call reaching it can be one.
           pinnedTaskTodoItems: [],
           latestForkableAssistantMessageId: lastAssistantMessageId(messages),
           restorableSetupInterruption: null,
@@ -551,6 +557,7 @@ function emptyChat(hostId: string, epicId: string, chatId: string): StoredChat {
     lastUsage: null,
     archivedAt: null,
     lastAuthFailureTurnId: null,
+    pinnedTodo: null,
     fastMode: false,
   };
 }

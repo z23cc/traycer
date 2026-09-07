@@ -68,6 +68,7 @@ export async function createLocalAgent(
         lastUsage: null,
         archivedAt: null,
         lastAuthFailureTurnId: null,
+        pinnedTodo: null,
         fastMode: false,
       };
       state.chats = state.chats.filter((row) => row.chatId !== agentId);
@@ -151,6 +152,7 @@ export async function sendLocalAgentMessage(
         lastUsage: null,
         archivedAt: null,
         lastAuthFailureTurnId: null,
+        pinnedTodo: null,
         fastMode: false,
       };
       state.chats.push(chat);

@@ -185,6 +185,7 @@ function blankChat(hostId: string): StoredChat {
     lastUsage: null,
     archivedAt: null,
     lastAuthFailureTurnId: null,
+    pinnedTodo: null,
   };
 }
 

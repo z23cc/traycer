@@ -158,6 +158,70 @@ describe("parseProviderStdoutLine", () => {
     ).toEqual([]);
   });
 
+  /**
+   * `TodoWrite` carries the whole list in its input, which is what the pinned
+   * dock renders. The tool call is still emitted beside it: the call happened.
+   */
+  it("lifts a TodoWrite call's list into a todo event", () => {
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_t1","name":"TodoWrite","input":{"todos":[{"content":"read the parser","status":"completed","activeForm":"Reading the parser"},{"content":"write the test","status":"in_progress","activeForm":"Writing the test"}]}}]}}',
+      ),
+    ).toEqual([
+      {
+        kind: "tool_start",
+        toolId: "toolu_t1",
+        toolName: "TodoWrite",
+        input: {
+          todos: [
+            {
+              content: "read the parser",
+              status: "completed",
+              activeForm: "Reading the parser",
+            },
+            {
+              content: "write the test",
+              status: "in_progress",
+              activeForm: "Writing the test",
+            },
+          ],
+        },
+      },
+      {
+        kind: "todo",
+        toolId: "toolu_t1",
+        items: [
+          {
+            id: "toolu_t1:0",
+            text: "read the parser",
+            status: "completed",
+            activeForm: "Reading the parser",
+          },
+          {
+            id: "toolu_t1:1",
+            text: "write the test",
+            status: "in_progress",
+            activeForm: "Writing the test",
+          },
+        ],
+      },
+    ]);
+    // The partial record opens the call with an empty input, so it produces no
+    // list - the complete record above is the one that carries it.
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","id":"toolu_t1","name":"TodoWrite","input":{}}}}',
+      ),
+    ).toEqual([
+      {
+        kind: "tool_start",
+        toolId: "toolu_t1",
+        toolName: "TodoWrite",
+        input: {},
+      },
+    ]);
+  });
+
   it("ignores unstructured CLI text so the plain-stdout path can take over", () => {
     expect(parseProviderStdoutLine("assistant-ok")).toEqual([]);
   });
