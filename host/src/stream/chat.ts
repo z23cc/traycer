@@ -22,7 +22,11 @@ import {
 import { guiHarnessIdSchema } from "@traycer/protocol/host/agent/shared";
 import type { RuntimeEvent } from "@traycer/protocol/host/agent/gui/agent-runtime";
 import type { WorktreeBinding } from "@traycer/protocol/host/worktree-schemas";
-import { derivedChatTitle } from "../agent/gui-chat";
+import {
+  approvalState,
+  derivedChatTitle,
+  fileEditApprovalState,
+} from "../agent/gui-chat";
 import { LOCAL_USER_ID } from "../local-user";
 import type { HostRuntime } from "../runtime";
 import type {
@@ -396,11 +400,17 @@ export function chatWindowedTranscript(
         queue: runtime.queue.snapshot(chatId),
         runStatus: print === null ? "idle" : "running",
         activeTurn: activeTurnFrame(print, chatId),
-        pendingApprovals: [],
+        pendingApprovals: runtime.guiRuns
+          .approvalsOf(chatId)
+          .filter((pending) => pending.kind === "tool")
+          .map(approvalState),
         pendingInterviews: [],
         worktreeBinding,
         missingWorktreePaths,
-        pendingFileEditApprovals: [],
+        pendingFileEditApprovals: runtime.guiRuns
+          .approvalsOf(chatId)
+          .filter((pending) => pending.kind === "file_edit")
+          .map(fileEditApprovalState),
         // The array's length, never a running tally of edits: the client
         // compares this against the summaries it received and treats a
         // mismatch as a lost delivery worth re-requesting.

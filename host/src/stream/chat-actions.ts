@@ -16,6 +16,7 @@ import {
   readHarnessId,
   readModelSlug,
   readUserId,
+  resolveApproval,
 } from "../agent/gui-chat";
 import type { HostRuntime } from "../runtime";
 import {
@@ -64,6 +65,10 @@ export function handleChatClientFrame(
   }
   if (kind === "revertFileChanges") {
     void handleChatRevertFileChanges(parsed, socket, runtime);
+    return true;
+  }
+  if (kind === "approvalDecision" || kind === "fileEditApprovalDecision") {
+    void handleChatApprovalDecision(parsed, socket, runtime, kind);
     return true;
   }
   if (kind === "pauseQueue") {
@@ -207,6 +212,55 @@ function handleChatStop(
       clientActionId: ids.clientActionId,
     });
   }
+}
+
+/**
+ * The user's answer to a permission question. Both frames land here: the
+ * tool and file-edit questions differ in what the GUI shows, not in what
+ * the CLI is told.
+ */
+async function handleChatApprovalDecision(
+  parsed: object,
+  socket: WebSocket,
+  runtime: HostRuntime,
+  action: "approvalDecision" | "fileEditApprovalDecision",
+): Promise<void> {
+  const ids = readActionIds(parsed);
+  const approvalId = readStringField(parsed, "approvalId");
+  const decision = Reflect.get(parsed, "decision");
+  const approved =
+    decision === null || typeof decision !== "object"
+      ? null
+      : Reflect.get(decision, "approved");
+  if (ids === null || approvalId === null || typeof approved !== "boolean") {
+    return;
+  }
+  const reason =
+    decision === null || typeof decision !== "object"
+      ? null
+      : readStringField(decision, "reason");
+  // The ack goes first, as every action's does: it says the decision was
+  // understood, and the resolution frame that follows says what it did.
+  const open = runtime.guiRuns
+    .approvalsOf(ids.chatId)
+    .some((pending) => pending.approvalId === approvalId);
+  ack(
+    socket,
+    ids,
+    action,
+    open ? "accepted" : "rejected",
+    open ? null : "No such approval is open on this chat.",
+    open ? null : "APPROVAL_NOT_FOUND",
+  );
+  if (!open) {
+    return;
+  }
+  await resolveApproval(runtime, {
+    epicId: ids.epicId,
+    chatId: ids.chatId,
+    approvalId,
+    decision: { approved, reason },
+  });
 }
 
 /**

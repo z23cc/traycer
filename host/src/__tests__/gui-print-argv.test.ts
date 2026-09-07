@@ -51,7 +51,10 @@ describe("guiPrintArgv", () => {
   });
 
   it("skips Claude permission prompts in full_access", () => {
-    // The edit hooks ride in as settings, ahead of the model and the prompt.
+    // The edit hooks ride in as settings, ahead of the model. No prompt in
+    // argv: it goes down stdin as a user record, on the same pipe the
+    // permission answers come back on - and the CLI always runs in `default`,
+    // because this host is the one deciding.
     expect(
       guiPrintArgv("claude", "hi", null, null, null, '{"hooks":{}}'),
     ).toEqual([
@@ -62,7 +65,12 @@ describe("guiPrintArgv", () => {
       "--verbose",
       "--settings",
       '{"hooks":{}}',
-      "hi",
+      "--permission-mode",
+      "default",
+      "--permission-prompt-tool",
+      "stdio",
+      "--input-format",
+      "stream-json",
     ]);
     expect(
       guiPrintArgv("claude", "hi", "sonnet", "full_access", null, null),
@@ -74,8 +82,12 @@ describe("guiPrintArgv", () => {
       "--verbose",
       "--model",
       "sonnet",
-      "--dangerously-skip-permissions",
-      "hi",
+      "--permission-mode",
+      "default",
+      "--permission-prompt-tool",
+      "stdio",
+      "--input-format",
+      "stream-json",
     ]);
   });
 
@@ -113,10 +125,14 @@ describe("guiPrintArgv", () => {
       "--verbose",
       "--model",
       "sonnet",
-      "--dangerously-skip-permissions",
+      "--permission-mode",
+      "default",
+      "--permission-prompt-tool",
+      "stdio",
+      "--input-format",
+      "stream-json",
       "--resume",
       "sess-9",
-      "next",
     ]);
   });
 });

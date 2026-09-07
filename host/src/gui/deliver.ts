@@ -26,8 +26,29 @@ export type GuiPrintTurnState = {
   readonly startedAt: number;
 };
 
+/**
+ * One permission question the CLI is waiting on. `requestId` is what the
+ * answer must quote; `approvalId` is what the GUI quotes, and the two are
+ * different ids because the GUI never sees the CLI's.
+ */
+export type PendingApproval = {
+  readonly kind: "tool" | "file_edit";
+  readonly approvalId: string;
+  readonly requestId: string;
+  readonly toolUseId: string | null;
+  readonly toolName: string;
+  readonly description: string;
+  readonly input: unknown;
+  readonly requestedAt: number;
+  /** The files a `file_edit` question is about; empty for a `tool` one. */
+  readonly paths: readonly string[];
+  readonly operation: "edit" | "create" | "delete" | null;
+};
+
 export class GuiRunRegistry {
   private readonly runs = new Map<string, ChildProcess>();
+  /** Open permission questions per chat, answered by the GUI or abandoned at turn end. */
+  private readonly approvals = new Map<string, Map<string, PendingApproval>>();
   private readonly prints = new Map<string, GuiPrintTurnState>();
   /**
    * The blocks each running turn has produced so far, folded from the same
@@ -68,6 +89,56 @@ export class GuiRunRegistry {
 
   blocksOf(agentId: string): readonly ContentBlock[] {
     return this.turnBlocks.get(agentId) ?? [];
+  }
+
+  addApproval(agentId: string, pending: PendingApproval): void {
+    const open =
+      this.approvals.get(agentId) ?? new Map<string, PendingApproval>();
+    open.set(pending.approvalId, pending);
+    this.approvals.set(agentId, open);
+  }
+
+  takeApproval(agentId: string, approvalId: string): PendingApproval | null {
+    const open = this.approvals.get(agentId);
+    const pending = open?.get(approvalId) ?? null;
+    if (open !== undefined && pending !== null) {
+      open.delete(approvalId);
+    }
+    return pending;
+  }
+
+  takeAllApprovals(agentId: string): readonly PendingApproval[] {
+    const open = this.approvals.get(agentId);
+    this.approvals.delete(agentId);
+    return open === undefined ? [] : [...open.values()];
+  }
+
+  approvalsOf(agentId: string): readonly PendingApproval[] {
+    return [...(this.approvals.get(agentId)?.values() ?? [])];
+  }
+
+  /**
+   * Answer one of the child's permission requests on its stdin. False when
+   * there is no child to answer - the run ended while the question was open.
+   */
+  answerPermission(
+    agentId: string,
+    requestId: string,
+    response:
+      | { readonly behavior: "allow"; readonly updatedInput: unknown }
+      | { readonly behavior: "deny"; readonly message: string },
+  ): boolean {
+    const child = this.runs.get(agentId);
+    if (child === undefined || child.stdin === null || !child.stdin.writable) {
+      return false;
+    }
+    child.stdin.write(
+      `${JSON.stringify({
+        type: "control_response",
+        response: { subtype: "success", request_id: requestId, response },
+      })}\n`,
+    );
+    return true;
   }
 
   endPrint(agentId: string, assistantMessageId: string | null): void {
@@ -197,13 +268,14 @@ export async function runGuiPrintTurn(
     // or not at all.
     input.harnessId === "claude" ? snapshotHookSettings(runtime.dataDir) : null,
   );
+  const stdioPrompt = input.harnessId === "claude";
   return new Promise((resolve, reject) => {
     let child: ChildProcess;
     try {
       child = spawn(binaryPath, args, {
         cwd: input.cwd,
         env: spawnEnvForProvider(runtime.store, providerId),
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: [stdioPrompt ? "pipe" : "ignore", "pipe", "pipe"],
         windowsHide: true,
       });
     } catch (error) {
@@ -211,6 +283,25 @@ export async function runGuiPrintTurn(
       return;
     }
     runtime.guiRuns.set(input.agentId, child);
+    // A child that exits before reading its prompt makes the write an EPIPE,
+    // which is the close handler's story to tell - not an unhandled stream
+    // error's.
+    child.stdin?.on("error", () => undefined);
+    if (stdioPrompt && child.stdin !== null) {
+      // The prompt, as the user record the stream-json input format takes.
+      // Stdin stays open after it: the permission answers ride the same pipe,
+      // and the run does not end until it closes - see the `result` handling
+      // below.
+      child.stdin.write(
+        `${JSON.stringify({
+          type: "user",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: input.prompt }],
+          },
+        })}\n`,
+      );
+    }
     // Declared before `emit`, which arms it when the provider rejects the
     // credential.
     const killTimer: { current: NodeJS.Timeout | null } = { current: null };
@@ -231,6 +322,18 @@ export async function runGuiPrintTurn(
           return;
         }
         streamed += event.text;
+      }
+      if (event.kind === "permission_request") {
+        // The CLI is now waiting on a person. A deadline that kept running
+        // would file their thinking time as a hang; it re-arms on the next
+        // line the CLI writes, which is the first thing it does once answered.
+        disarmDeadline();
+      }
+      if (event.kind === "usage" && stdioPrompt) {
+        // `usage` rides the `result` record, which is the turn's end. With
+        // stdin open the CLI would wait for a next turn; closing it is what
+        // lets the process exit and the run settle.
+        child.stdin?.end();
       }
       if (event.kind === "auth_failure" && authFailure === null) {
         // Stop rather than wait it out. The provider retries a rejected
@@ -261,6 +364,9 @@ export async function runGuiPrintTurn(
       }
     };
     const consumeStdout = (chunk: string): void => {
+      if (timer === null) {
+        armDeadline();
+      }
       stdout += chunk;
       if (structured) {
         consumeStructured(chunk);
@@ -310,15 +416,25 @@ export async function runGuiPrintTurn(
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
     });
-    const timer: NodeJS.Timeout = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      killTimer.current = setTimeout(() => {
-        child.kill("SIGKILL");
-      }, KILL_GRACE_MS);
-    }, PRINT_TIMEOUT_MS);
+    let timer: NodeJS.Timeout | null = null;
+    const armDeadline = (): void => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        killTimer.current = setTimeout(() => {
+          child.kill("SIGKILL");
+        }, KILL_GRACE_MS);
+      }, PRINT_TIMEOUT_MS);
+    };
+    const disarmDeadline = (): void => {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    };
+    armDeadline();
     const settle = (): void => {
-      clearTimeout(timer);
+      disarmDeadline();
       if (killTimer.current !== null) {
         clearTimeout(killTimer.current);
       }
@@ -411,13 +527,25 @@ export function guiPrintArgv(
     if (modelFlag !== null) {
       args.push("--model", modelFlag);
     }
-    if (permissionMode === "full_access") {
-      args.push("--dangerously-skip-permissions");
-    }
+    // Always `default`, whatever the chat's own mode: the CLI asks over stdio
+    // and THIS host answers - allowing everything under `full_access`, asking
+    // the user under `supervised` - which is what makes every mode one
+    // decision made in one place. `--dangerously-skip-permissions` would make
+    // the same decision inside the CLI, out of sight, and only for one mode.
+    args.push(
+      "--permission-mode",
+      "default",
+      "--permission-prompt-tool",
+      "stdio",
+      "--input-format",
+      "stream-json",
+    );
     if (sessionId !== null) {
       args.push("--resume", sessionId);
     }
-    args.push(prompt);
+    // No prompt here: `--input-format stream-json` reads it from stdin, which
+    // is also the channel the permission answers go back on.
+    void permissionMode;
     return args;
   }
   if (harnessId === "codex") {

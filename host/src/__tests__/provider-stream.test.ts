@@ -389,6 +389,34 @@ describe("parseProviderStdoutLine", () => {
     ]);
   });
 
+  /**
+   * Recorded live with `--permission-prompt-tool stdio`: the CLI asks before
+   * a `Write`, names the call, and waits. Only `can_use_tool` is read - the
+   * channel carries other control subtypes, and those are left unanswered
+   * rather than answered wrong.
+   */
+  it("reads a permission request off the stdio control channel", () => {
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"control_request","request_id":"d615b557","request":{"subtype":"can_use_tool","tool_name":"Write","display_name":"Write","input":{"file_path":"/tmp/perm-new.txt","content":"hello"},"description":"perm-new.txt","permission_suggestions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}],"tool_use_id":"toolu_01RQ"}}',
+      ),
+    ).toEqual([
+      {
+        kind: "permission_request",
+        requestId: "d615b557",
+        toolUseId: "toolu_01RQ",
+        toolName: "Write",
+        description: "perm-new.txt",
+        input: { file_path: "/tmp/perm-new.txt", content: "hello" },
+      },
+    ]);
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"control_request","request_id":"x","request":{"subtype":"initialize"}}',
+      ),
+    ).toEqual([]);
+  });
+
   it("ignores unstructured CLI text so the plain-stdout path can take over", () => {
     expect(parseProviderStdoutLine("assistant-ok")).toEqual([]);
   });

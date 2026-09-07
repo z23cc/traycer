@@ -244,6 +244,7 @@ describe("local GUI send without cloud login", () => {
       clientActionId: "action-2",
       messageId: "msg-user-2",
       text: "second turn",
+      permissionMode: null,
     });
     expect(frames.some((frame) => jsonHas(frame, "actionAck"))).toBe(true);
     expect(frames.some((frame) => jsonHas(frame, "accepted"))).toBe(true);
@@ -399,6 +400,7 @@ describe("local GUI send without cloud login", () => {
       clientActionId: "action-4a",
       messageId: "msg-user-4a",
       text: "keep this",
+      permissionMode: null,
     });
     await waitForChatText(
       streamUrl,
@@ -414,6 +416,7 @@ describe("local GUI send without cloud login", () => {
       clientActionId: "action-4b",
       messageId: "msg-user-4b",
       text: "drop this",
+      permissionMode: null,
     });
     await waitForChatText(streamUrl, "epic-4", "chat-4", "drop this", 40, 50);
     await waitForChatText(
@@ -608,6 +611,7 @@ describe("local GUI send without cloud login", () => {
       clientActionId: "action-7",
       messageId: "msg-user-7",
       text: "plan it",
+      permissionMode: null,
     });
     const snapshot = await waitForChatText(
       streamUrl,
@@ -698,6 +702,7 @@ describe("local GUI send without cloud login", () => {
       clientActionId: "action-8",
       messageId: "msg-user-8",
       text: "edit it",
+      permissionMode: null,
     });
     await waitForChatText(streamUrl, "epic-8", "chat-8", "edit-ok", 80, 50);
 
@@ -781,6 +786,7 @@ describe("local GUI send without cloud login", () => {
       clientActionId: "action-6",
       messageId: "msg-user-6",
       text: "break something",
+      permissionMode: null,
     });
     await waitForChatText(
       streamUrl,
@@ -831,6 +837,7 @@ describe("local GUI send without cloud login", () => {
       clientActionId: "action-9",
       messageId: "msg-user-9",
       text: "do things",
+      permissionMode: null,
     });
     const frames = await waitForSealedBlocks(
       streamUrl,
@@ -900,6 +907,7 @@ describe("local GUI send without cloud login", () => {
       clientActionId: "action-10",
       messageId: "msg-user-10",
       text: "die halfway",
+      permissionMode: null,
     });
     const frames = await waitForSealedBlocks(
       streamUrl,
@@ -973,6 +981,7 @@ describe("local GUI send without cloud login", () => {
       clientActionId: "action-11",
       messageId: "msg-user-11",
       text: "delegate it",
+      permissionMode: null,
     });
     const frames = await waitForSealedBlocks(
       streamUrl,
@@ -1073,6 +1082,7 @@ describe("local GUI send without cloud login", () => {
       clientActionId: "action-12",
       messageId: "msg-user-12",
       text: "edit it",
+      permissionMode: null,
     });
     const frames = await waitForSealedBlocks(
       streamUrl,
@@ -1292,7 +1302,385 @@ describe("local GUI send without cloud login", () => {
     );
     started.runtime.guiRuns.endPrint("chat-13", "assistant-13");
   });
+
+  /**
+   * The permission flow, end to end. The fake CLI does what the real one does
+   * on the stdio channel: reads the prompt off stdin, asks before its tool,
+   * and waits for the answer - then reports the tool as run or refused by
+   * what it was told. Under `supervised` the question reaches the GUI.
+   */
+  it("asks the user before a tool under supervised, and relays the answer", async () => {
+    const setup = await bootWithCli(
+      askingCli("Bash", '{"command":"rm -rf build"}', "Run rm -rf build"),
+    );
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-14", "chat-14");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-14",
+      chatId: "chat-14",
+      clientActionId: "action-14",
+      messageId: "msg-user-14",
+      text: "clean the build",
+      permissionMode: "supervised",
+    });
+    // The question lands on the snapshot, which is where a reopened tab
+    // finds it.
+    const asked = await waitForSnapshot(
+      streamUrl,
+      "epic-14",
+      "chat-14",
+      (snapshot) => readArray(snapshot, "pendingApprovals").length === 1,
+      80,
+      50,
+    );
+    const pending = readArray(asked, "pendingApprovals")[0];
+    expect(pending).toMatchObject({
+      toolName: "Bash",
+      description: "Run rm -rf build",
+      input: { command: "rm -rf build" },
+      kind: "tool",
+    });
+    const approvalId = String(Reflect.get(pending ?? {}, "approvalId"));
+    expect(approvalId.endsWith(":approval")).toBe(true);
+    // Answered: the ack, the resolution frame, and the CLI carrying on.
+    const answered = await sendActionUntil(
+      streamUrl,
+      {
+        kind: "approvalDecision",
+        epicId: "epic-14",
+        chatId: "chat-14",
+        clientActionId: "decide-14",
+        approvalId,
+        decision: { approved: true },
+      },
+      "approvalResolved",
+    );
+    expect(answered).toContainEqual(
+      expect.objectContaining({ kind: "actionAck", status: "accepted" }),
+    );
+    expect(answered).toContainEqual(
+      expect.objectContaining({
+        kind: "approvalResolved",
+        approvalId,
+        decision: { approved: true },
+      }),
+    );
+    const frames = await waitForSealedBlocks(
+      streamUrl,
+      "epic-14",
+      "chat-14",
+      "approval",
+      80,
+      50,
+    );
+    const blocks = assistantBlocks(frames, "epic-14", "chat-14");
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "approval"),
+    ).toMatchObject({
+      blockId: approvalId,
+      toolName: "Bash",
+      decision: { approved: true, reason: null },
+    });
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "tool_call"),
+    ).toMatchObject({ toolName: "Bash", status: "completed" });
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "text"),
+    ).toMatchObject({ text: "allowed-ok" });
+    // A second answer has nothing to land on.
+    expect(
+      await sendActionUntil(
+        streamUrl,
+        {
+          kind: "approvalDecision",
+          epicId: "epic-14",
+          chatId: "chat-14",
+          clientActionId: "decide-14b",
+          approvalId,
+          decision: { approved: true },
+        },
+        "actionAck",
+      ),
+    ).toContainEqual(
+      expect.objectContaining({
+        status: "rejected",
+        code: "APPROVAL_NOT_FOUND",
+      }),
+    );
+  });
+
+  /**
+   * An edit is a file question, with the paths the GUI shows and the frame
+   * the file panel listens on. Denied: the CLI is told why, the tool errors,
+   * and the log says who said no.
+   */
+  it("asks about a file edit as a file edit, and relays a denial", async () => {
+    const target = join(tmpdir(), `traycer-perm-${String(Date.now())}.ts`);
+    const setup = await bootWithCli(
+      askingCli("Write", `{"file_path":"${target}","content":"x"}`, "perm.ts"),
+    );
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-15", "chat-15");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-15",
+      chatId: "chat-15",
+      clientActionId: "action-15",
+      messageId: "msg-user-15",
+      text: "write it",
+      permissionMode: "supervised",
+    });
+    const asked = await waitForSnapshot(
+      streamUrl,
+      "epic-15",
+      "chat-15",
+      (snapshot) =>
+        readArray(snapshot, "pendingFileEditApprovals").length === 1,
+      80,
+      50,
+    );
+    const pending = readArray(asked, "pendingFileEditApprovals")[0];
+    expect(pending).toMatchObject({
+      toolName: "Write",
+      paths: [target],
+      // Not on disk yet, so the edit would create it.
+      operation: "create",
+    });
+    expect(readArray(asked, "pendingApprovals")).toEqual([]);
+    const approvalId = String(Reflect.get(pending ?? {}, "approvalId"));
+    const answered = await sendActionUntil(
+      streamUrl,
+      {
+        kind: "fileEditApprovalDecision",
+        epicId: "epic-15",
+        chatId: "chat-15",
+        clientActionId: "decide-15",
+        approvalId,
+        decision: { approved: false, reason: "not that file" },
+      },
+      "fileEditApprovalResolved",
+    );
+    expect(answered).toContainEqual(
+      expect.objectContaining({
+        kind: "fileEditApprovalResolved",
+        approvalId,
+        decision: { approved: false, reason: "not that file" },
+      }),
+    );
+    const frames = await waitForSealedBlocks(
+      streamUrl,
+      "epic-15",
+      "chat-15",
+      "tool_call",
+      80,
+      50,
+    );
+    const blocks = assistantBlocks(frames, "epic-15", "chat-15");
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "tool_call"),
+    ).toMatchObject({
+      toolName: "Write",
+      status: "errored",
+      error: "not that file",
+    });
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "text"),
+    ).toMatchObject({ text: "denied-ok" });
+    const events = readArray(
+      Reflect.get(
+        Reflect.get(
+          frames.find((f) => Reflect.get(f ?? {}, "kind") === "snapshot") ?? {},
+          "snapshot",
+        ) ?? {},
+        "tail",
+      ) ?? {},
+      "events",
+    ).map((event) => Reflect.get(event ?? {}, "type"));
+    expect(events).toContain("approval.requested");
+    expect(events).toContain("approval.denied");
+  });
+
+  /**
+   * `full_access` is the host answering yes, not the CLI never asking: the
+   * CLI still runs in `default` and asks, and nothing reaches the GUI.
+   */
+  it("answers for the user under full_access without asking", async () => {
+    const setup = await bootWithCli(
+      askingCli("Bash", '{"command":"ls"}', "Run ls"),
+    );
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-16", "chat-16");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    const sent = await sendOnChat(streamUrl, {
+      epicId: "epic-16",
+      chatId: "chat-16",
+      clientActionId: "action-16",
+      messageId: "msg-user-16",
+      text: "list",
+      permissionMode: "full_access",
+    });
+    expect(
+      sent.some((f) => Reflect.get(f ?? {}, "kind") === "approvalRequested"),
+    ).toBe(false);
+    const frames = await waitForSealedBlocks(
+      streamUrl,
+      "epic-16",
+      "chat-16",
+      "tool_call",
+      80,
+      50,
+    );
+    const blocks = assistantBlocks(frames, "epic-16", "chat-16");
+    expect(
+      blocks.some((block) => Reflect.get(block, "type") === "approval"),
+    ).toBe(false);
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "tool_call"),
+    ).toMatchObject({ toolName: "Bash", status: "completed" });
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "text"),
+    ).toMatchObject({ text: "allowed-ok" });
+  });
+
+  /**
+   * A stop with a question open answers it for the user. The CLI is told
+   * "Aborted", the frame resolves, and the log says the question was
+   * abandoned rather than denied.
+   */
+  it("abandons an open question when the turn is stopped", async () => {
+    const setup = await bootWithCli(
+      askingCli("Bash", '{"command":"ls"}', "Run ls"),
+    );
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-17", "chat-17");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-17",
+      chatId: "chat-17",
+      clientActionId: "action-17",
+      messageId: "msg-user-17",
+      text: "list",
+      permissionMode: "supervised",
+    });
+    const asked = await waitForSnapshot(
+      streamUrl,
+      "epic-17",
+      "chat-17",
+      (snapshot) => readArray(snapshot, "pendingApprovals").length === 1,
+      80,
+      50,
+    );
+    const approvalId = String(
+      Reflect.get(readArray(asked, "pendingApprovals")[0] ?? {}, "approvalId"),
+    );
+    const stopped = await sendActionUntil(
+      streamUrl,
+      {
+        kind: "stop",
+        epicId: "epic-17",
+        chatId: "chat-17",
+        clientActionId: "stop-17",
+      },
+      "approvalResolved",
+    );
+    expect(stopped).toContainEqual(
+      expect.objectContaining({
+        kind: "approvalResolved",
+        approvalId,
+        decision: { approved: false, reason: "Aborted" },
+      }),
+    );
+    const after = await waitForSnapshot(
+      streamUrl,
+      "epic-17",
+      "chat-17",
+      (snapshot) =>
+        Reflect.get(snapshot, "runStatus") === "idle" &&
+        readArray(snapshot, "pendingApprovals").length === 0,
+      80,
+      50,
+    );
+    expect(
+      readArray(Reflect.get(after, "tail") ?? {}, "events").map((e) =>
+        Reflect.get(e ?? {}, "type"),
+      ),
+    ).toContain("approval.abandoned");
+  });
 });
+
+/**
+ * A fake CLI that speaks the stdio permission channel the way the real one
+ * does: the prompt arrives on stdin, the question goes out with the call's
+ * id, and the answer decides whether the tool "ran".
+ */
+function askingCli(
+  toolName: string,
+  inputJson: string,
+  description: string,
+): string {
+  return [
+    "#!/bin/sh",
+    "read -r prompt",
+    `printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-perm"}'`,
+    `printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_q1","name":"${toolName}","input":${inputJson}}]}}'`,
+    `printf '%s\n' '{"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"${toolName}","input":${inputJson},"description":"${description}","tool_use_id":"toolu_q1"}}'`,
+    "read -r answer",
+    'case "$answer" in',
+    '  *\'"behavior":"allow"\'*)',
+    `    printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","content":"ok","tool_use_id":"toolu_q1"}]}}'`,
+    `    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"allowed-ok"}]}}'`,
+    "    ;;",
+    "  *)",
+    `    reason=$(printf '%s' "$answer" | sed -e 's/.*"message":"\\([^"]*\\)".*/\\1/')`,
+    `    printf '%s\n' "{\\"type\\":\\"user\\",\\"message\\":{\\"content\\":[{\\"type\\":\\"tool_result\\",\\"content\\":\\"$reason\\",\\"is_error\\":true,\\"tool_use_id\\":\\"toolu_q1\\"}]}}"`,
+    `    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"denied-ok"}]}}'`,
+    "    ;;",
+    "esac",
+    `printf '%s\n' '{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}'`,
+    "",
+  ].join("\n");
+}
+
+/** Poll fresh subscribes until the snapshot satisfies `ready`; returns it. */
+async function waitForSnapshot(
+  url: string,
+  epicId: string,
+  chatId: string,
+  ready: (snapshot: object) => boolean,
+  attempts: number,
+  delayMs: number,
+): Promise<object> {
+  let last: object = {};
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const frames = await collectChatFrames(url, epicId, chatId);
+    const frame = frames.find(
+      (f) => Reflect.get(f ?? {}, "kind") === "snapshot",
+    );
+    const snapshot = Reflect.get(frame ?? {}, "snapshot");
+    if (snapshot !== null && typeof snapshot === "object") {
+      last = snapshot;
+      if (ready(snapshot)) {
+        return snapshot;
+      }
+    }
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, delayMs);
+    });
+  }
+  throw new Error(
+    `snapshot never became ready: ${JSON.stringify(last).slice(0, 400)}`,
+  );
+}
+
+function readArray(record: object, key: string): readonly unknown[] {
+  const value = Reflect.get(record, key);
+  return Array.isArray(value) ? value : [];
+}
 
 /**
  * What one hook invocation leaves behind, written by hand: the body in the
@@ -1844,6 +2232,8 @@ async function sendOnChat(
     readonly clientActionId: string;
     readonly messageId: string;
     readonly text: string;
+    /** Null is the tests' default, `full_access`. */
+    readonly permissionMode: string | null;
   },
 ): Promise<unknown[]> {
   const socket = new WebSocket(url);
@@ -1887,7 +2277,7 @@ async function sendOnChat(
             settings: {
               harnessId: "claude",
               model: "default",
-              permissionMode: "full_access",
+              permissionMode: input.permissionMode ?? "full_access",
               reasoningEffort: null,
               serviceTier: null,
               agentMode: "regular",

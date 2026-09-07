@@ -25,7 +25,8 @@ import {
 } from "../snapshots/snapshots";
 import { providerIdForHarness } from "../gui/harness-map";
 import { envCredentialVarForProvider } from "../providers/service";
-import { runGuiPrintTurn } from "../gui/deliver";
+import { runGuiPrintTurn, type PendingApproval } from "../gui/deliver";
+import { isAbsolute, relative } from "node:path";
 import type { QueuedPrompt } from "../gui/queue";
 import { LOCAL_USER_ID } from "../local-user";
 import type { HostRuntime } from "../runtime";
@@ -40,12 +41,13 @@ import type {
   ProviderStreamEvent,
   ProviderTokenUsage,
 } from "../gui/provider-stream";
-import { notify } from "../gui/notifications";
+import { broadcastReadState, notify } from "../gui/notifications";
 import { recordUsageFact } from "../gui/usage";
 import {
   assistantReasoningBlockId,
   assistantTextBlockId,
   broadcastAccumulatedChanges,
+  broadcastChatFrame,
   broadcastBlockDelta,
   broadcastChatSnapshot,
   broadcastEventAppended,
@@ -440,6 +442,7 @@ async function runAndPersistAssistant(
     session === null
       ? printPromptFromTurns(chat?.turns ?? [], input.prompt)
       : input.prompt;
+  const permissionMode = readPermissionMode(chat?.runSettings);
   const textBlockId = assistantTextBlockId(input.assistantMessageId);
   const reasoningBlockId = assistantReasoningBlockId(input.assistantMessageId);
   let assembled = "";
@@ -752,6 +755,12 @@ async function runAndPersistAssistant(
       });
       return;
     }
+    if (event.kind === "permission_request") {
+      void decidePermission(runtime, input, event, permissionMode, cwd, {
+        userMessageId: print?.userMessageId ?? null,
+      });
+      return;
+    }
     if (event.kind === "auth_failure") {
       authFailure = event;
       return;
@@ -860,7 +869,7 @@ async function runAndPersistAssistant(
       prompt,
       cwd,
       model: input.model ?? readModelSlug(chat?.runSettings),
-      permissionMode: readPermissionMode(chat?.runSettings),
+      permissionMode,
       sessionId: session,
       onEvent: handleEvent,
     });
@@ -1030,6 +1039,343 @@ function recordFileChange(
     chat.accumulatedChanges[existing] = row;
   }
   return row;
+}
+
+/** The tools whose permission question is about files, and the keys their paths ride. */
+const EDIT_TOOLS: ReadonlySet<string> = new Set([
+  "Edit",
+  "MultiEdit",
+  "Write",
+  "NotebookEdit",
+]);
+const EDIT_PATH_KEYS = [
+  "file_path",
+  "path",
+  "filePath",
+  "notebook_path",
+  "notebookPath",
+] as const;
+
+function editPaths(input: unknown): string[] {
+  if (input === null || typeof input !== "object") {
+    return [];
+  }
+  const paths = new Set<string>();
+  for (const key of EDIT_PATH_KEYS) {
+    const value = Reflect.get(input, key);
+    if (typeof value === "string" && value.length > 0) {
+      paths.add(value);
+    }
+  }
+  return [...paths];
+}
+
+function isInside(root: string, filePath: string): boolean {
+  const rel = relative(root, filePath);
+  return rel.length > 0 && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+/**
+ * The host's answer to "may this tool run", which is the one place every
+ * permission mode is decided - the CLI is always run in `default` and asks.
+ *
+ * Mirrors the released host's callback: `full_access` allows; an edit tool is
+ * a file question, auto-approved under `auto_accept_edits` when every path is
+ * inside the workspace and asked otherwise; anything else is asked under
+ * every mode but `full_access`. `ExitPlanMode` is refused outright: the
+ * released host turns it into a plan card, and this host runs no plan mode,
+ * so an allow would hand the CLI a mode nothing here can follow.
+ */
+async function decidePermission(
+  runtime: HostRuntime,
+  input: { readonly epicId: string; readonly chatId: string },
+  request: {
+    readonly requestId: string;
+    readonly toolUseId: string | null;
+    readonly toolName: string;
+    readonly description: string;
+    readonly input: unknown;
+  },
+  permissionMode: string | null,
+  cwd: string,
+  turn: { readonly userMessageId: string | null },
+): Promise<void> {
+  const answer = (
+    response:
+      | { readonly behavior: "allow"; readonly updatedInput: unknown }
+      | { readonly behavior: "deny"; readonly message: string },
+  ): void => {
+    runtime.guiRuns.answerPermission(input.chatId, request.requestId, response);
+  };
+  if (request.toolName === "ExitPlanMode") {
+    answer({
+      behavior: "deny",
+      message:
+        "This host does not run plan mode. Continue without switching modes.",
+    });
+    return;
+  }
+  if (permissionMode === "full_access") {
+    answer({ behavior: "allow", updatedInput: request.input });
+    return;
+  }
+  const paths = EDIT_TOOLS.has(request.toolName)
+    ? editPaths(request.input)
+    : [];
+  const isFileEdit = paths.length > 0;
+  if (
+    isFileEdit &&
+    permissionMode === "auto_accept_edits" &&
+    paths.every((path) => isInside(cwd, path))
+  ) {
+    answer({ behavior: "allow", updatedInput: request.input });
+    return;
+  }
+  const id = request.toolUseId ?? request.requestId;
+  const now = Date.now();
+  const pending: PendingApproval = isFileEdit
+    ? {
+        kind: "file_edit",
+        approvalId: `${id}:file-edit`,
+        requestId: request.requestId,
+        toolUseId: request.toolUseId,
+        toolName: request.toolName,
+        description: request.description,
+        input: request.input,
+        requestedAt: now,
+        paths,
+        operation: fileChangeOperation(
+          request.toolName === "NotebookEdit" &&
+            Reflect.get(request.input ?? {}, "edit_mode") === "delete"
+            ? "delete"
+            : null,
+          paths[0] ?? "",
+        ),
+      }
+    : {
+        kind: "tool",
+        approvalId: `${id}:approval`,
+        requestId: request.requestId,
+        toolUseId: request.toolUseId,
+        toolName: request.toolName,
+        description: request.description,
+        input: request.input,
+        requestedAt: now,
+        paths: [],
+        operation: null,
+      };
+  runtime.guiRuns.addApproval(input.chatId, pending);
+  if (pending.kind === "tool") {
+    broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+      type: "approval.requested",
+      blockId: pending.approvalId,
+      timestamp: now,
+      toolName: pending.toolName,
+      description: pending.description,
+      input: pending.input,
+    });
+  }
+  broadcastChatFrame(
+    runtime,
+    input.epicId,
+    input.chatId,
+    pending.kind === "tool"
+      ? { kind: "approvalRequested", approval: approvalState(pending) }
+      : {
+          kind: "fileEditApprovalRequested",
+          approval: fileEditApprovalState(pending),
+        },
+  );
+  broadcastEventAppended(runtime, input.epicId, input.chatId, {
+    type: "approval.requested",
+    message: pending.description,
+    turnId: runtime.guiRuns.printState(input.chatId)?.turnId ?? null,
+    messageId: turn.userMessageId,
+    clientActionId: null,
+    severity: "warning",
+  });
+  await notify(runtime, {
+    id: `approval.requested:${input.chatId}`,
+    kind: "approval.requested",
+    epicId: input.epicId,
+    chatId: input.chatId,
+    severity: "needs_action",
+    outcome: null,
+    sourceRef: pending.approvalId,
+    message: `Approval needed: ${pending.description}`,
+  });
+  broadcastChatSnapshot(runtime, input.epicId, input.chatId);
+}
+
+export function approvalState(pending: PendingApproval): {
+  readonly approvalId: string;
+  readonly toolName: string;
+  readonly description: string;
+  readonly input: unknown;
+  readonly requestedAt: number;
+  readonly kind: "tool";
+  readonly planId: null;
+  readonly actions: readonly never[];
+} {
+  return {
+    approvalId: pending.approvalId,
+    toolName: pending.toolName,
+    description: pending.description,
+    input: pending.input ?? null,
+    requestedAt: pending.requestedAt,
+    kind: "tool",
+    planId: null,
+    actions: [],
+  };
+}
+
+export function fileEditApprovalState(pending: PendingApproval): {
+  readonly approvalId: string;
+  readonly toolName: string;
+  readonly description: string;
+  readonly paths: readonly string[];
+  readonly operation: CheckpointFileOperation;
+  readonly input: unknown;
+  readonly requestedAt: number;
+} {
+  return {
+    approvalId: pending.approvalId,
+    toolName: pending.toolName,
+    description: pending.description,
+    paths: pending.paths,
+    operation: pending.operation ?? "edit",
+    input: pending.input ?? null,
+    requestedAt: pending.requestedAt,
+  };
+}
+
+/**
+ * The GUI's decision on one open question, relayed to the CLI. False when
+ * there is no such question open - already answered, or abandoned with the
+ * turn that asked it.
+ */
+export async function resolveApproval(
+  runtime: HostRuntime,
+  input: {
+    readonly epicId: string;
+    readonly chatId: string;
+    readonly approvalId: string;
+    readonly decision: {
+      readonly approved: boolean;
+      readonly reason: string | null;
+    };
+  },
+): Promise<boolean> {
+  const pending = runtime.guiRuns.takeApproval(input.chatId, input.approvalId);
+  if (pending === null) {
+    return false;
+  }
+  runtime.guiRuns.answerPermission(
+    input.chatId,
+    pending.requestId,
+    input.decision.approved
+      ? { behavior: "allow", updatedInput: pending.input }
+      : {
+          behavior: "deny",
+          message: input.decision.reason ?? "Permission denied by user",
+        },
+  );
+  await settleApproval(runtime, input.epicId, input.chatId, pending, {
+    approved: input.decision.approved,
+    reason: input.decision.reason,
+    abandoned: false,
+  });
+  return true;
+}
+
+async function abandonApprovals(
+  runtime: HostRuntime,
+  epicId: string,
+  chatId: string,
+  reason: string,
+): Promise<void> {
+  for (const pending of runtime.guiRuns.takeAllApprovals(chatId)) {
+    runtime.guiRuns.answerPermission(chatId, pending.requestId, {
+      behavior: "deny",
+      message: reason,
+    });
+    await settleApproval(runtime, epicId, chatId, pending, {
+      approved: false,
+      reason,
+      abandoned: true,
+    });
+  }
+}
+
+/** Everything a decision leaves behind: the block, the frame, the log, the notification. */
+async function settleApproval(
+  runtime: HostRuntime,
+  epicId: string,
+  chatId: string,
+  pending: PendingApproval,
+  outcome: {
+    readonly approved: boolean;
+    readonly reason: string | null;
+    readonly abandoned: boolean;
+  },
+): Promise<void> {
+  const now = Date.now();
+  const decision = {
+    approved: outcome.approved,
+    ...(outcome.reason === null ? {} : { reason: outcome.reason }),
+  };
+  if (pending.kind === "tool") {
+    broadcastBlockDelta(runtime, epicId, chatId, {
+      type: "approval.resolved",
+      blockId: pending.approvalId,
+      timestamp: now,
+      decision,
+    });
+  }
+  broadcastChatFrame(runtime, epicId, chatId, {
+    kind:
+      pending.kind === "tool" ? "approvalResolved" : "fileEditApprovalResolved",
+    approvalId: pending.approvalId,
+    decision,
+    resolvedAt: now,
+  });
+  if (!outcome.approved) {
+    broadcastEventAppended(runtime, epicId, chatId, {
+      type: outcome.abandoned ? "approval.abandoned" : "approval.denied",
+      message: outcome.reason ?? "Permission denied by user",
+      turnId: runtime.guiRuns.printState(chatId)?.turnId ?? null,
+      messageId: null,
+      clientActionId: null,
+      severity: "warning",
+    });
+  }
+  if (runtime.guiRuns.approvalsOf(chatId).length === 0) {
+    await resolveNotification(runtime, `approval.requested:${chatId}`, now);
+  }
+  broadcastChatSnapshot(runtime, epicId, chatId);
+}
+
+/** The prompt-kind notification, resolved the way the read-state RPC resolves one. */
+async function resolveNotification(
+  runtime: HostRuntime,
+  id: string,
+  now: number,
+): Promise<void> {
+  const touched = await runtime.store.mutate((state) => {
+    const row = state.notifications.find(
+      (entry) => entry.id === id && entry.resolvedAt === null,
+    );
+    if (row === undefined) {
+      return false;
+    }
+    row.resolvedAt = now;
+    row.readAt = row.readAt ?? now;
+    row.updatedAt = now;
+    return true;
+  });
+  if (touched) {
+    broadcastReadState(runtime, [id], now, now);
+  }
 }
 
 type PendingEdit = {
@@ -1445,6 +1791,15 @@ async function finishPrint(
     clientActionId: null,
     severity: outcome === "turn.interrupted" ? "error" : "info",
   });
+  // A question nobody answered before the turn ended is answered for them,
+  // in the negative, and said so - the CLI is gone or going, and a card left
+  // "pending" would offer a decision with nowhere to land.
+  await abandonApprovals(
+    runtime,
+    epicId,
+    chatId,
+    failure === null && !stopped ? "Turn ended before a decision." : "Aborted",
+  );
   // Read before `endPrint`, which is what a next turn resets.
   const blocks = runtime.guiRuns.blocksOf(chatId);
   runtime.guiRuns.endPrint(chatId, assistantMessageId);

@@ -118,6 +118,20 @@ export type ProviderStreamEvent =
       readonly parentToolUseId: string;
       readonly events: readonly ProviderStreamEvent[];
     }
+  /**
+   * Claude asking whether a tool may run, over the stdio permission channel
+   * (`--permission-prompt-tool stdio`). Recorded live: the request names the
+   * tool, its input, a description, and the call's id - and the run waits
+   * for a `control_response` on stdin before doing anything else.
+   */
+  | {
+      readonly kind: "permission_request";
+      readonly requestId: string;
+      readonly toolUseId: string | null;
+      readonly toolName: string;
+      readonly description: string;
+      readonly input: unknown;
+    }
   | { readonly kind: "usage"; readonly usage: ProviderTokenUsage };
 
 export function parseProviderStdoutLine(line: string): ProviderStreamEvent[] {
@@ -173,6 +187,9 @@ function claudeEvents(record: object): ProviderStreamEvent[] {
 
 function claudeRecordEvents(record: object): ProviderStreamEvent[] {
   const type = readString(record, "type");
+  if (type === "control_request") {
+    return claudePermissionRequest(record);
+  }
   if (type === "stream_event") {
     const event = Reflect.get(record, "event");
     if (event === null || typeof event !== "object" || Array.isArray(event)) {
@@ -229,6 +246,34 @@ function claudeSystemEvent(record: object): ProviderStreamEvent[] {
       kind: "auth_failure",
       status,
       detail: readString(record, "error") ?? "authentication_failed",
+    },
+  ];
+}
+
+function claudePermissionRequest(record: object): ProviderStreamEvent[] {
+  const requestId = readString(record, "request_id");
+  const request = Reflect.get(record, "request");
+  if (requestId === null || request === null || typeof request !== "object") {
+    return [];
+  }
+  // The one control subtype this host answers. Anything else on the channel
+  // is left unanswered rather than mis-answered.
+  if (readString(request, "subtype") !== "can_use_tool") {
+    return [];
+  }
+  const toolName = readString(request, "tool_name");
+  if (toolName === null) {
+    return [];
+  }
+  return [
+    {
+      kind: "permission_request",
+      requestId,
+      toolUseId: readString(request, "tool_use_id"),
+      toolName,
+      description:
+        readString(request, "description") ?? `Claude wants to use ${toolName}`,
+      input: Reflect.get(request, "input") ?? {},
     },
   ];
 }
