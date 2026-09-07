@@ -1808,6 +1808,14 @@ describe("local GUI send without cloud login", () => {
         decision: { approved: false, reason: "Aborted" },
       }),
     );
+    // The stop shows as `stopping` before the process is gone, as released.
+    expect(stopped).toContainEqual(
+      expect.objectContaining({
+        kind: "turnStateChanged",
+        runStatus: "stopping",
+        activeTurn: expect.objectContaining({ status: "stopping" }),
+      }),
+    );
     const after = await waitForSnapshot(
       streamUrl,
       "epic-17",

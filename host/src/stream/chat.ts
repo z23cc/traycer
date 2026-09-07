@@ -222,7 +222,7 @@ export function broadcastTurnStateChanged(
     hasBinaryPayload: false,
     epicId,
     chatId,
-    runStatus: print === null ? "idle" : "running",
+    runStatus: runStatusOf(runtime, chatId, print),
     activeTurn: activeTurnFrame(runtime, print, chatId),
     backgroundItems: [...runtime.guiRuns.backgroundItemsOf(chatId)],
     turnInProgress: print !== null,
@@ -425,7 +425,7 @@ export function chatWindowedTranscript(
           canAct: true,
         },
         queue: runtime.queue.snapshot(chatId),
-        runStatus: print === null ? "idle" : "running",
+        runStatus: runStatusOf(runtime, chatId, print),
         activeTurn: activeTurnFrame(runtime, print, chatId),
         pendingApprovals: runtime.guiRuns
           .approvalsOf(chatId)
@@ -711,7 +711,9 @@ function activeTurnFrame(
       ?.runSettings ?? null;
   return {
     turnId: print.turnId,
-    status: "running" as const,
+    status: runtime.guiRuns.wasStopped(chatId)
+      ? ("stopping" as const)
+      : ("running" as const),
     harnessId: harness.data,
     model: print.model.length > 0 ? print.model : "default",
     reasoningEffort: readSettingString(settings, "reasoningEffort"),
@@ -727,6 +729,22 @@ function activeTurnFrame(
     sameTurnSteeringSupported:
       print.harnessId === "claude" || print.harnessId === "codex",
   };
+}
+
+/**
+ * `stopping` between the stop request and the process's exit, as released:
+ * the GUI shows the stop taking effect, and a steer aimed at the turn is
+ * refused rather than written into a process about to die.
+ */
+export function runStatusOf(
+  runtime: HostRuntime,
+  chatId: string,
+  print: GuiPrintTurnState | null,
+): "idle" | "running" | "stopping" {
+  if (print === null) {
+    return "idle";
+  }
+  return runtime.guiRuns.wasStopped(chatId) ? "stopping" : "running";
 }
 
 function readSettingString(settings: unknown, key: string): string | null {

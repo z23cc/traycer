@@ -43,6 +43,7 @@ import {
   broadcastErrorNotice,
   broadcastEventAppended,
   broadcastQueueChanged,
+  broadcastTurnStateChanged,
   broadcastWorktreeStateChanged,
 } from "./chat";
 
@@ -219,6 +220,7 @@ async function handleChatSend(
     if (
       Reflect.get(parsed, "deliveryPolicy") === "after_safe_point" &&
       runtime.guiRuns.printState(ids.chatId) !== null &&
+      !runtime.guiRuns.wasStopped(ids.chatId) &&
       !runtime.queue.isSteering(ids.chatId)
     ) {
       await steerQueuedPrompt(runtime, ids.epicId, ids.chatId, item);
@@ -286,6 +288,10 @@ function handleChatStop(
     stopped ? null : "No turn in progress",
     stopped ? null : "TURN_NOT_ACTIVE",
   );
+  if (stopped) {
+    // `stopping` until the process is gone; its exit is what makes it idle.
+    broadcastTurnStateChanged(runtime, ids.epicId, ids.chatId);
+  }
   if (!stopped) {
     broadcastErrorNotice(runtime, ids.epicId, ids.chatId, {
       code: "NO_ACTIVE_TURN",
@@ -1144,7 +1150,10 @@ async function handleChatQueueSteerNow(
   const reject = (reason: string, code: string): void => {
     ack(socket, ids, "queueSteerNow", "rejected", reason, code);
   };
-  if (runtime.guiRuns.printState(ids.chatId) === null) {
+  if (
+    runtime.guiRuns.printState(ids.chatId) === null ||
+    runtime.guiRuns.wasStopped(ids.chatId)
+  ) {
     reject("There is no active turn to steer.", "NO_ACTIVE_TURN");
     return;
   }
