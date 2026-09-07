@@ -33,7 +33,6 @@ import { serveWorktreeDelete } from "./worktree-delete";
 import { EpicStateSubscriber } from "./epic-state";
 import {
   sendAgentActivitySnapshot,
-  sendAnalogStreamSnapshot,
   sendEpicSnapshot,
   sendEpicStatusSnapshot,
   sendNotificationsSnapshot,
@@ -612,7 +611,30 @@ export function attachStreamConnection(
       );
       return;
     }
-    sendAnalogStreamSnapshot(socket, subscribe.data.method);
+    // Neither routed nor listed as unserved, which on this host means the
+    // protocol grew a stream nobody has decided about yet. It used to get a
+    // frame built by filling the schema; a subscriber cannot tell that from a
+    // real one, so it is refused by name instead.
+    reject(
+      {
+        code: "INCOMPATIBLE",
+        reason: `This host has no route for ${subscribe.data.method}.`,
+        incompatibleMethods: [
+          {
+            method: subscribe.data.method,
+            clientCanonical: subscribe.data.schemaVersion,
+            hostCanonical: null,
+            blocking: "host-missing-method",
+          },
+        ],
+        upgradeGuidance: {
+          clientShouldUpgrade: false,
+          hostShouldUpgrade: true,
+        },
+        retryable: false,
+      },
+      "unrouted-method",
+    );
   }
 
   function handleApplication(parsed: unknown): void {

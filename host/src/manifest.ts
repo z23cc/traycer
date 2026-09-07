@@ -31,13 +31,13 @@ import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-flo
  * which by design does not block, and a cross-host fork that cannot work would
  * start instead of being refused with a reason.
  *
- * This is the opposite mechanism from `UNSERVED_STREAM_METHOD_NAMES`, and the
- * asymmetry is in the contracts rather than in taste. A stream is advertised
- * and refused AT SUBSCRIBE because a per-method `INCOMPATIBLE` close is what
- * those contracts document as their degrade path. A unary is withdrawn AT
- * HANDSHAKE because its registry line declares an `unsupported` degrade - a
- * statement the manifest can make and a response cannot. Neither set is a
- * cleanup candidate for the other.
+ * `UNSERVED_STREAM_METHOD_NAMES` withdraws for the same reason, and the two
+ * differ only in what authorizes it. A unary needs the `degrade` field on its
+ * registry line, which is what makes the omission legible to a client rather
+ * than a hole; a stream has no such field, because streams are
+ * intersection-negotiated and non-advertisement IS the mechanism. A stream
+ * also refuses at subscribe, since a per-method `INCOMPATIBLE` close is the
+ * only answer that channel has; a unary refusal is an ordinary error reply.
  *
  * Withdrawal alone stops nothing: `dispatchHostRpc` resolves a handler off the
  * REGISTRY, not off the manifest, so a client that asks anyway still reaches
@@ -83,24 +83,39 @@ export function hostUnaryManifests(): SplitConnectionManifest {
 }
 
 /**
- * Streams this host cannot serve, and refuses at subscribe rather than
- * answering with an analog frame.
+ * Streams this host neither advertises nor serves.
  *
- * The distinction is not tidiness. An analog frame is built by filling a
- * schema's required fields, so for these methods it necessarily FABRICATES the
- * entity the frame is about - a managed command with a pid, a PR, an artifact
- * doc with an authority epoch, a screencast that started, a worktree deletion
- * in progress, a dictation model that is ready. A client cannot tell those
- * from real ones. A refusal it can: a per-method `INCOMPATIBLE` close is what
- * every one of these contracts documents as its degrade path, and the client
- * keeps its poll or hides the affordance instead of rendering an invention.
+ * Withdrawn from the advertised manifest first, because that is how a stream
+ * says "I do not have this": streams are intersection-negotiated and carry no
+ * `degrade` field at all - `pr-contracts.ts` states the rule outright, "a peer
+ * lacking these methods simply doesn't advertise them", and
+ * `managedCommand.subscribeOutput`'s registry note says the same from the
+ * other side ("a host that lacks the managed-command subsystem rejects the
+ * open as an unknown method"). The client then hides the affordance rather
+ * than opening a subscription that dies.
  *
- * Streams whose empty frame is TRUE here are deliberately NOT in this set -
- * "no browser sessions", "no PRs", "no communication-graph events" are answers,
- * and refusing them would hide a working surface.
+ * Refused at subscribe as well, for a client that asks anyway: the reject is
+ * the per-method `INCOMPATIBLE` close those contracts document. Withdrawal
+ * removes the control; the refusal is still the answer.
+ *
+ * The alternative was an analog snapshot, and it is worse than an empty one:
+ * a frame built by filling a schema FABRICATES the entity it is about - a
+ * managed command with a pid, a PR, an artifact doc with an authority epoch, a
+ * screencast that started, a worktree deletion in progress, a dictation model
+ * that is ready. A client cannot tell those from real ones.
+ *
+ * `browser.sessions` is in this set even though "no browser sessions" sounds
+ * like a true empty answer. It is a two-way stream: the client sends
+ * `openTab`, `closeTab` and `captureTabPreview` INTO it, so an empty snapshot
+ * from a host with no browser subsystem is not an honest nothing, it is a
+ * panel that looks live and swallows every click. A stream whose empty frame
+ * really is the answer stays served - `pr.subscribeListForEpic` sends one with
+ * `sourceStatus: "gh-unavailable"`, which says no sweep ran rather than
+ * claiming this epic has no pull requests.
  */
 export const UNSERVED_STREAM_METHOD_NAMES: readonly string[] = [
   "browser.screencast",
+  "browser.sessions",
   "host.communicationGraph.subscribe",
   "host.notifications.cloudFeed.subscribe",
   "managedCommand.subscribeOutput",
@@ -110,13 +125,15 @@ export const UNSERVED_STREAM_METHOD_NAMES: readonly string[] = [
 ];
 
 /**
- * Stream methods this OSS host advertises. Concrete lanes send real
- * snapshots; the rest answer with a schema-valid analog snapshot so a GUI
- * that subscribed does not wait forever.
+ * Stream methods this OSS host advertises: every one it actually routes.
+ *
+ * There is no third category any more. A subscribe that reaches neither a
+ * route nor `UNSERVED_STREAM_METHOD_NAMES` is refused rather than answered
+ * with a filled-in frame - see `connection.ts`.
  */
 export const OSS_STREAM_METHOD_NAMES: readonly string[] = Object.keys(
   hostStreamRpcRegistry,
-);
+).filter((method) => !UNSERVED_STREAM_METHOD_NAMES.includes(method));
 
 export function hostStreamManifest(): ConnectionManifest {
   const full = buildStreamManifest(
