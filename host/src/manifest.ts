@@ -44,7 +44,6 @@ export const UNSERVED_STREAM_METHOD_NAMES: readonly string[] = [
   "migration.run",
   "pr.subscribeDetail",
   "sessionImport.run",
-  "sessionImport.scan",
   "speech.dictate",
 ];
 

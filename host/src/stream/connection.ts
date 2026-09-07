@@ -27,6 +27,8 @@ import { ArtifactDocLane } from "./artifact-doc";
 import { serveAsset } from "./asset";
 import { AssetStreamSession } from "../workspace/asset-stream";
 import { ResourcesSubscriber, readScope } from "./resources";
+import { defaultProviderRoots } from "../session-import/discover";
+import { serveSessionImportScan } from "./session-import-scan";
 import { serveWorktreeDelete } from "./worktree-delete";
 import { EpicStateSubscriber } from "./epic-state";
 import {
@@ -542,6 +544,21 @@ export function attachStreamConnection(
           );
         }
       });
+      return;
+    }
+    if (subscribe.data.method === "sessionImport.scan") {
+      if (
+        !serveSessionImportScan(
+          socket,
+          subscribe.data.params,
+          defaultProviderRoots(),
+        )
+      ) {
+        reject(
+          unauthorized("sessionImport.scan: malformed open request"),
+          "malformed-scan-open",
+        );
+      }
       return;
     }
     if (subscribe.data.method === "worktree.deleteBatchByPath") {
