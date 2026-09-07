@@ -7,14 +7,17 @@ import {
 } from "@traycer/protocol/config/host-stop-intent";
 import type { FatalErrorDetails } from "@traycer/protocol/framework/index";
 import type { ShutdownClaimIntent } from "@traycer/protocol/host/lifecycle/schemas";
+import { RESTART_EXIT_CODE } from "@traycer/protocol/host/lifecycle-constants";
 
 /**
  * What the process exits with. Recorded from the released host: a restart
- * exits 87, a shutdown 0 - and the launchd agent that supervises it restarts
- * on a non-zero exit only (`KeepAlive.SuccessfulExit = false`), so the code
- * is the whole difference between coming back and staying down.
+ * exits 87 (the protocol's `RESTART_EXIT_CODE`, which the CLI supervisor
+ * relaunches on without delay), a shutdown 0 - and the launchd agent behind
+ * the supervisor restarts on a non-zero exit only
+ * (`KeepAlive.SuccessfulExit = false`), so the code is the whole difference
+ * between coming back and staying down.
  */
-export const RESTART_EXIT_CODE = 87;
+export { RESTART_EXIT_CODE };
 
 export function exitCodeForShutdownIntent(intent: ShutdownClaimIntent): number {
   return intent === "restart" ? RESTART_EXIT_CODE : 0;
