@@ -1,6 +1,5 @@
 import type { RpcHandler } from "./handlers/types";
 export type { RpcHandler, RpcHandlerResult } from "./handlers/types";
-import { analogResultForMethod } from "./analog-value";
 import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-floor";
 import { epicGetWorkspaceContextV10 } from "@traycer/protocol/host/epic/lane-unaries";
 import { browserSavedLoginSitesV10 } from "@traycer/protocol/host/browser/contracts";
@@ -37,12 +36,16 @@ import {
   handleCloudFeedMarkAllRead,
   handleCloudFeedMarkRead,
   handleCloudFeedResolve,
+  handleEpicChatPublicationState,
+  handleEpicResolveCloudChatHead,
+  handleEpicSetChatSharingDefault,
   handleListCloudChatPayloads,
   handleMentionGithubCatalog,
   handleMentionGithubSearch,
   handlePrGetLocalDiff,
   handlePrGetLocalDiffSummary,
   handlePrGetLocalFileDiff,
+  handleProvidersEnsurePack,
   handleProvidersInstallPackVersion,
   handleProvidersRefreshPackDiscovery,
   handleProvidersRemovePackVersion,
@@ -313,10 +316,7 @@ import {
 
 export function handlerFor(method: string): RpcHandler {
   const found = HANDLERS[method];
-  if (found !== undefined) {
-    return found;
-  }
-  return analogFallback(method);
+  return found === undefined ? unimplemented(method) : found;
 }
 
 /**
@@ -329,18 +329,32 @@ const handleSessionImportStatus: RpcHandler = async (_params, runtime) => ({
   result: runtime.sessionImports.status(),
 });
 
-function analogFallback(method: string): RpcHandler {
-  return () => {
-    const analog = analogResultForMethod(method);
-    if (analog === null) {
-      return {
-        ok: false,
-        code: "RPC_ERROR",
-        message: `Unknown method ${method}`,
-      };
-    }
-    return { ok: true, result: analog };
-  };
+/**
+ * A registry method with no handler, which is now nobody.
+ *
+ * This used to fill the method's response schema and answer it. That fallback
+ * was the single root cause of every "reports work it never did" bug on this
+ * host: `analogFromSchema` takes a union's FIRST arm, and for a mutation the
+ * first arm is success - so an unhandled `installPackVersion` said `ok: true`,
+ * an unhandled cloud-feed mutation said `applied`, and an unhandled
+ * `readCloudChatPart` handed back the four characters `oss` as a published
+ * chat's bytes. It answered off the LATEST major too, while dispatch validates
+ * against the NEGOTIATED one, so the reply could be a shape the caller's
+ * contract does not even describe.
+ *
+ * Every one of the 246 registry methods now has a handler, so this is
+ * unreachable - and that is the point of keeping it. The next method the
+ * protocol adds arrives here and FAILS, loudly and by name, instead of
+ * quietly inventing an answer for a feature nobody has written yet.
+ * `every advertised unary method has a handler` in `analog-coverage.test.ts`
+ * is the check that says so before a user ever sees it.
+ */
+function unimplemented(method: string): RpcHandler {
+  return () => ({
+    ok: false,
+    code: "RPC_ERROR",
+    message: `Method ${method} has no handler on this host.`,
+  });
 }
 
 export function implementedRpcMethods(): readonly string[] {
@@ -372,6 +386,9 @@ const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "epic.readCloudChatPayload": handleReadCloudChatPayload,
   "epic.chatReplicaRead": handleChatReplicaRead,
   "epic.setCloudChatVisibility": handleSetCloudChatVisibility,
+  "epic.chatPublicationState": handleEpicChatPublicationState,
+  "epic.resolveCloudChatHead": handleEpicResolveCloudChatHead,
+  "epic.setChatSharingDefault": handleEpicSetChatSharingDefault,
   "mention.githubCatalog": handleMentionGithubCatalog,
   "mention.githubSearch": handleMentionGithubSearch,
   "pr.getLocalDiff": handlePrGetLocalDiff,
@@ -382,6 +399,7 @@ const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
   "providers.usePackVersion": handleProvidersUsePackVersion,
   "providers.setPackPolicy": handleProvidersSetPackPolicy,
   "providers.refreshPackDiscovery": handleProvidersRefreshPackDiscovery,
+  "providers.ensurePack": handleProvidersEnsurePack,
   "host.status": handleHostStatus,
   "host.restart": handleHostRestart,
   "host.getRuntimeCapabilities": handleRuntimeCapabilities,

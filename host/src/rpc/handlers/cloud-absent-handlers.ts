@@ -3,8 +3,11 @@ import {
   listCloudChatPayloadsRequestSchema,
   readCloudChatPartRequestSchema,
   readCloudChatPayloadRequestSchema,
+  resolveCloudChatHeadRequestSchema,
+  setChatSharingDefaultRequestSchema,
   setCloudChatVisibilityRequestSchema,
 } from "@traycer/protocol/host/epic/cloud-chat";
+import { chatPublicationStateRequestSchema } from "@traycer/protocol/host/epic/unary-schemas";
 import {
   mentionGithubCatalogRequestSchema,
   mentionGithubSearchRequestSchema,
@@ -19,6 +22,7 @@ import {
   prGetLocalFileDiffRequestSchema,
 } from "@traycer/protocol/host/pr-schemas";
 import {
+  providersEnsurePackRequestSchema,
   providersInstallPackVersionRequestSchema,
   providersRefreshPackDiscoveryRequestSchema,
   providersRemovePackVersionRequestSchema,
@@ -42,13 +46,7 @@ import type { RpcHandler, RpcHandlerResult } from "./types";
  * decode.
  *
  * Where a contract has a word for the true state, that word is the answer;
- * where it has none, the call is refused. Deliberately NOT touched: the
- * analogs that were already truthful -`epic.setChatSharingDefault`
- * (`updatedCount: 0`), `epic.resolveCloudChatHead` (`missing`),
- * `epic.chatPublicationState` (`published: false`, and `definitive` left null
- * because none of its three reasons - deleted, superseded, halted - describes
- * a host that never published at all) and `providers.ensurePack`
- * (`managedInstallState: null`) all say something this host can stand behind.
+ * where it has none, the call is refused.
  */
 
 /**
@@ -223,6 +221,78 @@ export const handleProvidersRefreshPackDiscovery: RpcHandler = (params) =>
     providersRefreshPackDiscoveryRequestSchema.safeParse(params),
     NO_PACKS,
   );
+
+/**
+ * The last four methods with no handler of their own, which reached the analog
+ * fallback this commit deletes. Three of their analogs read as truthful, but
+ * by luck of the schema rather than by decision - and one was not truthful at
+ * all.
+ *
+ * `published: false` is the true half and the important one: no remote host
+ * can pull this transcript, which is what the fork dialog is asking. The
+ * analog left `definitive` null, and that is the field the client polls on.
+ * Null means "the ordinary reading applies and the state may still move", so
+ * an open fork dialog re-asks every 30s forever under copy that says "It backs
+ * up automatically - try again shortly" - a promise this host can never keep.
+ *
+ * None of the three reasons was written for a host with no publisher at all.
+ * `chat-deleted` and `lineage-superseded` are claims about the CHAT's identity
+ * and are simply false here; `backup-halted` is a claim about the PUBLISHER -
+ * "publication stopped for a reason the sweep does not retry" - and its
+ * load-bearing half is exactly true: waiting on this connection will never
+ * clear it. So the answer is frozen with the one reason whose meaning holds,
+ * at the cost of a sentence of client copy suggesting a host restart. The
+ * client's own `unexplained` arm would fit better still, but the wire enum is
+ * closed and a response outside it is rejected by dispatch.
+ */
+export const handleEpicChatPublicationState: RpcHandler = (params) =>
+  answer(chatPublicationStateRequestSchema.safeParse(params), {
+    published: false,
+    boundaryCovered: null,
+    publishedThroughTs: null,
+    definitive: "backup-halted",
+  });
+
+/**
+ * `missing` - "the cloud holds NO ROW for this identity at all, not even
+ * metadata" - rather than `unpublished`, which the contract reserves for a row
+ * that exists with its head absent. The refine then requires `chat: null`,
+ * which is the shape of having nothing to summarize.
+ */
+export const handleEpicResolveCloudChatHead: RpcHandler = (params) =>
+  answer(resolveCloudChatHeadRequestSchema.safeParse(params), {
+    chat: null,
+    outcome: { status: "missing" },
+  });
+
+/**
+ * The per-task sharing default, refused for the same reason
+ * `setCloudChatVisibility` is: there is no sharing here to default. The
+ * analog's `updatedCount: 0` is the trap this looks like an exception to - it
+ * is true that zero chats changed, and that is precisely why it misleads. The
+ * count is the only field on the response, so a caller reads a successful
+ * write with nothing existing to apply it to, and the default it thinks it set
+ * is remembered nowhere.
+ */
+export const handleEpicSetChatSharingDefault: RpcHandler = (params) =>
+  refuse(
+    setChatSharingDefaultRequestSchema.safeParse(params),
+    "This host shares no chats to the cloud, so there is no sharing default to set.",
+  );
+
+/**
+ * Refused because the contract says to, in as many words: "A host with no
+ * install machinery at all does NOT answer null here - it refuses the call
+ * with an error. Null and 'refused' would otherwise be the same response, and
+ * a client cannot tell a kick it should poll for from one that did nothing and
+ * never will. That is how a retry affordance stays offered forever for a click
+ * that cannot work."
+ *
+ * The analog answered `{managedInstallState: null}` - the response that
+ * sentence exists to forbid.
+ */
+export const handleProvidersEnsurePack: RpcHandler = (params) =>
+  refuse(providersEnsurePackRequestSchema.safeParse(params), NO_PACKS);
 
 type Parsed = { readonly success: boolean };
 

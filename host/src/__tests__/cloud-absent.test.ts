@@ -154,6 +154,61 @@ describe("methods whose subject this host does not have", () => {
     ).toMatchObject({ ok: false });
   });
 
+  it("freezes the fork dialog's publication answer instead of promising a sweep", async () => {
+    const host = await boot();
+
+    // `published: false` was already true; `definitive: null` was the defect.
+    // Null puts an open fork dialog in a 30s poll lane under copy that says
+    // the backup lands shortly, which on this host it never does.
+    expect(
+      readResult(
+        await call(host.runtime, "epic.chatPublicationState", {
+          epicId: "e-1",
+          chatId: "c-1",
+          boundaryMessageId: null,
+        }),
+      ),
+    ).toStrictEqual({
+      published: false,
+      boundaryCovered: null,
+      publishedThroughTs: null,
+      definitive: "backup-halted",
+    });
+
+    // `missing` (no row at all), not `unpublished` (row exists, head absent) -
+    // and the response's refine then requires the summary to be null.
+    expect(
+      readResult(
+        await call(host.runtime, "epic.resolveCloudChatHead", {
+          taskId: "t-1",
+          chatId: "c-1",
+          ownerUserId: "u-1",
+        }),
+      ),
+    ).toStrictEqual({ chat: null, outcome: { status: "missing" } });
+  });
+
+  it("refuses the two mutations whose analog read as done", async () => {
+    const host = await boot();
+
+    // `{updatedCount: 0}` is true about the chats and silent about the
+    // default, which is the half the caller asked to set.
+    expect(
+      await call(host.runtime, "epic.setChatSharingDefault", {
+        taskId: "t-1",
+        defaultVisibility: "task",
+        applyToExisting: true,
+      }),
+    ).toMatchObject({ ok: false, code: "RPC_ERROR" });
+
+    // The contract names this refusal itself: a host with no install
+    // machinery must NOT answer `{managedInstallState: null}`, because a
+    // client cannot tell that from a kick worth polling for.
+    expect(
+      await call(host.runtime, "providers.ensurePack", { providerId: "codex" }),
+    ).toMatchObject({ ok: false, code: "RPC_ERROR" });
+  });
+
   function call(
     runtime: HostRuntime,
     method: string,

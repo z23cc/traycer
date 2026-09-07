@@ -1,12 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import type { z } from "zod";
-import {
-  getLatestContract,
-  type AnyRpcContract,
-  type MethodVersionRegistry,
-} from "@traycer/protocol/framework/index";
-import { hostRpcRegistry } from "@traycer/protocol/host/registry";
 
 type ZodDef = {
   readonly type: string;
@@ -43,6 +37,16 @@ type ZodInternal = {
   readonly bag: ZodBag;
 };
 
+/**
+ * A schema-valid value for a schema, by filling required fields and taking a
+ * union's first arm.
+ *
+ * The STREAM lane's only user, and deliberately so: a subscriber that gets no
+ * frame waits forever, so a lane with nothing real to send needs something
+ * shaped like a snapshot. The unary lane used to share this and no longer
+ * does - see `unimplemented` in `rpc/handlers.ts` for why filling a schema is
+ * the wrong answer to a question with a caller waiting on the truth of it.
+ */
 export function analogFromSchema(schema: z.ZodType): unknown {
   let generated = analogNode(schema);
   for (let attempt = 0; attempt < 8; attempt += 1) {
@@ -469,30 +473,4 @@ function optionalString(value: unknown): string | undefined {
 function readNumber(record: object, key: string): number | undefined {
   const value = Reflect.get(record, key);
   return typeof value === "number" ? value : undefined;
-}
-
-export function analogResultForMethod(method: string): unknown | null {
-  const bag: { readonly [name: string]: MethodVersionRegistry } =
-    hostRpcRegistry;
-  const found = bag[method];
-  if (found === undefined) {
-    return null;
-  }
-  const latest = getLatestContract(found, undefined);
-  if (!isRpcContract(latest)) {
-    return null;
-  }
-  return analogFromSchema(latest.responseSchema);
-}
-
-function isRpcContract(value: unknown): value is AnyRpcContract {
-  if (value === null || typeof value !== "object") {
-    return false;
-  }
-  return (
-    "method" in value &&
-    "schemaVersion" in value &&
-    "requestSchema" in value &&
-    "responseSchema" in value
-  );
 }

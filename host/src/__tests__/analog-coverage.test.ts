@@ -15,6 +15,7 @@ import {
 import { hostRpcRegistry } from "@traycer/protocol/host/registry";
 import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-floor";
 import { analogFromSchema } from "../rpc/analog-value";
+import { implementedRpcMethods } from "../rpc/handlers";
 import { startHost, type StartedHost } from "../start-host";
 
 const STUB = "is not implemented by this OSS host";
@@ -32,6 +33,22 @@ describe("advertised unary analog coverage", () => {
       await rm(tempDir, { recursive: true, force: true });
       tempDir = null;
     }
+  });
+
+  /**
+   * The guard on the class of bug the analog fallback used to produce.
+   *
+   * A method in the registry with no handler is answered by `unimplemented`,
+   * which refuses - so the day the protocol adds one, this fails here rather
+   * than the host inventing a reply for a feature nobody has written. The fix
+   * is to decide the answer, not to relax the test.
+   */
+  it("has a handler for every advertised unary method", () => {
+    const implemented = new Set(implementedRpcMethods());
+    const unhandled = Object.keys(hostRpcRegistry).filter(
+      (method) => !implemented.has(method),
+    );
+    expect(unhandled).toStrictEqual([]);
   });
 
   it("builds a schema-valid analog for every unary response", () => {
