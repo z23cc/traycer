@@ -32,7 +32,8 @@ export type GuiPrintTurnState = {
  * different ids because the GUI never sees the CLI's.
  */
 export type PendingApproval = {
-  readonly kind: "tool" | "file_edit";
+  /** `interview` is a question the AGENT asked the user, answered through the same channel. */
+  readonly kind: "tool" | "file_edit" | "interview";
   readonly approvalId: string;
   readonly requestId: string;
   readonly toolUseId: string | null;

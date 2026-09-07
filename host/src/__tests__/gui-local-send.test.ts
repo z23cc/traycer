@@ -1611,7 +1611,231 @@ describe("local GUI send without cloud login", () => {
       ),
     ).toContain("approval.abandoned");
   });
+
+  /**
+   * A question the agent asks the user, under `full_access` on purpose: a
+   * question is not a permission, and no mode answers it for the user. The
+   * fake CLI checks the answer reaches it the way the real one reads it - as
+   * an `answers` map on the tool's own input.
+   */
+  it("opens an interview for AskUserQuestion and relays the answer", async () => {
+    const setup = await bootWithCli(askingInterviewCli());
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-18", "chat-18");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-18",
+      chatId: "chat-18",
+      clientActionId: "action-18",
+      messageId: "msg-user-18",
+      text: "ask me",
+      permissionMode: "full_access",
+    });
+    const asked = await waitForSnapshot(
+      streamUrl,
+      "epic-18",
+      "chat-18",
+      (snapshot) => readArray(snapshot, "pendingInterviews").length === 1,
+      80,
+      50,
+    );
+    const blockId = String(
+      Reflect.get(readArray(asked, "pendingInterviews")[0] ?? {}, "blockId"),
+    );
+    expect(blockId).toBe("toolu_q1:interview");
+    // Judged, and to no row: the asking turn is not persisted yet, so this
+    // snapshot has nothing that could draw the card.
+    expect(
+      readArray(Reflect.get(asked, "derived") ?? {}, "interviewAnswerability"),
+    ).toEqual([{ blockId, ordinal: null }]);
+    const answered = await sendActionUntil(
+      streamUrl,
+      {
+        kind: "interviewAnswer",
+        epicId: "epic-18",
+        chatId: "chat-18",
+        clientActionId: "answer-18",
+        blockId,
+        answers: [
+          {
+            questionId: null,
+            question: "Which color?",
+            values: ["Blue"],
+            notes: null,
+          },
+        ],
+      },
+      "interviewAnswered",
+    );
+    expect(answered).toContainEqual(
+      expect.objectContaining({ kind: "actionAck", status: "accepted" }),
+    );
+    expect(answered).toContainEqual(
+      expect.objectContaining({
+        kind: "interviewAnswered",
+        blockId,
+        answers: [
+          expect.objectContaining({
+            question: "Which color?",
+            values: ["Blue"],
+          }),
+        ],
+      }),
+    );
+    const frames = await waitForSealedBlocks(
+      streamUrl,
+      "epic-18",
+      "chat-18",
+      "interview",
+      80,
+      50,
+    );
+    const blocks = assistantBlocks(frames, "epic-18", "chat-18");
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "interview"),
+    ).toMatchObject({
+      blockId,
+      toolName: "AskUserQuestion",
+      status: "completed",
+      questions: [
+        expect.objectContaining({
+          question: "Which color?",
+          header: "Color",
+          multiSelect: false,
+          options: [
+            { label: "Red", description: null, preview: null },
+            { label: "Blue", description: "The color blue", preview: null },
+          ],
+        }),
+      ],
+      answers: [expect.objectContaining({ values: ["Blue"] })],
+    });
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "text"),
+    ).toMatchObject({ text: "you chose Blue" });
+    const events = readArray(
+      Reflect.get(
+        Reflect.get(
+          frames.find((f) => Reflect.get(f ?? {}, "kind") === "snapshot") ?? {},
+          "snapshot",
+        ) ?? {},
+        "tail",
+      ) ?? {},
+      "events",
+    ).map((event) => Reflect.get(event ?? {}, "type"));
+    expect(events).toContain("interview.requested");
+    expect(events).toContain("interview.resolved");
+    expect(
+      await sendActionUntil(
+        streamUrl,
+        {
+          kind: "interviewAnswer",
+          epicId: "epic-18",
+          chatId: "chat-18",
+          clientActionId: "answer-18b",
+          blockId,
+          answers: [],
+        },
+        "actionAck",
+      ),
+    ).toContainEqual(
+      expect.objectContaining({
+        status: "rejected",
+        code: "INTERVIEW_NOT_FOUND",
+      }),
+    );
+  });
+
+  /**
+   * A stop with a question open fails the question: the CLI is refused with
+   * "Aborted", the card errors, and the log says so.
+   */
+  it("fails an open question when the turn is stopped", async () => {
+    const setup = await bootWithCli(askingInterviewCli());
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-19", "chat-19");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-19",
+      chatId: "chat-19",
+      clientActionId: "action-19",
+      messageId: "msg-user-19",
+      text: "ask me",
+      permissionMode: "supervised",
+    });
+    await waitForSnapshot(
+      streamUrl,
+      "epic-19",
+      "chat-19",
+      (snapshot) => readArray(snapshot, "pendingInterviews").length === 1,
+      80,
+      50,
+    );
+    const stopped = await sendActionUntil(
+      streamUrl,
+      {
+        kind: "stop",
+        epicId: "epic-19",
+        chatId: "chat-19",
+        clientActionId: "stop-19",
+      },
+      "interviewErrored",
+    );
+    expect(stopped).toContainEqual(
+      expect.objectContaining({
+        kind: "interviewErrored",
+        blockId: "toolu_q1:interview",
+        reason: "Aborted",
+      }),
+    );
+    const after = await waitForSnapshot(
+      streamUrl,
+      "epic-19",
+      "chat-19",
+      (snapshot) =>
+        Reflect.get(snapshot, "runStatus") === "idle" &&
+        readArray(snapshot, "pendingInterviews").length === 0,
+      80,
+      50,
+    );
+    expect(
+      readArray(Reflect.get(after, "tail") ?? {}, "events").map((e) =>
+        Reflect.get(e ?? {}, "type"),
+      ),
+    ).toContain("interview.errored");
+  });
 });
+
+/**
+ * A fake CLI asking the user a question over the stdio channel, and reading
+ * the answer back the way the real one does: as `answers` on its own input.
+ */
+function askingInterviewCli(): string {
+  const input =
+    '{"questions":[{"question":"Which color?","header":"Color","options":[{"label":"Red"},{"label":"Blue","description":"The color blue"}],"multiSelect":false}]}';
+  return [
+    "#!/bin/sh",
+    "read -r prompt",
+    `printf '%s\n' '{"type":"system","subtype":"init","session_id":"sess-ask"}'`,
+    `printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_q1","name":"AskUserQuestion","input":${input}}]}}'`,
+    `printf '%s\n' '{"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":${input},"description":"Which color?","tool_use_id":"toolu_q1","requires_user_interaction":true}}'`,
+    "read -r answer",
+    'case "$answer" in',
+    '  *\'"answers":{"Which color?":"Blue"}\'*)',
+    `    printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","content":"The user answered: Which color?=Blue","tool_use_id":"toolu_q1"}]}}'`,
+    `    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"you chose Blue"}]}}'`,
+    "    ;;",
+    "  *)",
+    `    printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","content":"no answer","is_error":true,"tool_use_id":"toolu_q1"}]}}'`,
+    `    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"no-answer"}]}}'`,
+    "    ;;",
+    "esac",
+    `printf '%s\n' '{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}'`,
+    "",
+  ].join("\n");
+}
 
 /**
  * A fake CLI that speaks the stdio permission channel the way the real one

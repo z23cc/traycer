@@ -1115,6 +1115,20 @@ async function decidePermission(
     });
     return;
   }
+  if (isInterviewTool(request.toolName)) {
+    // Ahead of `full_access`: a question the agent asks the user is not a
+    // permission, and no mode answers it for them.
+    const questions = interviewQuestions(request.input);
+    if (questions.length === 0) {
+      answer({
+        behavior: "deny",
+        message: "AskUserQuestion did not include any renderable questions.",
+      });
+      return;
+    }
+    await openInterview(runtime, input, request, questions, turn);
+    return;
+  }
   if (permissionMode === "full_access") {
     answer({ behavior: "allow", updatedInput: request.input });
     return;
@@ -1299,12 +1313,317 @@ async function abandonApprovals(
       behavior: "deny",
       message: reason,
     });
+    if (pending.kind === "interview") {
+      await settleInterview(runtime, epicId, chatId, pending, {
+        kind: "error",
+        reason,
+      });
+      continue;
+    }
     await settleApproval(runtime, epicId, chatId, pending, {
       approved: false,
       reason,
       abandoned: true,
     });
   }
+}
+
+/** The tools whose call is a question for the user, by the released host's list. */
+function isInterviewTool(toolName: string): boolean {
+  const normalized = toolName.toLowerCase().replaceAll(/[^a-z0-9]/gu, "");
+  return normalized === "askuserquestion" || normalized === "requestuserinput";
+}
+
+type InterviewQuestion = {
+  readonly questionId: string | null;
+  readonly question: string;
+  readonly header: string | null;
+  readonly options: readonly {
+    readonly label: string;
+    readonly description: string | null;
+    readonly preview: string | null;
+  }[];
+  readonly multiSelect: boolean;
+};
+
+type InterviewAnswer = {
+  readonly questionId: string | null;
+  readonly question: string | null;
+  readonly values: readonly string[];
+  readonly notes: string | null;
+};
+
+function readText(record: object, key: string): string | null {
+  const value = Reflect.get(record, key);
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/** The tool's `questions`, normalized the way the released host reads them. */
+function interviewQuestions(input: unknown): InterviewQuestion[] {
+  if (input === null || typeof input !== "object") {
+    return [];
+  }
+  const raw = Reflect.get(input, "questions");
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const questions: InterviewQuestion[] = [];
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== "object") {
+      continue;
+    }
+    const question = readText(entry, "question");
+    if (question === null) {
+      continue;
+    }
+    const rawOptions = Reflect.get(entry, "options");
+    const options = Array.isArray(rawOptions)
+      ? rawOptions.flatMap((option: unknown) => {
+          if (option === null || typeof option !== "object") {
+            return [];
+          }
+          const label = readText(option, "label");
+          return label === null
+            ? []
+            : [
+                {
+                  label,
+                  description: readText(option, "description"),
+                  preview: readText(option, "preview"),
+                },
+              ];
+        })
+      : [];
+    const multi = Reflect.get(entry, "multiSelect");
+    const multiple = Reflect.get(entry, "multiple");
+    questions.push({
+      questionId: readText(entry, "id") ?? readText(entry, "questionId"),
+      question,
+      header: readText(entry, "header"),
+      options,
+      multiSelect:
+        typeof multi === "boolean"
+          ? multi
+          : typeof multiple === "boolean"
+            ? multiple
+            : false,
+    });
+  }
+  return questions;
+}
+
+/**
+ * A question for the user, opened as an interview card and held until the
+ * GUI answers it or the turn ends. Everything a request leaves behind
+ * mirrors the released host: the block, the `interviewRequested` frame, the
+ * log event, the notification, and the snapshot's pending entry.
+ */
+async function openInterview(
+  runtime: HostRuntime,
+  input: { readonly epicId: string; readonly chatId: string },
+  request: {
+    readonly requestId: string;
+    readonly toolUseId: string | null;
+    readonly toolName: string;
+    readonly description: string;
+    readonly input: unknown;
+  },
+  questions: readonly InterviewQuestion[],
+  turn: { readonly userMessageId: string | null },
+): Promise<void> {
+  const now = Date.now();
+  const pending: PendingApproval = {
+    kind: "interview",
+    approvalId: `${request.toolUseId ?? request.requestId}:interview`,
+    requestId: request.requestId,
+    toolUseId: request.toolUseId,
+    toolName: request.toolName,
+    description: request.description,
+    input: request.input,
+    requestedAt: now,
+    paths: [],
+    operation: null,
+  };
+  runtime.guiRuns.addApproval(input.chatId, pending);
+  broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+    type: "interview.requested",
+    blockId: pending.approvalId,
+    timestamp: now,
+    toolName: request.toolName,
+    title: request.toolName,
+    questions: questions.map((question) => ({
+      ...question,
+      options: [...question.options],
+    })),
+    input: request.input,
+  });
+  broadcastChatFrame(runtime, input.epicId, input.chatId, {
+    kind: "interviewRequested",
+    blockId: pending.approvalId,
+    requestedAt: now,
+  });
+  broadcastEventAppended(runtime, input.epicId, input.chatId, {
+    type: "interview.requested",
+    message: "Interview requested.",
+    turnId: runtime.guiRuns.printState(input.chatId)?.turnId ?? null,
+    messageId: turn.userMessageId,
+    clientActionId: null,
+    severity: "warning",
+  });
+  await notify(runtime, {
+    id: `interview.requested:${input.chatId}`,
+    kind: "interview.requested",
+    epicId: input.epicId,
+    chatId: input.chatId,
+    severity: "needs_action",
+    outcome: null,
+    sourceRef: pending.approvalId,
+    message: questions[0]?.question ?? "The agent asked a question.",
+  });
+  broadcastChatSnapshot(runtime, input.epicId, input.chatId);
+}
+
+/**
+ * The GUI's answers, relayed as the tool's input plus an `answers` map -
+ * the shape the released host hands back, and the one the CLI turns into
+ * "The user answered: …" for the model. False when no such question is open.
+ */
+export async function answerInterview(
+  runtime: HostRuntime,
+  input: {
+    readonly epicId: string;
+    readonly chatId: string;
+    readonly blockId: string;
+    readonly answers: readonly InterviewAnswer[];
+  },
+): Promise<boolean> {
+  const pending = runtime.guiRuns.takeApproval(input.chatId, input.blockId);
+  if (pending === null || pending.kind !== "interview") {
+    return false;
+  }
+  const answers: { [question: string]: string } = {};
+  const annotations: { [question: string]: { readonly notes: string } } = {};
+  for (const answer of input.answers) {
+    if (answer.question === null) {
+      continue;
+    }
+    answers[answer.question] = answer.values.join(", ");
+    if (answer.notes !== null) {
+      annotations[answer.question] = { notes: answer.notes };
+    }
+  }
+  const base =
+    pending.input !== null && typeof pending.input === "object"
+      ? pending.input
+      : {};
+  runtime.guiRuns.answerPermission(input.chatId, pending.requestId, {
+    behavior: "allow",
+    updatedInput: {
+      ...base,
+      answers,
+      ...(Object.keys(annotations).length === 0 ? {} : { annotations }),
+    },
+  });
+  await settleInterview(runtime, input.epicId, input.chatId, pending, {
+    kind: "success",
+    answers: input.answers,
+  });
+  return true;
+}
+
+/** The GUI declining to answer: the tool is refused with the reason. */
+export async function failInterview(
+  runtime: HostRuntime,
+  input: {
+    readonly epicId: string;
+    readonly chatId: string;
+    readonly blockId: string;
+    readonly reason: string;
+  },
+): Promise<boolean> {
+  const pending = runtime.guiRuns.takeApproval(input.chatId, input.blockId);
+  if (pending === null || pending.kind !== "interview") {
+    return false;
+  }
+  runtime.guiRuns.answerPermission(input.chatId, pending.requestId, {
+    behavior: "deny",
+    message: input.reason,
+  });
+  await settleInterview(runtime, input.epicId, input.chatId, pending, {
+    kind: "error",
+    reason: input.reason,
+  });
+  return true;
+}
+
+async function settleInterview(
+  runtime: HostRuntime,
+  epicId: string,
+  chatId: string,
+  pending: PendingApproval,
+  outcome:
+    | { readonly kind: "success"; readonly answers: readonly InterviewAnswer[] }
+    | { readonly kind: "error"; readonly reason: string },
+): Promise<void> {
+  const now = Date.now();
+  if (outcome.kind === "success") {
+    const answers = outcome.answers.map((answer) => ({
+      questionId: answer.questionId,
+      question: answer.question,
+      values: [...answer.values],
+      notes: answer.notes,
+      selection: null,
+    }));
+    broadcastBlockDelta(runtime, epicId, chatId, {
+      type: "interview.resolved",
+      blockId: pending.approvalId,
+      timestamp: now,
+      answers,
+    });
+    broadcastChatFrame(runtime, epicId, chatId, {
+      kind: "interviewAnswered",
+      blockId: pending.approvalId,
+      answers,
+      resolvedAt: now,
+    });
+    broadcastEventAppended(runtime, epicId, chatId, {
+      type: "interview.resolved",
+      message: "Interview completed.",
+      turnId: runtime.guiRuns.printState(chatId)?.turnId ?? null,
+      messageId: null,
+      clientActionId: null,
+      severity: "info",
+    });
+  } else {
+    broadcastBlockDelta(runtime, epicId, chatId, {
+      type: "interview.errored",
+      blockId: pending.approvalId,
+      timestamp: now,
+      error: outcome.reason,
+    });
+    broadcastChatFrame(runtime, epicId, chatId, {
+      kind: "interviewErrored",
+      blockId: pending.approvalId,
+      reason: outcome.reason,
+      resolvedAt: now,
+    });
+    broadcastEventAppended(runtime, epicId, chatId, {
+      type: "interview.errored",
+      message: outcome.reason,
+      turnId: runtime.guiRuns.printState(chatId)?.turnId ?? null,
+      messageId: null,
+      clientActionId: null,
+      severity: "warning",
+    });
+  }
+  if (
+    runtime.guiRuns
+      .approvalsOf(chatId)
+      .every((open) => open.kind !== "interview")
+  ) {
+    await resolveNotification(runtime, `interview.requested:${chatId}`, now);
+  }
+  broadcastChatSnapshot(runtime, epicId, chatId);
 }
 
 /** Everything a decision leaves behind: the block, the frame, the log, the notification. */

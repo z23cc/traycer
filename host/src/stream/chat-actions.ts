@@ -15,6 +15,8 @@ import {
   persistGuiUserTurn,
   readHarnessId,
   readModelSlug,
+  answerInterview,
+  failInterview,
   readUserId,
   resolveApproval,
 } from "../agent/gui-chat";
@@ -69,6 +71,10 @@ export function handleChatClientFrame(
   }
   if (kind === "approvalDecision" || kind === "fileEditApprovalDecision") {
     void handleChatApprovalDecision(parsed, socket, runtime, kind);
+    return true;
+  }
+  if (kind === "interviewAnswer" || kind === "interviewError") {
+    void handleChatInterviewReply(parsed, socket, runtime, kind);
     return true;
   }
   if (kind === "pauseQueue") {
@@ -212,6 +218,76 @@ function handleChatStop(
       clientActionId: ids.clientActionId,
     });
   }
+}
+
+/**
+ * The user's reply to a question the agent asked: answers, or a reason for
+ * not answering. Either way the CLI is told and the card settles.
+ */
+async function handleChatInterviewReply(
+  parsed: object,
+  socket: WebSocket,
+  runtime: HostRuntime,
+  action: "interviewAnswer" | "interviewError",
+): Promise<void> {
+  const ids = readActionIds(parsed);
+  const blockId = readStringField(parsed, "blockId");
+  if (ids === null || blockId === null) {
+    return;
+  }
+  const open = runtime.guiRuns
+    .approvalsOf(ids.chatId)
+    .some(
+      (pending) =>
+        pending.kind === "interview" && pending.approvalId === blockId,
+    );
+  ack(
+    socket,
+    ids,
+    action,
+    open ? "accepted" : "rejected",
+    open ? null : "The interview request is no longer pending.",
+    open ? null : "INTERVIEW_NOT_FOUND",
+  );
+  if (!open) {
+    return;
+  }
+  if (action === "interviewError") {
+    await failInterview(runtime, {
+      epicId: ids.epicId,
+      chatId: ids.chatId,
+      blockId,
+      reason: readStringField(parsed, "reason") ?? "Question dismissed.",
+    });
+    return;
+  }
+  const rawAnswers = Reflect.get(parsed, "answers");
+  const answers = Array.isArray(rawAnswers)
+    ? rawAnswers.flatMap((entry: unknown) => {
+        if (entry === null || typeof entry !== "object") {
+          return [];
+        }
+        const values = Reflect.get(entry, "values");
+        return [
+          {
+            questionId: readStringField(entry, "questionId"),
+            question: readStringField(entry, "question"),
+            values: Array.isArray(values)
+              ? values.filter(
+                  (value): value is string => typeof value === "string",
+                )
+              : [],
+            notes: readStringField(entry, "notes"),
+          },
+        ];
+      })
+    : [];
+  await answerInterview(runtime, {
+    epicId: ids.epicId,
+    chatId: ids.chatId,
+    blockId,
+    answers,
+  });
 }
 
 /**

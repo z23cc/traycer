@@ -9,7 +9,11 @@ import {
   buildRowSkeleton,
   transcriptPreviewProjection,
 } from "@traycer/protocol/persistence/chat-transcript/build-skeleton";
-import { assistantRowId } from "@traycer/protocol/persistence/chat-transcript/row-projection";
+import {
+  assistantRowId,
+  projectTranscriptRows,
+} from "@traycer/protocol/persistence/chat-transcript/row-projection";
+import { judgeInterviewAnswerability } from "@traycer/protocol/persistence/chat-transcript/interview-answerability";
 import {
   ROW_SKELETON_PREVIEW_MAX_CHARS,
   type RowSkeletonEntry,
@@ -404,7 +408,13 @@ export function chatWindowedTranscript(
           .approvalsOf(chatId)
           .filter((pending) => pending.kind === "tool")
           .map(approvalState),
-        pendingInterviews: [],
+        pendingInterviews: runtime.guiRuns
+          .approvalsOf(chatId)
+          .filter((pending) => pending.kind === "interview")
+          .map((pending) => ({
+            blockId: pending.approvalId,
+            requestedAt: pending.requestedAt,
+          })),
         worktreeBinding,
         missingWorktreePaths,
         pendingFileEditApprovals: runtime.guiRuns
@@ -439,7 +449,11 @@ export function chatWindowedTranscript(
           pinnedTaskTodoItems: [],
           latestForkableAssistantMessageId: lastAssistantMessageId(messages),
           restorableSetupInterruption: null,
-          interviewAnswerability: [],
+          interviewAnswerability: interviewAnswerability(
+            runtime,
+            chatId,
+            messages,
+          ),
           // The host's answer is authoritative on this line: the client reads
           // it from the snapshot rather than scanning `messages`, because the
           // window it holds is a subset and a failure a few user rows back
@@ -533,6 +547,51 @@ export function rowSkeleton(
     );
   } catch {
     return fallbackSkeleton(messages);
+  }
+}
+
+/**
+ * Where each pending question's card would render, judged over the rows the
+ * snapshot carries. A question asked by the RUNNING turn has no row here
+ * yet - the turn is persisted when it ends - so it judges to no row, which
+ * is the truth about this snapshot: a client that reconnects mid-question
+ * gets the dismiss affordance, and the one that was connected has the live
+ * block. Judged from the same projection the skeleton is cut from.
+ */
+function interviewAnswerability(
+  runtime: HostRuntime,
+  chatId: string,
+  messages: readonly Message[],
+): readonly { readonly blockId: string; readonly ordinal: number | null }[] {
+  const pending = runtime.guiRuns
+    .approvalsOf(chatId)
+    .filter((open) => open.kind === "interview")
+    .map((open) => open.approvalId);
+  if (pending.length === 0) {
+    return [];
+  }
+  const blocksById = new Map(
+    messages.flatMap((message) =>
+      message.role === "assistant"
+        ? message.blocks.map((block) => [block.blockId, block] as const)
+        : [],
+    ),
+  );
+  try {
+    return judgeInterviewAnswerability(
+      projectTranscriptRows({
+        messages,
+        events: [],
+        activeTurnId: null,
+        chatId,
+      }),
+      blocksById,
+      pending,
+    );
+  } catch {
+    // The same projection the skeleton falls back from. No judgement is the
+    // contract's "not judged yet", not a claim about the rows.
+    return [];
   }
 }
 
