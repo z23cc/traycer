@@ -309,6 +309,7 @@
         "traycer-host": "./src/index.ts",
       },
       "dependencies": {
+        "diff": "catalog:",
         "node-pty": "^1.1.0",
         "ws": "^8.18.3",
         "yjs": "catalog:",

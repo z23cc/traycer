@@ -8,14 +8,29 @@ import type { UserMessageAnchorResolvedEvent } from "@traycer/protocol/host/agen
 import { guiHarnessIdSchema } from "@traycer/protocol/host/agent/shared";
 import { assistantRowId } from "@traycer/protocol/persistence/chat-transcript/row-projection";
 import type { CheckpointFileOperation } from "@traycer/protocol/persistence/epic/checkpoint-manifests";
-import type { ContentBlock } from "@traycer/protocol/persistence/epic/content-blocks";
+import type {
+  ContentBlock,
+  FileEditReason,
+} from "@traycer/protocol/persistence/epic/content-blocks";
+import {
+  lineCounts,
+  readBlob,
+  settleEdit,
+  snapshotDir,
+  type SnapshotCapture,
+} from "../snapshots/snapshots";
 import { providerIdForHarness } from "../gui/harness-map";
 import { envCredentialVarForProvider } from "../providers/service";
 import { runGuiPrintTurn } from "../gui/deliver";
 import type { QueuedPrompt } from "../gui/queue";
 import { LOCAL_USER_ID } from "../local-user";
 import type { HostRuntime } from "../runtime";
-import type { StoredAgent, StoredChat, StoredTurn } from "../store/host-store";
+import type {
+  StoredAgent,
+  StoredChat,
+  StoredFileChange,
+  StoredTurn,
+} from "../store/host-store";
 import { bumpChatIndex } from "../store/host-store";
 import type {
   ProviderStreamEvent,
@@ -432,6 +447,38 @@ async function runAndPersistAssistant(
   let authFailure: { readonly status: number; readonly detail: string } | null =
     null;
   const openTools = new Map<string, string>();
+  /** Edit calls whose card is open, waiting on the call's result. */
+  const pendingEdits = new Map<string, PendingEdit>();
+  /**
+   * Completions still being read off disk. Awaited before the turn is
+   * persisted, or a card could be sealed mid-read as a call that never
+   * finished.
+   */
+  const settling: Promise<void>[] = [];
+  const settleEditOf = async (
+    toolId: string,
+    failed: boolean,
+  ): Promise<void> => {
+    const edit = pendingEdits.get(toolId);
+    if (edit === undefined) {
+      return;
+    }
+    pendingEdits.delete(toolId);
+    const captured = await settleEdit(snapshotDir(runtime.dataDir), toolId);
+    // A failed edit tool leaves the file as it found it, and the post hook
+    // does not run for it - so the before IS the after, and a diff of the two
+    // says "counted, unchanged" rather than guessing at a capture that never
+    // happened.
+    await completeEdit(
+      runtime,
+      input,
+      edit,
+      failed && captured.after === null
+        ? { before: captured.before, after: captured.before }
+        : captured,
+      "capture_failed",
+    );
+  };
   const print = runtime.guiRuns.printState(input.chatId);
   const handleEvent = (event: ProviderStreamEvent): void => {
     const now = Date.now();
@@ -538,6 +585,7 @@ async function runAndPersistAssistant(
         agentMessageSend: null,
         imageResults: [],
       });
+      settling.push(settleEditOf(event.toolId, false));
       return;
     }
     if (event.kind === "tool_error") {
@@ -556,6 +604,7 @@ async function runAndPersistAssistant(
         terminationReason: "error",
         agentMessageSend: null,
       });
+      settling.push(settleEditOf(event.toolId, true));
       return;
     }
     if (event.kind === "todo") {
@@ -652,41 +701,30 @@ async function runAndPersistAssistant(
       // call attached, so those keep the turn-scoped id they always had.
       const blockId = `${event.toolId ?? input.turnId}:${event.path}`;
       const operation = fileChangeOperation(event.operation, event.path);
-      broadcastBlockDelta(runtime, input.epicId, input.chatId, {
-        type: "file_change.started",
-        blockId,
-        timestamp: now,
-        filePath: event.path,
-        operation,
-      });
-      broadcastBlockDelta(runtime, input.epicId, input.chatId, {
-        type: "file_change.completed",
-        blockId,
-        timestamp: now,
-        filePath: event.path,
-        operation,
-        // No before/after was captured, so there is nothing to diff and
-        // nothing to count. `not_intercepted` is the contract's word for
-        // exactly this host: the agent's CLI wrote the file directly and
-        // nothing here stood between the two.
-        diffSource: "none",
-        beforeHash: null,
-        afterHash: null,
-        additions: 0,
-        deletions: 0,
-        reason: "not_intercepted",
-      });
-      void runtime.store.mutate((state) => {
-        const row = state.chats.find(
-          (chatRow) => chatRow.chatId === input.chatId,
-        );
-        if (row === undefined) {
-          return;
-        }
-        recordFileChange(row, event.path, operation);
-        bumpChatIndex(row);
-      });
-      broadcastAccumulatedChanges(runtime, input.epicId, input.chatId);
+      if (event.toolId !== null) {
+        // No card yet. The fold keeps the operation a card OPENED with, and
+        // at this point the operation is a guess racing the write - so the
+        // card opens when the call completes, from what the hooks captured
+        // around it. See `completeEdit`.
+        pendingEdits.set(event.toolId, {
+          blockId,
+          path: event.path,
+          operation,
+        });
+        return;
+      }
+      // No call to wait for and no hook around it: the provider reported the
+      // change after the fact, and nothing stood between the before and the
+      // after. `not_intercepted` is the contract's word for that.
+      settling.push(
+        completeEdit(
+          runtime,
+          input,
+          { blockId, path: event.path, operation },
+          { before: null, after: null },
+          "not_intercepted",
+        ),
+      );
       return;
     }
     if (event.kind === "usage") {
@@ -738,6 +776,7 @@ async function runAndPersistAssistant(
         imageResults: [],
       });
     }
+    await Promise.all(settling);
     await persistAssistantTurn(runtime, {
       epicId: input.epicId,
       chatId: input.chatId,
@@ -773,6 +812,7 @@ async function runAndPersistAssistant(
       message: "",
     });
   } catch (error) {
+    await Promise.all(settling);
     await recordUsageFact(runtime, {
       epicId: input.epicId,
       chatId: input.chatId,
@@ -841,19 +881,170 @@ async function runAndPersistAssistant(
  */
 function recordFileChange(
   chat: StoredChat,
-  filePath: string,
-  operation: CheckpointFileOperation,
-): void {
+  edit: {
+    readonly filePath: string;
+    readonly operation: CheckpointFileOperation;
+    readonly beforeHash: string | null;
+    readonly afterHash: string | null;
+    readonly reason: FileEditReason;
+  },
+): StoredFileChange | null {
   const existing = chat.accumulatedChanges.findIndex(
-    (row) => row.filePath === filePath,
+    (row) => row.filePath === edit.filePath,
   );
+  const prior = existing < 0 ? null : chat.accumulatedChanges[existing];
+  const row: StoredFileChange = {
+    filePath: edit.filePath,
+    operation:
+      prior === null || edit.operation === "delete"
+        ? edit.operation
+        : prior.operation,
+    // The FIRST before and the LATEST after: that is what "since this chat
+    // started" means.
+    beforeHash: prior === null ? edit.beforeHash : prior.beforeHash,
+    afterHash: edit.afterHash,
+    reason:
+      prior !== null && prior.reason !== "snapshot"
+        ? prior.reason
+        : edit.reason,
+    // Measured by the caller once the hashes are known; null until then.
+    counts: null,
+  };
+  // A file edited back to exactly what it was has not changed since the chat
+  // started, and the panel lists files that have.
+  if (row.reason === "snapshot" && row.beforeHash === row.afterHash) {
+    if (existing >= 0) {
+      chat.accumulatedChanges.splice(existing, 1);
+    }
+    return null;
+  }
   if (existing < 0) {
-    chat.accumulatedChanges.push({ filePath, operation });
-    return;
+    chat.accumulatedChanges.push(row);
+  } else {
+    chat.accumulatedChanges[existing] = row;
   }
-  if (operation === "delete") {
-    chat.accumulatedChanges[existing] = { filePath, operation };
+  return row;
+}
+
+type PendingEdit = {
+  readonly blockId: string;
+  readonly path: string;
+  readonly operation: CheckpointFileOperation;
+};
+
+/**
+ * Close one file card from what was captured around its call, and fold the
+ * edit into the chat's accumulated set.
+ *
+ * `missing` is the reason for a side no sidecar was found for: `capture_failed`
+ * when the hooks were installed and did not report, `not_intercepted` when
+ * nothing was ever asked to. Both are the contract's words.
+ */
+async function completeEdit(
+  runtime: HostRuntime,
+  input: { readonly epicId: string; readonly chatId: string },
+  edit: PendingEdit,
+  captured: {
+    readonly before: SnapshotCapture | null;
+    readonly after: SnapshotCapture | null;
+  },
+  missing: FileEditReason,
+): Promise<void> {
+  const dir = snapshotDir(runtime.dataDir);
+  const before = captured.before ?? { hash: null, reason: missing };
+  const after = captured.after ?? { hash: null, reason: missing };
+  const reason: FileEditReason =
+    before.reason !== "snapshot"
+      ? before.reason
+      : after.reason !== "snapshot"
+        ? after.reason
+        : "snapshot";
+  const snapshot = reason === "snapshot";
+  // Existence on both sides is the one thing the captures know better than
+  // the call's input did.
+  const operation: CheckpointFileOperation = !snapshot
+    ? edit.operation
+    : before.hash === null && after.hash !== null
+      ? "create"
+      : before.hash !== null && after.hash === null
+        ? "delete"
+        : "edit";
+  const counts = snapshot
+    ? lineCounts(
+        before.hash === null ? null : await readBlob(dir, before.hash),
+        after.hash === null ? null : await readBlob(dir, after.hash),
+      )
+    : { additions: 0, deletions: 0 };
+  const now = Date.now();
+  broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+    type: "file_change.started",
+    blockId: edit.blockId,
+    timestamp: now,
+    filePath: edit.path,
+    operation,
+  });
+  broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+    type: "file_change.completed",
+    blockId: edit.blockId,
+    timestamp: now,
+    filePath: edit.path,
+    operation,
+    diffSource: snapshot ? "snapshot" : "none",
+    beforeHash: snapshot ? before.hash : null,
+    afterHash: snapshot ? after.hash : null,
+    additions: counts.additions,
+    deletions: counts.deletions,
+    reason,
+  });
+  const measured: StoredFileChange | null = await runtime.store.mutate(
+    (state) => {
+      const row = state.chats.find(
+        (chatRow) => chatRow.chatId === input.chatId,
+      );
+      if (row === undefined) {
+        return null;
+      }
+      const recorded = recordFileChange(row, {
+        filePath: edit.path,
+        operation,
+        beforeHash: snapshot ? before.hash : null,
+        afterHash: snapshot ? after.hash : null,
+        reason,
+      });
+      bumpChatIndex(row);
+      return recorded;
+    },
+  );
+  // The accumulated counts span the chat, not this edit, so they are measured
+  // between the row's own hashes - which may be an older before than this
+  // call's.
+  if (measured !== null && measured.reason === "snapshot") {
+    const spanCounts = lineCounts(
+      measured.beforeHash === null
+        ? null
+        : await readBlob(dir, measured.beforeHash),
+      measured.afterHash === null
+        ? null
+        : await readBlob(dir, measured.afterHash),
+    );
+    await runtime.store.mutate((state) => {
+      const row = state.chats.find(
+        (chatRow) => chatRow.chatId === input.chatId,
+      );
+      const index =
+        row?.accumulatedChanges.findIndex(
+          (change) => change.filePath === edit.path,
+        ) ?? -1;
+      if (row === undefined || index < 0) {
+        return;
+      }
+      const current = row.accumulatedChanges[index];
+      if (current !== undefined) {
+        row.accumulatedChanges[index] = { ...current, counts: spanCounts };
+      }
+    });
   }
+  broadcastAccumulatedChanges(runtime, input.epicId, input.chatId);
 }
 
 /**
@@ -861,10 +1052,9 @@ function recordFileChange(
  * not: a Claude edit tool names a path and a payload, never whether the file
  * was already there.
  *
- * Read at the moment the call OPENS, which is before the write lands - so an
- * existing path means an edit and a missing one means a create. A path that
- * appears between this read and the write is reported as a create, which is
- * what it was when the agent decided to write it.
+ * Read at the moment the call is parsed, which is a guess racing the write -
+ * so it is the FALLBACK, used only for a change nothing captured. A captured
+ * one takes its operation from whether each side existed.
  */
 function fileChangeOperation(
   reported: string | null,

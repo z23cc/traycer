@@ -1,11 +1,12 @@
 import {
   chmod,
-  mkdtemp,
   mkdir,
+  mkdtemp,
   realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -17,6 +18,7 @@ import {
 } from "@traycer/protocol/framework/index";
 import { hostRpcRegistry } from "@traycer/protocol/host/registry";
 import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-floor";
+import { changeDigest } from "../snapshots/snapshots";
 import { startHost, type StartedHost } from "../start-host";
 
 describe("local GUI send without cloud login", () => {
@@ -713,10 +715,12 @@ describe("local GUI send without cloud login", () => {
       readSummaries(frame, "epic-8", "chat-8"),
     );
     expect(summaries).toHaveLength(1);
+    // The hooks were asked for and reported nothing - the fake CLI runs
+    // none - so the row says the capture failed, not that nothing tried.
     expect(summaries[0]).toMatchObject({
       operation: "create",
       diffSource: "none",
-      reason: "not_intercepted",
+      reason: "capture_failed",
       hasContents: false,
       counts: null,
     });
@@ -829,9 +833,14 @@ describe("local GUI send without cloud login", () => {
       messageId: "msg-user-9",
       text: "do things",
     });
-    await waitForChatText(streamUrl, "epic-9", "chat-9", "blocks-ok", 80, 50);
-
-    const frames = await collectChatFrames(streamUrl, "epic-9", "chat-9");
+    const frames = await waitForSealedBlocks(
+      streamUrl,
+      "epic-9",
+      "chat-9",
+      "file_change",
+      80,
+      50,
+    );
     const blocks = assistantBlocks(frames, "epic-9", "chat-9");
     // Both calls survive, the Write included: hiding the edit call behind its
     // file card is the GUI's job, and it needs both blocks to do it.
@@ -893,9 +902,14 @@ describe("local GUI send without cloud login", () => {
       messageId: "msg-user-10",
       text: "die halfway",
     });
-    await waitForChatText(streamUrl, "epic-10", "chat-10", "exit 3", 80, 50);
-
-    const frames = await collectChatFrames(streamUrl, "epic-10", "chat-10");
+    const frames = await waitForSealedBlocks(
+      streamUrl,
+      "epic-10",
+      "chat-10",
+      "error",
+      80,
+      50,
+    );
     const blocks = assistantBlocks(frames, "epic-10", "chat-10");
     expect(
       blocks.find((block) => Reflect.get(block, "type") === "tool_call"),
@@ -944,9 +958,14 @@ describe("local GUI send without cloud login", () => {
       messageId: "msg-user-11",
       text: "delegate it",
     });
-    await waitForChatText(streamUrl, "epic-11", "chat-11", "task-ok", 80, 50);
-
-    const frames = await collectChatFrames(streamUrl, "epic-11", "chat-11");
+    const frames = await waitForSealedBlocks(
+      streamUrl,
+      "epic-11",
+      "chat-11",
+      "subagent",
+      80,
+      50,
+    );
     const blocks = assistantBlocks(frames, "epic-11", "chat-11");
     expect(
       blocks.find((block) => Reflect.get(block, "type") === "subagent"),
@@ -972,7 +991,177 @@ describe("local GUI send without cloud login", () => {
     const text = blocks.find((block) => Reflect.get(block, "type") === "text");
     expect(Reflect.get(text ?? {}, "text")).toBe("task-ok");
   });
+
+  /**
+   * The real diff. The hooks cannot run under a fake CLI, so the test plays
+   * them: it writes what the pre and post hooks would have - the blobs and the
+   * two sidecars keyed by the call - and the host reads them when the call's
+   * result arrives, exactly as it would from the hooks.
+   */
+  it("serves the before and after the hooks captured around an edit", async () => {
+    const target = join(tmpdir(), `traycer-snap-${String(Date.now())}.ts`);
+    const stdout = [
+      '{"type":"system","subtype":"init","session_id":"sess-snap"}',
+      `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_s1","name":"Edit","input":{"file_path":"${target}","old_string":"one","new_string":"two"}}]}}`,
+      '{"type":"user","message":{"content":[{"type":"tool_result","content":"ok","tool_use_id":"toolu_s1"}]}}',
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"snap-ok"}]}}',
+      '{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}',
+    ];
+    const setup = await bootWithCli(
+      [
+        "#!/bin/sh",
+        ...stdout.map((line) => `printf '%s\n' '${line}'`),
+        "",
+      ].join("\n"),
+    );
+    tempDir = setup.tempDir;
+    started = setup.started;
+    const before = await playHook(tempDir, "toolu_s1", "pre", "one\nsame\n");
+    const after = await playHook(tempDir, "toolu_s1", "post", "two\nsame\n");
+    await seedChat(started, setup.workspace, "epic-12", "chat-12");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-12",
+      chatId: "chat-12",
+      clientActionId: "action-12",
+      messageId: "msg-user-12",
+      text: "edit it",
+    });
+    const frames = await waitForSealedBlocks(
+      streamUrl,
+      "epic-12",
+      "chat-12",
+      "file_change",
+      80,
+      50,
+    );
+    expect(
+      assistantBlocks(frames, "epic-12", "chat-12").find(
+        (block) => Reflect.get(block, "type") === "file_change",
+      ),
+    ).toMatchObject({
+      status: "completed",
+      // Existence on both sides is what the captures know that the call's
+      // input did not.
+      operation: "edit",
+      diffSource: "snapshot",
+      beforeHash: before,
+      afterHash: after,
+      additions: 1,
+      deletions: 1,
+      reason: "snapshot",
+    });
+    const summaries = frames.flatMap((frame) =>
+      readSummaries(frame, "epic-12", "chat-12"),
+    );
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]).toMatchObject({
+      diffSource: "snapshot",
+      reason: "snapshot",
+      hasContents: true,
+      digest: changeDigest(before, after),
+      counts: { additions: 1, deletions: 1 },
+    });
+
+    // The two reads the panel and the card make, and the refusal for a
+    // version this host no longer describes.
+    expect(
+      await call(
+        started.rpcUrl,
+        "chat.readAccumulatedFileChange",
+        {
+          major: 1,
+          minor: 0,
+        },
+        {
+          epicId: "epic-12",
+          chatId: "chat-12",
+          filePath: target,
+          digest: changeDigest(before, after),
+        },
+      ),
+    ).toEqual({
+      stale: false,
+      beforeContent: "one\nsame\n",
+      afterContent: "two\nsame\n",
+    });
+    expect(
+      await call(
+        started.rpcUrl,
+        "chat.readAccumulatedFileChange",
+        {
+          major: 1,
+          minor: 0,
+        },
+        {
+          epicId: "epic-12",
+          chatId: "chat-12",
+          filePath: target,
+          digest: "-:-",
+        },
+      ),
+    ).toEqual({ stale: true });
+    expect(
+      await call(
+        started.rpcUrl,
+        "snapshots.readSnapshotDiff",
+        {
+          major: 1,
+          minor: 0,
+        },
+        { beforeHash: before, afterHash: after },
+      ),
+    ).toEqual({
+      beforeContent: "one\nsame\n",
+      afterContent: "two\nsame\n",
+      reason: "snapshot",
+    });
+    expect(
+      await call(
+        started.rpcUrl,
+        "snapshots.readSnapshotDiff",
+        {
+          major: 1,
+          minor: 0,
+        },
+        { beforeHash: before, afterHash: "0".repeat(64) },
+      ),
+    ).toMatchObject({ reason: "blob_missing" });
+    expect(
+      await call(
+        started.rpcUrl,
+        "snapshots.getLocalStorageSize",
+        {
+          major: 1,
+          minor: 0,
+        },
+        {},
+      ),
+    ).toEqual({ bytes: "one\nsame\n".length + "two\nsame\n".length });
+  });
 });
+
+/**
+ * What one hook invocation leaves behind, written by hand: the body in the
+ * blob store and the sidecar the host settles the call from.
+ */
+async function playHook(
+  dataDir: string,
+  toolUseId: string,
+  side: "pre" | "post",
+  body: string,
+): Promise<string> {
+  const hash = createHash("sha256").update(body).digest("hex");
+  const dir = join(dataDir, "snapshots");
+  await mkdir(join(dir, "blobs"), { recursive: true });
+  await mkdir(join(dir, "pending"), { recursive: true });
+  await writeFile(join(dir, "blobs", hash), body);
+  await writeFile(
+    join(dir, "pending", `${toolUseId}.${side}.json`),
+    JSON.stringify({ hash, reason: "snapshot" }),
+  );
+  return hash;
+}
 
 /** The blocks of the last assistant message in a fresh subscribe's snapshot. */
 function assistantBlocks(
@@ -1255,6 +1444,38 @@ async function rpcExchange(
   }
   const record = response as Record<string, unknown>;
   return { result: record.result, error: record.error };
+}
+
+/**
+ * A fresh subscribe's frames once the LAST assistant turn carries a block of
+ * this type - which is to say once it has been sealed. Waiting on the reply
+ * text is not enough: the text lands with `persistAssistantTurn`, the blocks
+ * with the seal a moment later, and a collect in between sees a turn that is
+ * one text block long.
+ */
+async function waitForSealedBlocks(
+  url: string,
+  epicId: string,
+  chatId: string,
+  blockType: string,
+  attempts: number,
+  delayMs: number,
+): Promise<readonly unknown[]> {
+  let frames: readonly unknown[] = [];
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    frames = await collectChatFrames(url, epicId, chatId);
+    if (
+      assistantBlocks(frames, epicId, chatId).some(
+        (block) => Reflect.get(block, "type") === blockType,
+      )
+    ) {
+      return frames;
+    }
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, delayMs);
+    });
+  }
+  throw new Error(`no ${blockType} block sealed onto ${chatId}`);
 }
 
 async function waitForChatText(

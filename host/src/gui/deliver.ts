@@ -3,6 +3,7 @@ import { accumulateEvent } from "@traycer/protocol/host/agent/gui/agent-runtime-
 import type { RuntimeEvent } from "@traycer/protocol/host/agent/gui/agent-runtime";
 import type { ContentBlock } from "@traycer/protocol/persistence/epic/content-blocks";
 import { providerCliIdentity, spawnEnvForProvider } from "../providers/service";
+import { snapshotHookSettings } from "../snapshots/snapshots";
 import type { HostRuntime } from "../runtime";
 import { providerIdForHarness } from "./harness-map";
 import {
@@ -191,6 +192,10 @@ export async function runGuiPrintTurn(
     input.model,
     input.permissionMode,
     input.sessionId,
+    // The before/after hooks behind every `file_change` card. Claude is the
+    // harness with a hook surface; the others report their edits themselves
+    // or not at all.
+    input.harnessId === "claude" ? snapshotHookSettings(runtime.dataDir) : null,
   );
   return new Promise((resolve, reject) => {
     let child: ChildProcess;
@@ -388,6 +393,8 @@ export function guiPrintArgv(
   model: string | null,
   permissionMode: string | null,
   sessionId: string | null,
+  /** Claude only: extra settings JSON, which is how the edit hooks ride in. */
+  settingsJson: string | null,
 ): string[] {
   const modelFlag = printModelFlag(model);
   if (harnessId === "claude") {
@@ -398,6 +405,9 @@ export function guiPrintArgv(
       "--include-partial-messages",
       "--verbose",
     ];
+    if (settingsJson !== null) {
+      args.push("--settings", settingsJson);
+    }
     if (modelFlag !== null) {
       args.push("--model", modelFlag);
     }

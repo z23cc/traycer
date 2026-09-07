@@ -33,6 +33,7 @@ import type {
 import { bumpChatIndex } from "../store/host-store";
 import type { GuiPrintTurnState } from "../gui/deliver";
 import { resolveChatWorktreeBinding } from "../worktree/service";
+import { changeDigest } from "../snapshots/snapshots";
 
 type ChatWindowedTranscript = {
   readonly epicId: string;
@@ -81,10 +82,10 @@ export function sendChatSnapshot(
  * thousands of files; this host has no such volume to split, and a single
  * final chunk is a valid stream of one.
  *
- * `hasContents: false` / `counts: null` is the honest half: no before/after
- * was captured, so the panel must render a bare row rather than offering a
- * diff that would come back empty, and `{0, 0}` would claim the file came
- * back unchanged.
+ * A row whose every edit was captured carries its hashes as the digest and
+ * its span counts; one that was not carries the reason and `counts: null`,
+ * so the panel renders a bare row rather than offering a diff that would
+ * come back empty.
  */
 function accumulatedChangesFrame(
   runtime: HostRuntime,
@@ -109,14 +110,17 @@ function accumulatedChangesFrame(
       summaries: changes.map((row) => ({
         filePath: row.filePath,
         operation: row.operation,
-        diffSource: "none" as const,
-        reason: "not_intercepted" as const,
-        // Nothing here can restore a file: no snapshot was taken to restore
-        // it from.
+        diffSource:
+          row.reason === "snapshot" ? ("snapshot" as const) : ("none" as const),
+        reason: row.reason,
+        // A before blob is what a restore would write back, and this host
+        // serves no restore action yet - so no row claims to be undoable.
         undoable: false,
-        hasContents: false,
-        digest: `${String(chat === undefined ? 0 : chat.indexRevision)}:${row.filePath}`,
-        counts: null,
+        hasContents: row.reason === "snapshot",
+        // The two hashes ARE the version: a later edit changes the after,
+        // and a request naming the old pair is refused as stale.
+        digest: changeDigest(row.beforeHash, row.afterHash),
+        counts: row.reason === "snapshot" ? row.counts : null,
       })),
       isFinal: true,
     },

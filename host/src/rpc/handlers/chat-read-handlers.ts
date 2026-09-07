@@ -11,6 +11,7 @@ import {
 import { readChatAttachment } from "../../epic/chat-attachments";
 import { chatWindowedTranscript } from "../../stream/chat";
 import type { RpcHandler } from "./types";
+import { changeDigest, readBlob, snapshotDir } from "../../snapshots/snapshots";
 
 /**
  * The ordinal of a row the client cannot place itself, in the epoch it is
@@ -74,12 +75,50 @@ export const handleChatLocateRow: RpcHandler = (params, runtime) => {
  * against contents that were never captured. `stale: false` with two nulls
  * would claim the capture succeeded and produced an empty file.
  */
-export const handleChatReadAccumulatedFileChange: RpcHandler = (params) => {
+/**
+ * The bodies behind one accumulated-change row.
+ *
+ * The digest is the row's two hashes, so "stale" is exact rather than
+ * revision-based: a request naming any pair but the one on the row now is a
+ * request for a version this host no longer describes.
+ */
+export const handleChatReadAccumulatedFileChange: RpcHandler = async (
+  params,
+  runtime,
+) => {
   const parsed = chatReadAccumulatedFileChangeRequestSchema.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
-  return { ok: true, result: { stale: true } };
+  const { epicId, chatId, filePath, digest } = parsed.data;
+  const chat = runtime.store
+    .snapshot()
+    .chats.find((row) => row.epicId === epicId && row.chatId === chatId);
+  const change = chat?.accumulatedChanges.find(
+    (row) => row.filePath === filePath,
+  );
+  if (
+    change === undefined ||
+    change.reason !== "snapshot" ||
+    changeDigest(change.beforeHash, change.afterHash) !== digest
+  ) {
+    return { ok: true, result: { stale: true } };
+  }
+  const dir = snapshotDir(runtime.dataDir);
+  return {
+    ok: true,
+    result: {
+      stale: false,
+      beforeContent:
+        change.beforeHash === null
+          ? null
+          : await readBlob(dir, change.beforeHash),
+      afterContent:
+        change.afterHash === null
+          ? null
+          : await readBlob(dir, change.afterHash),
+    },
+  };
 };
 
 /**

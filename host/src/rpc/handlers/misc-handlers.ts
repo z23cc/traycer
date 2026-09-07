@@ -13,6 +13,12 @@ import {
 import { hostRestartRequestSchema } from "@traycer/protocol/host/restart/schemas";
 import { rateLimitUsageRequestSchemaV40 } from "@traycer/protocol/host/rate-limit/schemas";
 import type { RpcHandler } from "./types";
+import {
+  clearBlobs,
+  readBlob,
+  snapshotDir,
+  storageBytes,
+} from "../../snapshots/snapshots";
 import { HOST_PROTOCOL_VERSION } from "../../version";
 import { hostBusyVerdict } from "../../gui/busy";
 import { readProviderRateLimits } from "../../gui/provider-rate-limits";
@@ -120,31 +126,46 @@ export const handleRateLimitUsage: RpcHandler = async (params, runtime) => {
   };
 };
 
-export const handleSnapshotSize: RpcHandler = () => ({
+export const handleSnapshotSize: RpcHandler = async (_params, runtime) => ({
   ok: true,
-  result: { bytes: 0 },
+  result: { bytes: await storageBytes(snapshotDir(runtime.dataDir)) },
 });
 
-export const handleSnapshotClear: RpcHandler = (params) => {
+export const handleSnapshotClear: RpcHandler = async (params, runtime) => {
   const parsed = snapshotsClearLocalSnapshotsRequestSchema.safeParse(params);
-  if (!parsed.success) {
-    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
-  }
-  return { ok: true, result: { clearedBytes: 0 } };
-};
-
-export const handleSnapshotReadDiff: RpcHandler = (params) => {
-  const parsed = snapshotsReadSnapshotDiffRequestSchema.safeParse(params);
   if (!parsed.success) {
     return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
   }
   return {
     ok: true,
-    result: {
-      beforeContent: null,
-      afterContent: null,
-      reason: "blob_missing",
-    },
+    result: { clearedBytes: await clearBlobs(snapshotDir(runtime.dataDir)) },
+  };
+};
+
+/**
+ * The bodies behind a `file_change` card's hashes. A hash the store no
+ * longer holds - cleared, or never written - is `blob_missing` for the whole
+ * answer: half a diff is not a diff.
+ */
+export const handleSnapshotReadDiff: RpcHandler = async (params, runtime) => {
+  const parsed = snapshotsReadSnapshotDiffRequestSchema.safeParse(params);
+  if (!parsed.success) {
+    return { ok: false, code: "RPC_ERROR", message: parsed.error.message };
+  }
+  const dir = snapshotDir(runtime.dataDir);
+  const { beforeHash, afterHash } = parsed.data;
+  const beforeContent =
+    beforeHash === null ? null : await readBlob(dir, beforeHash);
+  const afterContent =
+    afterHash === null ? null : await readBlob(dir, afterHash);
+  const missing =
+    (beforeHash !== null && beforeContent === null) ||
+    (afterHash !== null && afterContent === null);
+  return {
+    ok: true,
+    result: missing
+      ? { beforeContent: null, afterContent: null, reason: "blob_missing" }
+      : { beforeContent, afterContent, reason: "snapshot" },
   };
 };
 

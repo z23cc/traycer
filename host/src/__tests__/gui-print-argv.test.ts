@@ -10,6 +10,7 @@ describe("guiPrintArgv", () => {
         "gpt-5.6-sol",
         "full_access",
         null,
+        null,
       ),
     ).toEqual([
       "exec",
@@ -22,13 +23,9 @@ describe("guiPrintArgv", () => {
   });
 
   it("keeps Codex supervised turns in the read-only sandbox", () => {
-    expect(guiPrintArgv("codex", "ping", null, "supervised", null)).toEqual([
-      "exec",
-      "--json",
-      "--sandbox",
-      "read-only",
-      "ping",
-    ]);
+    expect(
+      guiPrintArgv("codex", "ping", null, "supervised", null, null),
+    ).toEqual(["exec", "--json", "--sandbox", "read-only", "ping"]);
   });
 
   it("resumes a Codex thread instead of stuffing history into the prompt", () => {
@@ -39,6 +36,7 @@ describe("guiPrintArgv", () => {
         "gpt-5.6-sol",
         "full_access",
         "thread-1",
+        null,
       ),
     ).toEqual([
       "exec",
@@ -53,19 +51,32 @@ describe("guiPrintArgv", () => {
   });
 
   it("skips Claude permission prompts in full_access", () => {
-    expect(guiPrintArgv("claude", "hi", "sonnet", "full_access", null)).toEqual(
-      [
-        "-p",
-        "--output-format",
-        "stream-json",
-        "--include-partial-messages",
-        "--verbose",
-        "--model",
-        "sonnet",
-        "--dangerously-skip-permissions",
-        "hi",
-      ],
-    );
+    // The edit hooks ride in as settings, ahead of the model and the prompt.
+    expect(
+      guiPrintArgv("claude", "hi", null, null, null, '{"hooks":{}}'),
+    ).toEqual([
+      "-p",
+      "--output-format",
+      "stream-json",
+      "--include-partial-messages",
+      "--verbose",
+      "--settings",
+      '{"hooks":{}}',
+      "hi",
+    ]);
+    expect(
+      guiPrintArgv("claude", "hi", "sonnet", "full_access", null, null),
+    ).toEqual([
+      "-p",
+      "--output-format",
+      "stream-json",
+      "--include-partial-messages",
+      "--verbose",
+      "--model",
+      "sonnet",
+      "--dangerously-skip-permissions",
+      "hi",
+    ]);
   });
 
   it("does not append a full assistant replay after stream-json partials", () => {
@@ -93,7 +104,7 @@ describe("guiPrintArgv", () => {
 
   it("resumes a Claude session by id", () => {
     expect(
-      guiPrintArgv("claude", "next", "sonnet", "full_access", "sess-9"),
+      guiPrintArgv("claude", "next", "sonnet", "full_access", "sess-9", null),
     ).toEqual([
       "-p",
       "--output-format",

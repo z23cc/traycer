@@ -9,6 +9,10 @@ import {
   checkpointFileOperationSchema,
   type CheckpointFileOperation,
 } from "@traycer/protocol/persistence/epic/checkpoint-manifests";
+import {
+  fileEditReasonSchema,
+  type FileEditReason,
+} from "@traycer/protocol/persistence/epic/content-blocks";
 import type { JsonContent } from "@traycer/protocol/common/registry";
 import type { TaskRepoIdentifier } from "@traycer/protocol/host/epic/unary-schemas";
 import type {
@@ -174,9 +178,25 @@ export type StoredUsageFact = {
 };
 
 /** A file this chat's agent touched, with its net operation. */
+/**
+ * One file's accumulated change over the chat: the before of its FIRST edit
+ * and the after of its LATEST, both as blob hashes when they were captured.
+ *
+ * `reason` is `snapshot` only when every edit in the chain was captured - one
+ * that was not leaves the accumulated diff describing a before nobody saw.
+ * `counts` is measured between the two hashes, and null when there is nothing
+ * to measure between.
+ */
 export type StoredFileChange = {
   readonly filePath: string;
   readonly operation: CheckpointFileOperation;
+  readonly beforeHash: string | null;
+  readonly afterHash: string | null;
+  readonly reason: FileEditReason;
+  readonly counts: {
+    readonly additions: number;
+    readonly deletions: number;
+  } | null;
 };
 
 export type StoredChat = {
@@ -774,6 +794,18 @@ function normalizeChats(value: unknown): StoredChat[] {
 const storedFileChangeSchema = z.object({
   filePath: z.string().min(1),
   operation: checkpointFileOperationSchema,
+  // Defaulted so rows written before captures existed read as what they
+  // were: a change nothing stood between.
+  beforeHash: z.string().nullable().default(null),
+  afterHash: z.string().nullable().default(null),
+  reason: fileEditReasonSchema.default("not_intercepted"),
+  counts: z
+    .object({
+      additions: z.number().int().nonnegative(),
+      deletions: z.number().int().nonnegative(),
+    })
+    .nullable()
+    .default(null),
 });
 
 function normalizeFileChanges(value: unknown): StoredFileChange[] {
