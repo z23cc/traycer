@@ -2448,8 +2448,9 @@ describe("local GUI send without cloud login", () => {
       '{"type":"system","subtype":"status","status":"compacting","session_id":"sess-compact"}',
       '{"type":"system","subtype":"status","status":null,"compact_result":"success","session_id":"sess-compact"}',
       '{"type":"system","subtype":"compact_boundary","session_id":"sess-compact","compact_metadata":{"trigger":"manual","pre_tokens":24157,"post_tokens":2118,"duration_ms":4378}}',
-      '{"type":"assistant","message":{"content":[{"type":"text","text":"compacted"}]}}',
-      '{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}',
+      // Recorded live: the compact turn says nothing and counts nothing, and
+      // its `result` is still the end of it.
+      '{"type":"result","subtype":"success","is_error":false,"num_turns":0,"stop_reason":null,"usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}',
     ];
     const setup = await bootWithCli(
       [
@@ -2496,6 +2497,17 @@ describe("local GUI send without cloud login", () => {
     expect(String(Reflect.get(cards[0] ?? {}, "blockId"))).toMatch(
       /^compaction:sess-compact:1:[0-9a-f-]{36}$/u,
     );
+    // And the turn ended on that result - completed, not "no output".
+    const snapshot = Reflect.get(
+      frames.find((f) => Reflect.get(f ?? {}, "kind") === "snapshot") ?? {},
+      "snapshot",
+    );
+    expect(Reflect.get(snapshot, "runStatus")).toBe("idle");
+    expect(
+      readArray(Reflect.get(snapshot, "tail") ?? {}, "events").map((e) =>
+        Reflect.get(e ?? {}, "type"),
+      ),
+    ).toContain("turn.completed");
   });
 });
 

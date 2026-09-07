@@ -476,6 +476,7 @@ export async function runGuiPrintTurn(
       readonly detail: string;
     } | null = null;
     let turnFault: string | null = null;
+    let endedCleanly = false;
     let flushTimer: NodeJS.Timeout | null = null;
     const emit = (event: ProviderStreamEvent): void => {
       if (event.kind === "delta") {
@@ -490,17 +491,15 @@ export async function runGuiPrintTurn(
         // line the CLI writes, which is the first thing it does once answered.
         disarmDeadline();
       }
-      if (event.kind === "usage" && channel === "claude") {
-        // `usage` rides the `result` record, which is the turn's end. With
-        // stdin open the CLI would wait for a next turn; closing it is what
-        // lets the process exit and the run settle.
-        child.stdin?.end();
-      }
       if (event.kind === "turn_end") {
-        // Codex's end of turn. A failed turn is a failed run: the reply text
-        // so far is not an answer, and the close handler says why.
+        // The end of the turn, on either channel. With stdin open the CLI
+        // would wait for a next turn; closing it is what lets the process
+        // exit and the run settle. A failed turn is a failed run: the reply
+        // text so far is not an answer, and the close handler says why.
         if (event.status === "failed" || event.status === "interrupted") {
-          turnFault = `Codex turn ${event.status}${event.error === null ? "" : `: ${event.error}`}`;
+          turnFault = `${channel === "codex" ? "Codex" : "Claude"} turn ${event.status}${event.error === null ? "" : `: ${event.error}`}`;
+        } else {
+          endedCleanly = true;
         }
         child.stdin?.end();
         return;
@@ -674,7 +673,9 @@ export async function runGuiPrintTurn(
         reject(new Error(`agent.sendMessage: ${turnFault}`));
         return;
       }
-      if (text.length > 0) {
+      // A turn that said it was over is over, words or none: `/compact`
+      // ends on its boundary record and a `result`, and no assistant text.
+      if (text.length > 0 || endedCleanly) {
         resolve(text);
         return;
       }

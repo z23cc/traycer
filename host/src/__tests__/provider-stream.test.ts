@@ -54,6 +54,8 @@ describe("parseProviderStdoutLine", () => {
           costUsd: 0.01,
         },
       },
+      // The result is the end of the turn, counted or not - after its usage.
+      { kind: "turn_end", status: "completed", error: null },
     ]);
   });
 
@@ -262,6 +264,27 @@ describe("parseProviderStdoutLine", () => {
       preTokens: 24157,
       postTokens: 2118,
       durationMs: 4378,
+    });
+  });
+
+  /** Recorded live after a successful `/compact`: a result that counts nothing is still the end. */
+  it("reads a zero-usage result as the end of the turn", () => {
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"result","subtype":"success","is_error":false,"duration_ms":4,"duration_api_ms":0,"num_turns":0,"stop_reason":null,"session_id":"23400b4f-e765-46fc-9cb6-948603a61daf","total_cost_usd":0.03,"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}',
+      ),
+    ).toEqual([
+      { kind: "session", sessionId: "23400b4f-e765-46fc-9cb6-948603a61daf" },
+      { kind: "turn_end", status: "completed", error: null },
+    ]);
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":3,"result":"Reached max turns (3)","usage":{"input_tokens":9,"output_tokens":4}}',
+      ),
+    ).toContainEqual({
+      kind: "turn_end",
+      status: "failed",
+      error: "Reached max turns (3)",
     });
   });
 

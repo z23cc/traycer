@@ -132,7 +132,11 @@ export type ProviderStreamEvent =
       readonly description: string;
       readonly input: unknown;
     }
-  /** Codex's `turn/completed`: the turn is over, with or without a fault. */
+  /**
+   * The turn is over, with or without a fault: Codex's `turn/completed`, or
+   * Claude's `result` record - which is the end even when it counts nothing
+   * (`num_turns: 0` and zero usage, recorded live after `/compact`).
+   */
   | {
       readonly kind: "turn_end";
       readonly status: string;
@@ -252,6 +256,19 @@ function claudeRecordEvents(record: object): ProviderStreamEvent[] {
   }
   if (type === "system") {
     return claudeSystemEvent(record);
+  }
+  if (type === "result") {
+    const subtype = readString(record, "subtype");
+    const failed = subtype !== null && subtype !== "success";
+    return [
+      {
+        kind: "turn_end",
+        status: failed ? "failed" : "completed",
+        error: failed
+          ? (readString(record, "result") ?? subtype ?? "Claude turn failed")
+          : null,
+      },
+    ];
   }
   return [];
 }
