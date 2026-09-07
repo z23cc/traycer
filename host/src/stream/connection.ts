@@ -22,6 +22,7 @@ import { listState } from "../rpc/handlers/plain-terminal-handlers";
 import { handleChatClientFrame } from "./chat-actions";
 import { sendChatSnapshot } from "./chat";
 import { attachGitStatusStream } from "./git-status";
+import { EpicStateSubscriber } from "./epic-state";
 import {
   sendAgentActivitySnapshot,
   sendAnalogStreamSnapshot,
@@ -57,6 +58,7 @@ export function attachStreamConnection(
   let subscribeTimer: NodeJS.Timeout | null = null;
   let terminalStream: TerminalStreamSession | null = null;
   let fileListStream: WorkspaceFileListSession | null = null;
+  let epicState: EpicStateSubscriber | null = null;
   let pendingBinary: PendingBinary | null = null;
   const hostManifest = hostStreamManifest();
 
@@ -406,6 +408,19 @@ export function attachStreamConnection(
       void fileListStream.open(opened.data.workspacePath);
       return;
     }
+    if (subscribe.data.method === "epic.state.subscribe") {
+      const epicId = readEpicId(subscribe.data.params);
+      if (epicId === null) {
+        reject(
+          unauthorized("epic.state.subscribe requires epicId"),
+          "missing-epic",
+        );
+        return;
+      }
+      epicState = new EpicStateSubscriber(socket, runtime, epicId);
+      epicState.seed();
+      return;
+    }
     if (UNSERVED_STREAM_METHOD_NAMES.includes(subscribe.data.method)) {
       reject(
         {
@@ -447,6 +462,15 @@ export function attachStreamConnection(
       return;
     }
     if (runtime.graphs.handleFrame(socket, parsed)) {
+      return;
+    }
+    if (
+      epicState !== null &&
+      parsed !== null &&
+      typeof parsed === "object" &&
+      Reflect.get(parsed, "kind") === "ping"
+    ) {
+      epicState.pong();
       return;
     }
     if (parsed === null || typeof parsed !== "object" || !("kind" in parsed)) {

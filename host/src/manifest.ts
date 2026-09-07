@@ -41,7 +41,6 @@ export const UNSERVED_STREAM_METHOD_NAMES: readonly string[] = [
   "browser.screencast",
   "host.communicationGraph.subscribe",
   "host.notifications.cloudFeed.subscribe",
-  "epic.state.subscribe",
   "git.streamFileAsset",
   "managedCommand.subscribeOutput",
   "migration.run",

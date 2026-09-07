@@ -199,7 +199,7 @@ export function listCommentThreads(
         row.artifactId === artifactId,
     )
     .sort((left, right) => left.createdAt - right.createdAt)
-    .map(toWire);
+    .map(commentThreadWire);
 }
 
 export function listCommentsArtifacts(
@@ -261,7 +261,7 @@ export function listCommentsArtifacts(
       threads: bucket
         .sort((left, right) => left.createdAt - right.createdAt)
         .map((thread, index) => ({
-          thread: toWire(thread),
+          thread: commentThreadWire(thread),
           anchorStatus: artifact === undefined ? "missing" : "present",
           anchorOrder: index,
           anchorWarning: null,
@@ -392,7 +392,10 @@ function newComment(content: JsonContent, now: number): StoredComment {
   };
 }
 
-function toWire(thread: StoredCommentThread): CommentThreadWire {
+/** The one comment-thread wire projection: cold read and records lane share it. */
+export function commentThreadWire(
+  thread: StoredCommentThread,
+): CommentThreadWire {
   return {
     threadId: thread.threadId,
     resolved: thread.resolved,
