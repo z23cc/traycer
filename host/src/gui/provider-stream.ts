@@ -861,8 +861,11 @@ function codexServerRequest(
         kind: "permission_request",
         requestId,
         toolUseId: itemId,
-        toolName: "apply_patch",
-        description: readString(params, "reason") ?? "Apply file changes",
+        toolName: "file_change",
+        description:
+          readString(params, "reason") ??
+          readString(params, "title") ??
+          "File change",
         input: params,
       },
     ];

@@ -2078,7 +2078,7 @@ describe("local GUI send without cloud login", () => {
     // The paths come from the item's announcement, not the request - which
     // names only the item.
     expect(pending).toMatchObject({
-      toolName: "apply_patch",
+      toolName: "file_change",
       paths: [target],
       operation: "create",
     });

@@ -561,8 +561,8 @@ describe("parseProviderStdoutLine", () => {
         kind: "permission_request",
         requestId: "0",
         toolUseId: "exec-7801",
-        toolName: "apply_patch",
-        description: "Apply file changes",
+        toolName: "file_change",
+        description: "File change",
         input: {
           threadId: "t",
           turnId: "u",

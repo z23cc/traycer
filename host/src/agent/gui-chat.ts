@@ -1361,7 +1361,7 @@ const EDIT_TOOLS: ReadonlySet<string> = new Set([
   "Write",
   "NotebookEdit",
   // Codex's file-change item, whose paths ride its announcement.
-  "apply_patch",
+  "file_change",
 ]);
 const EDIT_PATH_KEYS = [
   "file_path",
@@ -1481,7 +1481,7 @@ async function decidePermission(
     return;
   }
   const paths = EDIT_TOOLS.has(request.toolName)
-    ? request.toolName === "apply_patch"
+    ? request.toolName === "file_change"
       ? turn.announcedPaths
       : editPaths(request.input)
     : [];
