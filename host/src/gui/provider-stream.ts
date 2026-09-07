@@ -150,6 +150,20 @@ export type ProviderStreamEvent =
       readonly requestId: string;
       readonly method: string;
     }
+  /**
+   * Claude compacting its context, recorded live around `/compact`: a
+   * `status: "compacting"` record, then either `compact_result: "failed"`
+   * with the reason or a `compact_boundary` carrying the numbers.
+   */
+  | { readonly kind: "compaction_started" }
+  | { readonly kind: "compaction_failed"; readonly error: string }
+  | {
+      readonly kind: "compaction_completed";
+      readonly trigger: "auto" | "manual" | null;
+      readonly preTokens: number | null;
+      readonly postTokens: number | null;
+      readonly durationMs: number | null;
+    }
   | { readonly kind: "usage"; readonly usage: ProviderTokenUsage };
 
 export function parseProviderStdoutLine(line: string): ProviderStreamEvent[] {
@@ -262,6 +276,35 @@ function claudeSystemEvent(record: object): ProviderStreamEvent[] {
   // already has, so the two compose into one card rather than fighting.
   if (subtype === "task_updated" || subtype === "task_notification") {
     return claudeTaskEnded(record, subtype);
+  }
+  if (subtype === "status") {
+    if (readString(record, "status") === "compacting") {
+      return [{ kind: "compaction_started" }];
+    }
+    if (readString(record, "compact_result") === "failed") {
+      return [
+        {
+          kind: "compaction_failed",
+          error: readString(record, "compact_error") ?? "Compaction failed",
+        },
+      ];
+    }
+    return [];
+  }
+  if (subtype === "compact_boundary") {
+    const metadata = Reflect.get(record, "compact_metadata");
+    const meta =
+      metadata !== null && typeof metadata === "object" ? metadata : {};
+    const trigger = readString(meta, "trigger");
+    return [
+      {
+        kind: "compaction_completed",
+        trigger: trigger === "auto" || trigger === "manual" ? trigger : null,
+        preTokens: readNumber(meta, "pre_tokens"),
+        postTokens: readNumber(meta, "post_tokens"),
+        durationMs: readNumber(meta, "duration_ms"),
+      },
+    ];
   }
   if (subtype !== "api_retry") {
     return [];

@@ -222,6 +222,49 @@ describe("parseProviderStdoutLine", () => {
    * subagent. Claude reports the whole life of it on the PARENT's stream, and
    * the ids are two: the task owns the card, the tool call spawned it.
    */
+  /**
+   * Recorded live around `/compact`: the status record that opens it, then
+   * the failure that closed one ("Not enough messages to compact.") and, in a
+   * longer session, the boundary that closed another with the numbers.
+   */
+  it("reads compaction off the status and boundary records", () => {
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"system","subtype":"status","status":"compacting","session_id":"891b8851-c4ec-4864-a7c8-0c773f09399a","uuid":"8bd17779-ea63-4141-95ee-01afed343178"}',
+      ),
+    ).toEqual([
+      { kind: "session", sessionId: "891b8851-c4ec-4864-a7c8-0c773f09399a" },
+      { kind: "compaction_started" },
+    ]);
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"system","subtype":"status","status":null,"compact_result":"failed","compact_error":"Not enough messages to compact.","session_id":"891b8851-c4ec-4864-a7c8-0c773f09399a","uuid":"b3fb0810-95a0-4ed2-8ac6-7ed7bbeca488"}',
+      ),
+    ).toContainEqual({
+      kind: "compaction_failed",
+      error: "Not enough messages to compact.",
+    });
+    // The success status record says nothing the boundary does not.
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"system","subtype":"status","status":null,"compact_result":"success","session_id":"23400b4f-e765-46fc-9cb6-948603a61daf","uuid":"8030f5d8-4e87-444e-811d-57db455e3ab2"}',
+      ),
+    ).toEqual([
+      { kind: "session", sessionId: "23400b4f-e765-46fc-9cb6-948603a61daf" },
+    ]);
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"system","subtype":"compact_boundary","session_id":"23400b4f-e765-46fc-9cb6-948603a61daf","uuid":"8e4e722d-30b5-49de-883f-f58149f3dcae","compact_metadata":{"trigger":"manual","pre_tokens":24157,"post_tokens":2118,"cumulative_dropped_tokens":22039,"duration_ms":4378,"preserved_segment":{"head_uuid":"e218a956-589c-4e87-8797-b7eae7cb6d38","anchor_uuid":"45e5bda0-8d0a-4444-97df-9c621097f458","tail_uuid":"a4dc34f3-6072-46a9-930c-65e8637a3b3e"}},"logical_parent_uuid":"a4dc34f3-6072-46a9-930c-65e8637a3b3e"}',
+      ),
+    ).toContainEqual({
+      kind: "compaction_completed",
+      trigger: "manual",
+      preTokens: 24157,
+      postTokens: 2118,
+      durationMs: 4378,
+    });
+  });
+
   /** Recorded live around `Bash: sleep 3` - a task record, but no agent. */
   it("does not read a Bash call's task record as a subagent", () => {
     expect(

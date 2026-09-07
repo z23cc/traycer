@@ -202,18 +202,9 @@ export function beginGuiPrintTurn(
     assistantMessageId,
     turnId,
     resumed,
-    compact: isManualCompact(input.prompt),
     startedAt: Date.now(),
   });
   broadcastTurnStateChanged(runtime, input.epicId, input.chatId);
-  if (isManualCompact(input.prompt)) {
-    broadcastBlockDelta(runtime, input.epicId, input.chatId, {
-      type: "compaction.started",
-      blockId: `${turnId}-compact`,
-      timestamp: Date.now(),
-      trigger: "manual",
-    });
-  }
   broadcastEventAppended(runtime, input.epicId, input.chatId, {
     type: "turn.started",
     message: "Turn started.",
@@ -576,6 +567,13 @@ async function runAndPersistAssistant(
   const cardByTool = new Map<string, string>();
   /** Tasks that opened a card, so a stray progress or end record opens none. */
   const startedTasks = new Set<string>();
+  // The released host's compaction block id: `compaction:<session>:<n>:<nonce>`,
+  // counted per `compacting` record so a second compaction in one session is
+  // its own card, and the failure or boundary that follows names the same one.
+  let compactions = 0;
+  const compactionNonce = randomUUID();
+  const compactionBlockId = (): string =>
+    `compaction:${providerSessionId ?? "unknown-session"}:${Math.max(compactions, 1)}:${compactionNonce}`;
   /**
    * The spawning call above each tool call a CHILD made. A nested sub-agent's
    * `task_started` names the child's own spawn call, and this is the one hop
@@ -892,6 +890,36 @@ async function runAndPersistAssistant(
           ? {}
           : { spawnToolCallId: event.spawnToolId }),
         ...(event.task === null ? {} : { task: event.task }),
+      });
+      return;
+    }
+    if (event.kind === "compaction_started") {
+      compactions += 1;
+      emit({
+        type: "compaction.started",
+        blockId: compactionBlockId(),
+        timestamp: now,
+      });
+      return;
+    }
+    if (event.kind === "compaction_failed") {
+      emit({
+        type: "compaction.errored",
+        blockId: compactionBlockId(),
+        timestamp: now,
+        error: event.error,
+      });
+      return;
+    }
+    if (event.kind === "compaction_completed") {
+      emit({
+        type: "compaction.completed",
+        blockId: compactionBlockId(),
+        timestamp: now,
+        ...(event.trigger === null ? {} : { trigger: event.trigger }),
+        ...(event.preTokens === null ? {} : { preTokens: event.preTokens }),
+        ...(event.postTokens === null ? {} : { postTokens: event.postTokens }),
+        ...(event.durationMs === null ? {} : { durationMs: event.durationMs }),
       });
       return;
     }
@@ -2378,11 +2406,6 @@ async function persistProviderSession(
   });
 }
 
-function isManualCompact(prompt: string): boolean {
-  const trimmed = prompt.trim();
-  return trimmed === "/compact" || trimmed.startsWith("/compact ");
-}
-
 function matchingProviderSession(
   session: StoredChat["providerSession"],
   harnessId: string,
@@ -2414,14 +2437,6 @@ async function finishPrint(
   const stopped = runtime.guiRuns.wasStopped(chatId);
   const now = Date.now();
   const turnId = print?.turnId ?? assistantMessageId;
-  if (print?.compact === true) {
-    broadcastBlockDelta(runtime, epicId, chatId, {
-      type: "compaction.completed",
-      blockId: `${turnId}-compact`,
-      timestamp: now,
-      trigger: "manual",
-    });
-  }
   broadcastBlockDelta(runtime, epicId, chatId, {
     type: "text.completed",
     blockId: assistantTextBlockId(assistantMessageId),

@@ -1300,7 +1300,6 @@ describe("local GUI send without cloud login", () => {
       assistantMessageId: "assistant-13",
       turnId: "turn:13",
       resumed: false,
-      compact: false,
       startedAt: Date.now(),
     });
     const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
@@ -2435,6 +2434,68 @@ describe("local GUI send without cloud login", () => {
       false,
     );
     expect(JSON.stringify(blocks)).toContain("first");
+  });
+
+  /**
+   * A `/compact` turn's card is drawn from the CLI's own records - the
+   * status that opens it and the boundary that closes it with the numbers -
+   * under the released host's id, so a second compaction in the same session
+   * is a second card.
+   */
+  it("draws a compaction card from the status and boundary records", async () => {
+    const stdout = [
+      '{"type":"system","subtype":"init","session_id":"sess-compact"}',
+      '{"type":"system","subtype":"status","status":"compacting","session_id":"sess-compact"}',
+      '{"type":"system","subtype":"status","status":null,"compact_result":"success","session_id":"sess-compact"}',
+      '{"type":"system","subtype":"compact_boundary","session_id":"sess-compact","compact_metadata":{"trigger":"manual","pre_tokens":24157,"post_tokens":2118,"duration_ms":4378}}',
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"compacted"}]}}',
+      '{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}',
+    ];
+    const setup = await bootWithCli(
+      [
+        "#!/bin/sh",
+        "read -r prompt",
+        ...stdout.map((line) => `printf '%s\n' '${line}'`),
+        "",
+      ].join("\n"),
+      "claude",
+    );
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-28", "chat-28");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-28",
+      chatId: "chat-28",
+      clientActionId: "action-28",
+      messageId: "msg-user-28",
+      text: "/compact",
+      permissionMode: null,
+      harnessId: null,
+    });
+    const frames = await waitForSealedBlocks(
+      streamUrl,
+      "epic-28",
+      "chat-28",
+      "compaction",
+      80,
+      50,
+    );
+    const blocks = assistantBlocks(frames, "epic-28", "chat-28");
+    const cards = blocks.filter(
+      (block) => Reflect.get(block, "type") === "compaction",
+    );
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({
+      status: "completed",
+      trigger: "manual",
+      preTokens: 24157,
+      postTokens: 2118,
+      durationMs: 4378,
+    });
+    expect(String(Reflect.get(cards[0] ?? {}, "blockId"))).toMatch(
+      /^compaction:sess-compact:1:[0-9a-f-]{36}$/u,
+    );
   });
 });
 

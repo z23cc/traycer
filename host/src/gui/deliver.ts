@@ -25,7 +25,6 @@ export type GuiPrintTurnState = {
   readonly assistantMessageId: string;
   readonly turnId: string;
   readonly resumed: boolean;
-  readonly compact: boolean;
   readonly startedAt: number;
 };
 
