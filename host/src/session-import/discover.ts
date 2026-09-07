@@ -13,6 +13,7 @@ import type {
   SessionImportCandidate,
   SessionImportGroup,
 } from "@traycer/protocol/host/session-import/candidate";
+import { isHarnessPreamble, messageText } from "./vendor";
 
 /**
  * Reads the vendors' own session directories so `sessionImport.scan` can offer
@@ -44,6 +45,8 @@ const READABLE: readonly GuiHarnessId[] = ["claude", "codex"];
  */
 export type DiscoveredSession = {
   readonly candidate: SessionImportCandidate;
+  /** The vendor file it was read from; the import opens this one. */
+  readonly file: string;
   /** The session's own `cwd`, or null when the file recorded none. */
   readonly folder: string | null;
   /** The vendor's name for the folder holding the file; used when `folder` is null. */
@@ -284,6 +287,7 @@ function describeSession(
   } catch (error) {
     return unreadable(
       base,
+      file,
       fallbackLabel,
       null,
       "source_unreadable",
@@ -297,6 +301,7 @@ function describeSession(
     // user recognizes best next to the work it was abandoned beside.
     return unreadable(
       base,
+      file,
       fallbackLabel,
       head.cwd,
       "source_empty",
@@ -304,6 +309,7 @@ function describeSession(
     );
   }
   return {
+    file,
     candidate: {
       ...base,
       nativeSessionId:
@@ -364,7 +370,7 @@ function readClaudeHead(lines: readonly string[]): Head {
     ) {
       continue;
     }
-    firstPrompt = promptOf(Reflect.get(row, "message"));
+    firstPrompt = userPrompt(Reflect.get(row, "message"));
   }
   return { sawMessage, sessionId, cwd, title, firstPrompt, createdAt };
 }
@@ -396,7 +402,7 @@ function readCodexHead(lines: readonly string[]): Head {
     }
     sawMessage = true;
     if (text(payload, "role") === "user" && firstPrompt === null) {
-      firstPrompt = promptOf(payload);
+      firstPrompt = userPrompt(payload);
     }
   }
   // Codex names a session by its rollout file alone; it stores no title.
@@ -404,41 +410,31 @@ function readCodexHead(lines: readonly string[]): Head {
 }
 
 /**
- * A prompt out of either vendor's message shape: a bare string, or the content
- * blocks both use, of which only the text ones read as a prompt.
+ * The prompt a user actually typed, or null when the `user` message is the
+ * harness injecting its own context - which is a row the wizard would
+ * otherwise show, and a title the import would otherwise use.
  */
-function promptOf(message: unknown): string | null {
+function userPrompt(message: unknown): string | null {
   if (message === null || typeof message !== "object") {
     return null;
   }
-  const content = Reflect.get(message, "content");
-  if (typeof content === "string") {
-    return content.length > 0 ? content : null;
-  }
-  if (!Array.isArray(content)) {
+  const text = messageText(Reflect.get(message, "content"));
+  if (text === null || isHarnessPreamble(text)) {
     return null;
   }
-  const parts: string[] = [];
-  for (const block of content) {
-    if (block === null || typeof block !== "object") {
-      continue;
-    }
-    const value = Reflect.get(block, "text");
-    if (typeof value === "string" && value.length > 0) {
-      parts.push(value);
-    }
-  }
-  return parts.length === 0 ? null : parts.join("\n");
+  return text;
 }
 
 function unreadable(
   base: SessionBase,
+  file: string,
   fallbackLabel: string,
   folder: string | null,
   reason: "source_unreadable" | "source_empty",
   detail: string,
 ): DiscoveredSession {
   return {
+    file,
     candidate: {
       ...base,
       title: null,

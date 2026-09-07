@@ -43,7 +43,6 @@ export const UNSERVED_STREAM_METHOD_NAMES: readonly string[] = [
   "managedCommand.subscribeOutput",
   "migration.run",
   "pr.subscribeDetail",
-  "sessionImport.run",
   "speech.dictate",
 ];
 

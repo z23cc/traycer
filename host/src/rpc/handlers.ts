@@ -283,6 +283,16 @@ export function handlerFor(method: string): RpcHandler {
   return analogFallback(method);
 }
 
+/**
+ * The only safe "is anything happening" question: the run outlives its socket,
+ * so a Settings pane that opens after the wizard was closed asks HERE rather
+ * than subscribing and thereby attaching to - or starting - a run.
+ */
+const handleSessionImportStatus: RpcHandler = async (_params, runtime) => ({
+  ok: true,
+  result: runtime.sessionImports.status(),
+});
+
 function analogFallback(method: string): RpcHandler {
   return () => {
     const analog = analogResultForMethod(method);
@@ -302,6 +312,7 @@ export function implementedRpcMethods(): readonly string[] {
 }
 
 const CONCRETE_HANDLERS: { readonly [method: string]: RpcHandler } = {
+  "sessionImport.status": handleSessionImportStatus,
   "host.status": handleHostStatus,
   "host.restart": handleHostRestart,
   "host.getRuntimeCapabilities": handleRuntimeCapabilities,

@@ -73,6 +73,7 @@ export function attachStreamConnection(
   let assetStream: AssetStreamSession | null = null;
   let resources: ResourcesSubscriber | null = null;
   let deleteCommands = false;
+  let sessionImportRun = false;
   let pendingBinary: PendingBinary | null = null;
   const hostManifest = hostStreamManifest();
 
@@ -92,6 +93,7 @@ export function attachStreamConnection(
     runtime.artifactDocs.remove(socket);
     resources?.stop();
     runtime.worktreeDeletes.detach(socket);
+    runtime.sessionImports.detach(socket);
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
@@ -111,6 +113,7 @@ export function attachStreamConnection(
     runtime.artifactDocs.remove(socket);
     resources?.stop();
     runtime.worktreeDeletes.detach(socket);
+    runtime.sessionImports.detach(socket);
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
@@ -561,6 +564,18 @@ export function attachStreamConnection(
       }
       return;
     }
+    if (subscribe.data.method === "sessionImport.run") {
+      sessionImportRun = true;
+      if (
+        !runtime.sessionImports.attach(socket, runtime, subscribe.data.params)
+      ) {
+        reject(
+          unauthorized("sessionImport.run: malformed open request"),
+          "malformed-import-run",
+        );
+      }
+      return;
+    }
     if (subscribe.data.method === "worktree.deleteBatchByPath") {
       deleteCommands = true;
       if (
@@ -623,6 +638,12 @@ export function attachStreamConnection(
       return;
     }
     if (resources !== null && resources.handleFrame(parsed)) {
+      return;
+    }
+    if (
+      sessionImportRun &&
+      runtime.sessionImports.handleFrame(socket, parsed)
+    ) {
       return;
     }
     if (deleteCommands && runtime.worktreeDeletes.handleFrame(socket, parsed)) {

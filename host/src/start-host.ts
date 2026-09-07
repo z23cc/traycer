@@ -17,6 +17,8 @@ import { ChatHub } from "./stream/chat-hub";
 import { ChatRecordsHub } from "./stream/chat-records";
 import { CommunicationGraphHub } from "./stream/communication-graph";
 import { ArtifactDocHub } from "./stream/artifact-doc";
+import { defaultProviderRoots } from "./session-import/discover";
+import { SessionImportRuns } from "./stream/session-import-run";
 import { WorktreeDeleteCommands } from "./stream/worktree-delete";
 import { EpicStateHub } from "./stream/epic-state";
 import { ShutdownCoordinator } from "./lifecycle/shutdown";
@@ -77,6 +79,7 @@ export async function startHost(
     epicState: new EpicStateHub(),
     artifactDocs: new ArtifactDocHub(),
     worktreeDeletes: new WorktreeDeleteCommands(),
+    sessionImports: new SessionImportRuns(defaultProviderRoots()),
     authorityEpoch: `oss:${identity.hostId}:${String(Date.now())}`,
     notifications: new NotificationHub(),
     plainTerminals: new PlainTerminalHub(),

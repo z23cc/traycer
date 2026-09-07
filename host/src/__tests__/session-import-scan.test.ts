@@ -299,6 +299,7 @@ describe("session import discovery", () => {
     folder: string,
   ): DiscoveredSession {
     return {
+      file: `/tmp/${id}.jsonl`,
       candidate: {
         harness: "claude",
         nativeSessionId: id,

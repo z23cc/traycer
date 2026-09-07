@@ -855,14 +855,28 @@ async function bindEpicWorkspacesToChat(
   epic: StoredEpic,
   chatId: string,
 ): Promise<void> {
-  if (epic.workspaces.length === 0) {
+  await bindEpicWorkspaces(runtime, epic.id, epic.workspaces, chatId);
+}
+
+/**
+ * Binds an epic's folders to the chat that will work in them - the same
+ * registration "add folder" performs, taken by its pieces so a caller holding
+ * an epic it has just written does not have to read it back.
+ */
+export async function bindEpicWorkspaces(
+  runtime: HostRuntime,
+  epicId: string,
+  workspaces: readonly string[],
+  chatId: string,
+): Promise<void> {
+  if (workspaces.length === 0) {
     return;
   }
   await createWorktreeBinding(runtime, {
-    epicId: epic.id,
+    epicId,
     ownerId: chatId,
     ownerKind: "chat",
-    entries: epic.workspaces.map((workspacePath, index) => ({
+    entries: workspaces.map((workspacePath, index) => ({
       kind: "local" as const,
       workspacePath,
       repoIdentifier: null,
