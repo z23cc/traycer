@@ -906,6 +906,72 @@ describe("local GUI send without cloud login", () => {
       blocks.find((block) => Reflect.get(block, "type") === "error"),
     ).toMatchObject({ recoverable: false, status: "errored" });
   });
+
+  /**
+   * A subagent, reported entirely on the parent's stream. Two things have to
+   * be true at once: the card exists, and the child's own work is NOT filed
+   * as the main agent's - neither its tool calls nor its closing text.
+   */
+  it("keeps a subagent's card and none of its work", async () => {
+    const stdout = [
+      '{"type":"system","subtype":"init","session_id":"sess-task"}',
+      '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_p1","name":"Task","input":{"description":"List files","subagent_type":"Explore","prompt":"list the files here"}}]}}',
+      '{"type":"system","subtype":"task_started","task_id":"task-77","tool_use_id":"toolu_p1","description":"List files","subagent_type":"Explore","prompt":"list the files here"}',
+      '{"type":"assistant","parent_tool_use_id":"toolu_p1","message":{"content":[{"type":"tool_use","id":"toolu_c1","name":"Bash","input":{"command":"ls -la"}}]}}',
+      '{"type":"user","parent_tool_use_id":"toolu_p1","message":{"content":[{"type":"tool_result","content":"a.txt","tool_use_id":"toolu_c1"}]}}',
+      '{"type":"system","subtype":"task_progress","task_id":"task-77","description":"Running ls"}',
+      '{"type":"assistant","parent_tool_use_id":"toolu_p1","message":{"content":[{"type":"text","text":"CHILD-TEXT-LEAK"}]}}',
+      '{"type":"system","subtype":"task_notification","task_id":"task-77","tool_use_id":"toolu_p1","status":"completed","summary":"one file"}',
+      '{"type":"user","message":{"content":[{"type":"tool_result","content":"one file","tool_use_id":"toolu_p1"}]}}',
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"task-ok"}]}}',
+      '{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}',
+    ];
+    const setup = await bootWithCli(
+      [
+        "#!/bin/sh",
+        ...stdout.map((line) => `printf '%s\n' '${line}'`),
+        "",
+      ].join("\n"),
+    );
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-11", "chat-11");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-11",
+      chatId: "chat-11",
+      clientActionId: "action-11",
+      messageId: "msg-user-11",
+      text: "delegate it",
+    });
+    await waitForChatText(streamUrl, "epic-11", "chat-11", "task-ok", 80, 50);
+
+    const frames = await collectChatFrames(streamUrl, "epic-11", "chat-11");
+    const blocks = assistantBlocks(frames, "epic-11", "chat-11");
+    expect(
+      blocks.find((block) => Reflect.get(block, "type") === "subagent"),
+    ).toMatchObject({
+      blockId: "task-77",
+      name: "List files",
+      agentType: "Explore",
+      // Named so the GUI drops the `Task` row this card stands in for.
+      spawnToolCallId: "toolu_p1",
+      progressUpdates: ["Running ls"],
+      result: "one file",
+      status: "completed",
+    });
+    // The child's Bash call is the child's. Only the spawning `Task` call is
+    // this turn's.
+    expect(
+      blocks
+        .filter((block) => Reflect.get(block, "type") === "tool_call")
+        .map((block) => Reflect.get(block, "toolName")),
+    ).toEqual(["Task"]);
+    // And the child's closing words are not the assistant's. This is the
+    // assertion the block types alone would pass either way.
+    const text = blocks.find((block) => Reflect.get(block, "type") === "text");
+    expect(Reflect.get(text ?? {}, "text")).toBe("task-ok");
+  });
 });
 
 /** The blocks of the last assistant message in a fresh subscribe's snapshot. */

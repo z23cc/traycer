@@ -267,6 +267,100 @@ describe("parseProviderStdoutLine", () => {
     ]);
   });
 
+  /**
+   * Recorded from a real run whose only instruction was to launch one
+   * subagent. Claude reports the whole life of it on the PARENT's stream, and
+   * the ids are two: the task owns the card, the tool call spawned it.
+   */
+  it("reads a subagent's life off the parent's task records", () => {
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"system","subtype":"task_started","task_id":"a9da2eb36db32ce2b","tool_use_id":"toolu_01AR","description":"List files in current directory","subagent_type":"Explore","is_backgrounded":true,"spawn_depth":1,"prompt":"list the files here"}',
+      ),
+    ).toEqual([
+      {
+        kind: "subagent_start",
+        taskId: "a9da2eb36db32ce2b",
+        name: "List files in current directory",
+        task: "list the files here",
+        agentType: "Explore",
+        spawnToolId: "toolu_01AR",
+      },
+    ]);
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"system","subtype":"task_progress","task_id":"a9da2eb36db32ce2b","description":"Running List all files in the working directory","last_tool_name":"Bash"}',
+      ),
+    ).toEqual([
+      {
+        kind: "subagent_progress",
+        taskId: "a9da2eb36db32ce2b",
+        update: "Running List all files in the working directory",
+      },
+    ]);
+    // The status record and the summary record are both terminal, and both
+    // are read: one knows how it ended, the other knows what it said.
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"system","subtype":"task_updated","task_id":"a9da2eb36db32ce2b","patch":{"status":"completed","end_time":1788775778365}}',
+      ),
+    ).toEqual([
+      {
+        kind: "subagent_end",
+        taskId: "a9da2eb36db32ce2b",
+        outcome: "completed",
+        result: null,
+      },
+    ]);
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"system","subtype":"task_notification","task_id":"a9da2eb36db32ce2b","tool_use_id":"toolu_01AR","status":"completed","output_file":"/tmp/x.output","summary":"one file"}',
+      ),
+    ).toEqual([
+      {
+        kind: "subagent_end",
+        taskId: "a9da2eb36db32ce2b",
+        outcome: "completed",
+        result: "one file",
+      },
+    ]);
+    // A running task reports its status too, and a word this host cannot read
+    // is not evidence of an ending. Neither closes the card.
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"system","subtype":"task_updated","task_id":"a9da2eb36db32ce2b","patch":{"status":"running"}}',
+      ),
+    ).toEqual([]);
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"system","subtype":"task_notification","task_id":"a9da2eb36db32ce2b","status":"reticulating"}',
+      ),
+    ).toEqual([]);
+  });
+
+  /**
+   * The child's transcript rides the parent's stream verbatim. Without the
+   * guard its tool calls arrive as the main agent's, and its closing text is
+   * appended to the main reply.
+   */
+  it("drops the records that belong to a subagent, not this turn", () => {
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"assistant","parent_tool_use_id":"toolu_01AR","message":{"content":[{"type":"tool_use","id":"toolu_016S","name":"Bash","input":{"command":"ls -la"}}]}}',
+      ),
+    ).toEqual([]);
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"assistant","parent_tool_use_id":"toolu_01AR","message":{"content":[{"type":"text","text":"The working directory contains 1 file"}]}}',
+      ),
+    ).toEqual([]);
+    expect(
+      parseProviderStdoutLine(
+        '{"type":"user","parent_tool_use_id":"toolu_01AR","message":{"content":[{"type":"tool_result","content":"a.txt","tool_use_id":"toolu_016S"}]}}',
+      ),
+    ).toEqual([]);
+  });
+
   it("ignores unstructured CLI text so the plain-stdout path can take over", () => {
     expect(parseProviderStdoutLine("assistant-ok")).toEqual([]);
   });

@@ -584,6 +584,44 @@ async function runAndPersistAssistant(
       });
       return;
     }
+    if (event.kind === "subagent_start") {
+      broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+        type: "subagent.started",
+        // The TASK id, not the spawning call's: one `Task` tool call is one
+        // sub-agent run, but the ids are different and every later record
+        // about this run is keyed by the task.
+        blockId: event.taskId,
+        timestamp: now,
+        name: event.name,
+        agentType: event.agentType,
+        // Named so the GUI can drop the `Task` tool row this card replaces -
+        // the same pairing the file card uses against its edit call.
+        ...(event.spawnToolId === null
+          ? {}
+          : { spawnToolCallId: event.spawnToolId }),
+        ...(event.task === null ? {} : { task: event.task }),
+      });
+      return;
+    }
+    if (event.kind === "subagent_progress") {
+      broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+        type: "subagent.progress",
+        blockId: event.taskId,
+        timestamp: now,
+        update: event.update,
+      });
+      return;
+    }
+    if (event.kind === "subagent_end") {
+      broadcastBlockDelta(runtime, input.epicId, input.chatId, {
+        type: "subagent.completed",
+        blockId: event.taskId,
+        timestamp: now,
+        outcome: event.outcome,
+        ...(event.result === null ? {} : { result: event.result }),
+      });
+      return;
+    }
     if (event.kind === "auth_failure") {
       authFailure = event;
       return;

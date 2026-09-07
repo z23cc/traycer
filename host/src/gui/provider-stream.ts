@@ -79,6 +79,33 @@ export type ProviderStreamEvent =
       readonly toolId: string;
       readonly items: readonly RuntimeTodoItem[];
     }
+  /**
+   * A sub-agent the harness spawned. Claude reports the whole life of one on
+   * the PARENT's stream - a `task_started`, a rotating `task_progress`, and a
+   * terminal `task_notification` - keyed by a task id that is not the id of
+   * the tool call that spawned it. Both are carried: the task id owns the
+   * card, and the tool id is what lets the GUI drop the duplicate `Task` row
+   * in front of it.
+   */
+  | {
+      readonly kind: "subagent_start";
+      readonly taskId: string;
+      readonly name: string;
+      readonly task: string | null;
+      readonly agentType: string | null;
+      readonly spawnToolId: string | null;
+    }
+  | {
+      readonly kind: "subagent_progress";
+      readonly taskId: string;
+      readonly update: string;
+    }
+  | {
+      readonly kind: "subagent_end";
+      readonly taskId: string;
+      readonly outcome: "completed" | "failed" | "stopped";
+      readonly result: string | null;
+    }
   | { readonly kind: "usage"; readonly usage: ProviderTokenUsage };
 
 export function parseProviderStdoutLine(line: string): ProviderStreamEvent[] {
@@ -116,6 +143,15 @@ function sessionEvents(record: object): ProviderStreamEvent[] {
 }
 
 function claudeEvents(record: object): ProviderStreamEvent[] {
+  // A record belonging to a sub-agent, and not to this turn. The parent's
+  // stream carries the child's whole transcript inline, so without this guard
+  // the child's tool calls arrive as the main agent's and its closing text is
+  // appended to the main reply. Read before the type dispatch: it is a
+  // top-level field on every child record, whatever its type, and the
+  // `system` task records that DO describe the child never carry it.
+  if (readString(record, "parent_tool_use_id") !== null) {
+    return [];
+  }
   const type = readString(record, "type");
   if (type === "stream_event") {
     const event = Reflect.get(record, "event");
@@ -147,7 +183,21 @@ function claudeEvents(record: object): ProviderStreamEvent[] {
  * transient and the retry is the right response to it.
  */
 function claudeSystemEvent(record: object): ProviderStreamEvent[] {
-  if (readString(record, "subtype") !== "api_retry") {
+  const subtype = readString(record, "subtype");
+  if (subtype === "task_started") {
+    return claudeTaskStarted(record);
+  }
+  if (subtype === "task_progress") {
+    return claudeTaskProgress(record);
+  }
+  // Both terminal records are read. `task_updated` carries the status and
+  // nothing else; `task_notification` carries the summary and arrives after
+  // it. The accumulator replaces the block in place and keeps a result it
+  // already has, so the two compose into one card rather than fighting.
+  if (subtype === "task_updated" || subtype === "task_notification") {
+    return claudeTaskEnded(record, subtype);
+  }
+  if (subtype !== "api_retry") {
     return [];
   }
   const status = readNumber(record, "error_status");
@@ -161,6 +211,99 @@ function claudeSystemEvent(record: object): ProviderStreamEvent[] {
       detail: readString(record, "error") ?? "authentication_failed",
     },
   ];
+}
+
+function claudeTaskStarted(record: object): ProviderStreamEvent[] {
+  const taskId = readString(record, "task_id");
+  if (taskId === null) {
+    return [];
+  }
+  const description = readString(record, "description");
+  const subagentType = readString(record, "subagent_type");
+  return [
+    {
+      kind: "subagent_start",
+      taskId,
+      // The card needs a title. The description is the one the agent wrote for
+      // this run; the type is what it wrote it for.
+      name: description ?? subagentType ?? "Subagent",
+      task: readString(record, "prompt"),
+      agentType: subagentType,
+      spawnToolId: readString(record, "tool_use_id"),
+    },
+  ];
+}
+
+function claudeTaskProgress(record: object): ProviderStreamEvent[] {
+  const taskId = readString(record, "task_id");
+  const update = readString(record, "description");
+  if (taskId === null || update === null) {
+    return [];
+  }
+  return [{ kind: "subagent_progress", taskId, update }];
+}
+
+function claudeTaskEnded(
+  record: object,
+  subtype: string,
+): ProviderStreamEvent[] {
+  const taskId = readString(record, "task_id");
+  if (taskId === null) {
+    return [];
+  }
+  const patch = Reflect.get(record, "patch");
+  const status =
+    subtype === "task_notification"
+      ? readString(record, "status")
+      : patch === null || typeof patch !== "object"
+        ? null
+        : readString(patch, "status");
+  if (status === null) {
+    return [];
+  }
+  // Only a terminal status this host can actually read closes the card: a
+  // running task reports its status too, and a word we cannot read is not
+  // evidence of an ending. Either way the card stays open, and the turn's own
+  // terminal event finalizes it - which is the contract's answer for "nobody
+  // said how this ended".
+  const outcome = subagentOutcome(status);
+  if (outcome === null || outcome === "running") {
+    return [];
+  }
+  return [
+    {
+      kind: "subagent_end",
+      taskId,
+      outcome,
+      result: readString(record, "summary"),
+    },
+  ];
+}
+
+/**
+ * The words this host is willing to read off a task status.
+ *
+ * Anything else is `null`, which leaves the wire field unset and the contract
+ * to apply its own default - the alternative being to call an outcome we
+ * could not read a completion.
+ */
+function subagentOutcome(
+  status: string,
+): "completed" | "failed" | "stopped" | "running" | null {
+  const word = status.toLowerCase();
+  if (word === "completed" || word === "succeeded" || word === "success") {
+    return "completed";
+  }
+  if (word === "failed" || word === "error" || word === "errored") {
+    return "failed";
+  }
+  if (word === "stopped" || word === "cancelled" || word === "canceled") {
+    return "stopped";
+  }
+  if (word === "running" || word === "in_progress" || word === "pending") {
+    return "running";
+  }
+  return null;
 }
 
 /**
