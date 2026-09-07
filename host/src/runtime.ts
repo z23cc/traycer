@@ -11,6 +11,7 @@ import type { CommunicationGraphHub } from "./stream/communication-graph";
 import type { ShutdownCoordinator } from "./lifecycle/shutdown";
 import type { EpicHub } from "./stream/epic-hub";
 import type { PlainTerminalHub } from "./terminal/plain";
+import type { ArtifactDocHub } from "./stream/artifact-doc";
 import type { EpicStateHub } from "./stream/epic-state";
 import type { PtyManager } from "./terminal/pty";
 import type { TerminalRegistry } from "./terminal/sessions";
@@ -31,6 +32,7 @@ export type HostRuntime = {
   readonly chatRecords: ChatRecordsHub;
   readonly graphs: CommunicationGraphHub;
   readonly epicState: EpicStateHub;
+  readonly artifactDocs: ArtifactDocHub;
   /**
    * This process's replica identity, stamped on every records-lane frame. It
    * carries the start time because the lane's positions are in-memory: a

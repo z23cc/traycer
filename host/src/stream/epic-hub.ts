@@ -153,6 +153,45 @@ export class EpicHub {
     void persistRoomMarkdown(runtime, epicId, artifactRoomId, room);
   }
 
+  /**
+   * The room `Y.Doc` holding one artifact's body, materialized if it is not
+   * already resident.
+   *
+   * `artifact.subscribe` is a per-artifact VIEW onto the same room
+   * `epic.subscribe` serves, never a second document: two docs for one body
+   * would drift, which is the failure the doc lane exists to prevent.
+   */
+  async bodyRoom(
+    runtime: HostRuntime,
+    epicId: string,
+    artifactId: string,
+  ): Promise<{ readonly room: Y.Doc; readonly roomId: string } | null> {
+    await assignRoomIds(runtime, epicId);
+    const artifact = runtime.store
+      .snapshot()
+      .artifacts.find(
+        (row) => row.epicId === epicId && row.artifactId === artifactId,
+      );
+    if (artifact === undefined || artifact.artifactRoomId.length === 0) {
+      return null;
+    }
+    const session = this.session(epicId);
+    await ensureRooms(session, runtime, epicId);
+    const room = session.rooms.get(artifact.artifactRoomId);
+    return room === undefined
+      ? null
+      : { room, roomId: artifact.artifactRoomId };
+  }
+
+  /** Persists a body edited through the doc lane, same path `epic.subscribe` uses. */
+  persistRoom(runtime: HostRuntime, epicId: string, roomId: string): void {
+    const room = this.sessions.get(epicId)?.rooms.get(roomId);
+    if (room === undefined) {
+      return;
+    }
+    void persistRoomMarkdown(runtime, epicId, roomId, room);
+  }
+
   private session(epicId: string): EpicSession {
     const existing = this.sessions.get(epicId);
     if (existing !== undefined) {

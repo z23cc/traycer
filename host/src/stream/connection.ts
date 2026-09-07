@@ -23,6 +23,7 @@ import { listState } from "../rpc/handlers/plain-terminal-handlers";
 import { handleChatClientFrame } from "./chat-actions";
 import { sendChatSnapshot } from "./chat";
 import { attachGitStatusStream } from "./git-status";
+import { ArtifactDocLane } from "./artifact-doc";
 import { EpicStateSubscriber } from "./epic-state";
 import {
   sendAgentActivitySnapshot,
@@ -49,6 +50,8 @@ type PendingBinary = {
   readonly kind: string;
   readonly epicId: string;
   readonly artifactRoomId: string | null;
+  /** Set only for the doc lane, whose write path is guarded by the body's guid. */
+  readonly docGuid: string | null;
 };
 
 export function attachStreamConnection(
@@ -60,6 +63,7 @@ export function attachStreamConnection(
   let terminalStream: TerminalStreamSession | null = null;
   let fileListStream: WorkspaceFileListSession | null = null;
   let epicState: EpicStateSubscriber | null = null;
+  let artifactDoc: ArtifactDocLane | null = null;
   let pendingBinary: PendingBinary | null = null;
   const hostManifest = hostStreamManifest();
 
@@ -76,6 +80,7 @@ export function attachStreamConnection(
     runtime.chatRecords.remove(socket);
     runtime.graphs.remove(socket);
     runtime.epicState.remove(socket);
+    runtime.artifactDocs.remove(socket);
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
@@ -92,6 +97,7 @@ export function attachStreamConnection(
     runtime.chatRecords.remove(socket);
     runtime.graphs.remove(socket);
     runtime.epicState.remove(socket);
+    runtime.artifactDocs.remove(socket);
     runtime.epics.remove(socket);
     terminalStream?.dispose();
     terminalStream = null;
@@ -445,6 +451,34 @@ export function attachStreamConnection(
       runtime.epicState.add(socket, epicState);
       return;
     }
+    if (subscribe.data.method === "artifact.subscribe") {
+      const epicId = readEpicId(subscribe.data.params);
+      const artifactId = Reflect.get(
+        subscribe.data.params === null ||
+          typeof subscribe.data.params !== "object"
+          ? {}
+          : subscribe.data.params,
+        "artifactId",
+      );
+      if (epicId === null || typeof artifactId !== "string") {
+        reject(
+          unauthorized("artifact.subscribe requires epicId and artifactId"),
+          "missing-artifact",
+        );
+        return;
+      }
+      artifactDoc = new ArtifactDocLane(socket, runtime, epicId, artifactId);
+      runtime.artifactDocs.add(socket, artifactDoc);
+      void artifactDoc.open(subscribe.data.params).then((ok) => {
+        if (!ok) {
+          reject(
+            unauthorized("artifact.subscribe: malformed open request"),
+            "malformed-artifact-open",
+          );
+        }
+      });
+      return;
+    }
     if (UNSERVED_STREAM_METHOD_NAMES.includes(subscribe.data.method)) {
       reject(
         {
@@ -495,13 +529,37 @@ export function attachStreamConnection(
       return;
     }
     if (parsed.kind === "ping") {
+      if (artifactDoc !== null) {
+        artifactDoc.pong();
+        return;
+      }
       sendJson({ kind: "pong", hasBinaryPayload: false });
+      return;
+    }
+    if (
+      artifactDoc !== null &&
+      (parsed.kind === "applyUpdate" || parsed.kind === "awareness")
+    ) {
+      // The doc lane owns the socket outright, so its `applyUpdate` /
+      // `awareness` are never the epic monolith's frames of the same name.
+      const docGuid = Reflect.get(parsed, "docGuid");
+      pendingBinary = {
+        kind: `doc:${parsed.kind}`,
+        epicId: artifactDoc.epicId,
+        artifactRoomId: null,
+        docGuid: typeof docGuid === "string" ? docGuid : null,
+      };
       return;
     }
     if (parsed.kind === "applyUpdate" || parsed.kind === "awareness") {
       const epicId = readEpicId(parsed);
       if (epicId !== null && Reflect.get(parsed, "hasBinaryPayload") === true) {
-        pendingBinary = { kind: parsed.kind, epicId, artifactRoomId: null };
+        pendingBinary = {
+          kind: parsed.kind,
+          epicId,
+          artifactRoomId: null,
+          docGuid: null,
+        };
       }
       return;
     }
@@ -520,6 +578,7 @@ export function attachStreamConnection(
           kind: parsed.kind,
           epicId,
           artifactRoomId,
+          docGuid: null,
         };
       }
       return;
@@ -529,6 +588,16 @@ export function attachStreamConnection(
 
   function applyPendingBinary(bytes: Buffer): void {
     if (pendingBinary === null) {
+      return;
+    }
+    if (artifactDoc !== null && pendingBinary.kind.startsWith("doc:")) {
+      if (pendingBinary.kind === "doc:awareness") {
+        artifactDoc.awareness(bytes);
+        return;
+      }
+      if (pendingBinary.docGuid !== null) {
+        artifactDoc.applyUpdate(pendingBinary.docGuid, bytes);
+      }
       return;
     }
     if (pendingBinary.kind === "applyUpdate") {

@@ -16,6 +16,7 @@ import { PlainTerminalHub } from "./terminal/plain";
 import { ChatHub } from "./stream/chat-hub";
 import { ChatRecordsHub } from "./stream/chat-records";
 import { CommunicationGraphHub } from "./stream/communication-graph";
+import { ArtifactDocHub } from "./stream/artifact-doc";
 import { EpicStateHub } from "./stream/epic-state";
 import { ShutdownCoordinator } from "./lifecycle/shutdown";
 import { EpicHub } from "./stream/epic-hub";
@@ -73,6 +74,7 @@ export async function startHost(
     chatRecords: new ChatRecordsHub(),
     graphs: new CommunicationGraphHub(),
     epicState: new EpicStateHub(),
+    artifactDocs: new ArtifactDocHub(),
     authorityEpoch: `oss:${identity.hostId}:${String(Date.now())}`,
     notifications: new NotificationHub(),
     plainTerminals: new PlainTerminalHub(),

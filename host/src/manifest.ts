@@ -37,7 +37,6 @@ export function hostUnaryManifests(): SplitConnectionManifest {
  * and refusing them would hide a working surface.
  */
 export const UNSERVED_STREAM_METHOD_NAMES: readonly string[] = [
-  "artifact.subscribe",
   "browser.screencast",
   "host.communicationGraph.subscribe",
   "host.notifications.cloudFeed.subscribe",
