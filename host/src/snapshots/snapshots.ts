@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, type Dirent } from "node:fs";
 import {
   mkdir,
   readFile,
@@ -8,7 +8,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { diffLines } from "diff";
 import type { FileEditReason } from "@traycer/protocol/persistence/epic/content-blocks";
 
@@ -54,8 +54,26 @@ export function snapshotDir(dataDir: string): string {
   return join(dataDir, SNAPSHOTS_DIRNAME);
 }
 
+/**
+ * `blobs/<first two hex>/<rest>`, the released store's layout: a directory
+ * per prefix rather than one holding every blob a long session leaves.
+ */
 function blobPath(dir: string, hash: string): string {
+  return join(dir, "blobs", hash.slice(0, 2), hash.slice(2));
+}
+
+/** Where this host wrote blobs before it sharded them; read, never written. */
+function flatBlobPath(dir: string, hash: string): string {
   return join(dir, "blobs", hash);
+}
+
+function existingBlobPath(dir: string, hash: string): string | null {
+  const sharded = blobPath(dir, hash);
+  if (existsSync(sharded)) {
+    return sharded;
+  }
+  const flat = flatBlobPath(dir, hash);
+  return existsSync(flat) ? flat : null;
 }
 
 function sidecarPath(
@@ -99,9 +117,9 @@ export async function captureFile(
   }
   const hash = createHash("sha256").update(bytes).digest("hex");
   try {
-    const target = blobPath(dir, hash);
-    if (!existsSync(target)) {
-      await mkdir(join(dir, "blobs"), { recursive: true });
+    if (existingBlobPath(dir, hash) === null) {
+      const target = blobPath(dir, hash);
+      await mkdir(dirname(target), { recursive: true });
       await writeFile(target, bytes);
     }
   } catch {
@@ -112,16 +130,16 @@ export async function captureFile(
 
 /** Whether the store still holds this body - cleared blobs make a row non-undoable. */
 export function hasBlob(dir: string, hash: string): boolean {
-  return existsSync(blobPath(dir, hash));
+  return existingBlobPath(dir, hash) !== null;
 }
 
 /** Store one text body content-addressed, the way a captured file is; returns its hash. */
 export async function writeBlob(dir: string, text: string): Promise<string> {
   const bytes = Buffer.from(text, "utf8");
   const hash = createHash("sha256").update(bytes).digest("hex");
-  const target = blobPath(dir, hash);
-  if (!existsSync(target)) {
-    await mkdir(join(dir, "blobs"), { recursive: true });
+  if (existingBlobPath(dir, hash) === null) {
+    const target = blobPath(dir, hash);
+    await mkdir(dirname(target), { recursive: true });
     await writeFile(target, bytes);
   }
   return hash;
@@ -131,8 +149,12 @@ export async function readBlob(
   dir: string,
   hash: string,
 ): Promise<string | null> {
+  const path = existingBlobPath(dir, hash);
+  if (path === null) {
+    return null;
+  }
   try {
-    return await readFile(blobPath(dir, hash), "utf8");
+    return await readFile(path, "utf8");
   } catch {
     return null;
   }
@@ -233,16 +255,22 @@ export function lineCounts(
 }
 
 export async function storageBytes(dir: string): Promise<number> {
-  let names: readonly string[];
+  let entries: readonly Dirent[];
   try {
-    names = await readdir(join(dir, "blobs"));
+    entries = await readdir(join(dir, "blobs"), {
+      recursive: true,
+      withFileTypes: true,
+    });
   } catch {
     return 0;
   }
   let total = 0;
-  for (const name of names) {
+  for (const entry of entries) {
+    if (!entry.isFile()) {
+      continue;
+    }
     try {
-      total += (await stat(blobPath(dir, name))).size;
+      total += (await stat(join(entry.parentPath, entry.name))).size;
     } catch {
       // A blob removed between the listing and the stat weighs nothing.
     }

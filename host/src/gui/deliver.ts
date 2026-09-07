@@ -68,10 +68,14 @@ function codexApprovalResult(
   interviewAnswers: readonly InterviewAnswerValues[] | null,
 ): unknown {
   if (about.toolName === "request_user_input") {
-    // The released host's mapping: every question the request carried gets
-    // an entry keyed by its id, matched to an answer by id, then by question
-    // text, then by position - empty when nothing matched, or when the user
-    // declined.
+    // The released host's mapping. A declined, errored, or aborted
+    // interview answers `{answers: {}}` - nothing per question - and only an
+    // answered one maps every question the request carried to an entry
+    // keyed by its id, matched to an answer by id, then by question text,
+    // then by position (empty when nothing matched).
+    if (!allowed) {
+      return { answers: {} };
+    }
     const questions = requestUserInputQuestions(about.input);
     const answers: { [id: string]: { readonly answers: readonly string[] } } =
       {};
@@ -83,7 +87,7 @@ function codexApprovalResult(
         given[index] ??
         null;
       answers[question.id] = {
-        answers: allowed && match !== null ? [...match.values] : [],
+        answers: match !== null ? [...match.values] : [],
       };
     });
     return { answers };

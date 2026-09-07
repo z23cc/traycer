@@ -36,7 +36,7 @@ import {
 import { providerIdForHarness } from "../gui/harness-map";
 import { envCredentialVarForProvider } from "../providers/service";
 import { runGuiPrintTurn, type PendingApproval } from "../gui/deliver";
-import { isAbsolute, relative } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 import type { QueuedPrompt } from "../gui/queue";
 import { LOCAL_USER_ID } from "../local-user";
 import type { HostRuntime } from "../runtime";
@@ -1382,9 +1382,17 @@ function editPaths(input: unknown): string[] {
   return [...paths];
 }
 
+/**
+ * The released `isPathInsideRoot`: both sides resolved (a relative path is
+ * relative to the ROOT, not to wherever this process happens to run), and
+ * the root itself counts as inside.
+ */
 function isInside(root: string, filePath: string): boolean {
-  const rel = relative(root, filePath);
-  return rel.length > 0 && !rel.startsWith("..") && !isAbsolute(rel);
+  if (root.trim().length === 0 || filePath.trim().length === 0) {
+    return false;
+  }
+  const rel = relative(resolve(root), resolve(root, filePath));
+  return rel.length === 0 || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
 /**
@@ -1691,6 +1699,8 @@ const PLAN_CAPTURED_MESSAGE =
   "Plan captured and shown to the user as a plan card. Stop here - the user will review it and start implementation when ready.";
 /** Above this a plan's body lives in the blob store and the card carries a preview. */
 const PLAN_PREVIEW_MAX_CHARS = 4000;
+/** The released host's diff budget: before and after together, 256 KiB. */
+const DIFF_BUDGET_BYTES = 256 * 1024;
 
 /**
  * `/plan` and the prompt after it, or null for any other message. An empty
@@ -2189,13 +2199,14 @@ async function completeEdit(
   const dir = snapshotDir(runtime.dataDir);
   const before = captured.before ?? { hash: null, reason: missing };
   const after = captured.after ?? { hash: null, reason: missing };
-  const reason: FileEditReason =
+  const capturedReason: FileEditReason =
     before.reason !== "snapshot"
       ? before.reason
       : after.reason !== "snapshot"
         ? after.reason
         : "snapshot";
-  const snapshot = reason === "snapshot";
+  let reason: FileEditReason = capturedReason;
+  let snapshot = reason === "snapshot";
   // Existence on both sides is the one thing the captures know better than
   // the call's input did.
   const operation: CheckpointFileOperation = !snapshot
@@ -2205,11 +2216,24 @@ async function completeEdit(
       : before.hash !== null && after.hash === null
         ? "delete"
         : "edit";
+  const beforeText =
+    snapshot && before.hash !== null ? await readBlob(dir, before.hash) : null;
+  const afterText =
+    snapshot && after.hash !== null ? await readBlob(dir, after.hash) : null;
+  // The released diff budget: both sides together over 256 KiB is a change
+  // the card describes without a diff - `too_large`, no hashes - rather than
+  // a line diff that stalls the host.
+  const overBudget =
+    snapshot &&
+    Buffer.byteLength(beforeText ?? "", "utf8") +
+      Buffer.byteLength(afterText ?? "", "utf8") >
+      DIFF_BUDGET_BYTES;
+  if (overBudget) {
+    reason = "too_large";
+    snapshot = false;
+  }
   const counts = snapshot
-    ? lineCounts(
-        before.hash === null ? null : await readBlob(dir, before.hash),
-        after.hash === null ? null : await readBlob(dir, after.hash),
-      )
+    ? lineCounts(beforeText, afterText)
     : { additions: 0, deletions: 0 };
   const now = Date.now();
   const nested =

@@ -541,13 +541,22 @@ describe("local GUI send without cloud login", () => {
     expect(blob).toContain("queued-followup");
     expect(blob).toContain("slow-ok");
     // The queue's life is on the timeline, as released: the item accepted
-    // with itself as metadata, then started.
-    const events = readArray(
-      Reflect.get(
-        Reflect.get(snapshot ?? {}, "snapshot") ?? snapshot ?? {},
-        "tail",
-      ) ?? {},
-      "events",
+    // with itself as metadata, then started. The start lands a beat after
+    // the first turn's reply, so it is waited for rather than assumed.
+    const eventsOf = (snap: object) =>
+      readArray(Reflect.get(snap, "tail") ?? {}, "events");
+    const events = eventsOf(
+      await waitForSnapshot(
+        streamUrl,
+        "epic-5",
+        "chat-5",
+        (snap) =>
+          eventsOf(snap).some(
+            (e) => Reflect.get(e ?? {}, "type") === "queue.started",
+          ),
+        80,
+        50,
+      ),
     );
     const added = events.find(
       (e) => Reflect.get(e ?? {}, "type") === "queue.added",
@@ -2896,6 +2905,156 @@ describe("local GUI send without cloud login", () => {
       poll();
     });
   }, 12_000);
+
+  /** A declined Codex interview answers `{answers: {}}`, as released - not an entry per question. */
+  it("declines a Codex request_user_input with an empty answers map", async () => {
+    const setup = await bootWithCli(askingCodexAppServer(), "codex");
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-33", "chat-33");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-33",
+      chatId: "chat-33",
+      clientActionId: "action-33",
+      messageId: "msg-user-33",
+      text: "ask me",
+      permissionMode: "full_access",
+      harnessId: "codex",
+    });
+    const asked = await waitForSnapshot(
+      streamUrl,
+      "epic-33",
+      "chat-33",
+      (snapshot) => readArray(snapshot, "pendingInterviews").length === 1,
+      80,
+      50,
+    );
+    const blockId = String(
+      Reflect.get(readArray(asked, "pendingInterviews")[0] ?? {}, "blockId"),
+    );
+    await sendActionUntil(
+      streamUrl,
+      {
+        kind: "interviewError",
+        epicId: "epic-33",
+        chatId: "chat-33",
+        clientActionId: "dismiss-33",
+        blockId,
+        reason: "Question dismissed.",
+      },
+      "actionAck",
+    );
+    await waitForChatText(
+      streamUrl,
+      "epic-33",
+      "chat-33",
+      "declined-ok",
+      80,
+      50,
+    );
+  });
+
+  /**
+   * The released diff budget: both sides together over 256 KiB is a change
+   * described without a diff - `too_large`, no hashes - not a line diff that
+   * stalls the host. Each side alone is well under the capture cap.
+   */
+  it("marks an edit whose two sides exceed the diff budget as too_large", async () => {
+    const stdout = [
+      '{"type":"system","subtype":"init","session_id":"sess-big"}',
+      '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_big","name":"Edit","input":{"file_path":"__TARGET__","old_string":"a","new_string":"b"}}]}}',
+      '{"type":"user","message":{"content":[{"type":"tool_result","content":"ok","tool_use_id":"toolu_big"}]}}',
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"big-ok"}]}}',
+      '{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}',
+    ];
+    const setup = await bootWithCli(
+      ["#!/bin/sh", "read -r prompt", ...stdout.map(printfLine), ""].join("\n"),
+      "claude",
+    );
+    tempDir = setup.tempDir;
+    started = setup.started;
+    process.env.TRAYCER_TEST_EDIT_TARGET = join(setup.workspace, "big.txt");
+    const bigBefore = `${"x".repeat(1023)}\n`.repeat(150);
+    const bigAfter = `${"y".repeat(1023)}\n`.repeat(150);
+    await playHook(tempDir, "toolu_big", "pre", bigBefore);
+    await playHook(tempDir, "toolu_big", "post", bigAfter);
+    await seedChat(started, setup.workspace, "epic-34", "chat-34");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-34",
+      chatId: "chat-34",
+      clientActionId: "action-34",
+      messageId: "msg-user-34",
+      text: "edit it",
+      permissionMode: null,
+      harnessId: null,
+    });
+    const frames = await waitForSealedBlocks(
+      streamUrl,
+      "epic-34",
+      "chat-34",
+      "file_change",
+      80,
+      50,
+    );
+    const card = assistantBlocks(frames, "epic-34", "chat-34").find(
+      (block) => Reflect.get(block, "type") === "file_change",
+    );
+    expect(card).toMatchObject({
+      status: "completed",
+      diffSource: "none",
+      reason: "too_large",
+      beforeHash: null,
+      afterHash: null,
+      additions: 0,
+      deletions: 0,
+    });
+  });
+
+  /**
+   * A relative edit path is relative to the workspace, as released - not to
+   * wherever this host process runs. Under `auto_accept_edits` such an edit
+   * is inside the workspace and is approved without a question.
+   */
+  it("reads a relative edit path against the workspace when auto-accepting", async () => {
+    const setup = await bootWithCli(
+      askingCli(
+        "Edit",
+        '{"file_path":"rel-note.txt","old_string":"a","new_string":"b"}',
+        "Edit rel-note.txt",
+      ),
+      "claude",
+    );
+    tempDir = setup.tempDir;
+    started = setup.started;
+    await seedChat(started, setup.workspace, "epic-35", "chat-35");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-35",
+      chatId: "chat-35",
+      clientActionId: "action-35",
+      messageId: "msg-user-35",
+      text: "edit it",
+      permissionMode: "auto_accept_edits",
+      harnessId: null,
+    });
+    // Allowed by the host itself: the fake got the allow and said so.
+    await waitForChatText(
+      streamUrl,
+      "epic-35",
+      "chat-35",
+      "allowed-ok",
+      80,
+      50,
+    );
+    const frames = await collectChatFrames(streamUrl, "epic-35", "chat-35");
+    const snapshot = Reflect.get(
+      frames.find((f) => Reflect.get(f ?? {}, "kind") === "snapshot") ?? {},
+      "snapshot",
+    );
+    expect(readArray(snapshot, "pendingFileEditApprovals")).toEqual([]);
+  });
 });
 
 /**
@@ -2946,6 +3105,10 @@ function askingCodexAppServer(): string {
     'case "$answer" in',
     '  *\'"q1":{"answers":["Blue"]}\'*)',
     `    printf '%s\n' '{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg-2","text":"you chose Blue"},"threadId":"thread-fake-2","turnId":"turn-fake-2"}}'`,
+    "    ;;",
+    // A declined interview answers nothing per question, as released.
+    "  *'\"answers\":{}'*)",
+    `    printf '%s\n' '{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg-2","text":"declined-ok"},"threadId":"thread-fake-2","turnId":"turn-fake-2"}}'`,
     "    ;;",
     "  *)",
     `    printf '%s\n' '{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg-2","text":"no-answer"},"threadId":"thread-fake-2","turnId":"turn-fake-2"}}'`,

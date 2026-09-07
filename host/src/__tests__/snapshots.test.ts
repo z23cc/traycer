@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,10 +7,13 @@ import {
   MAX_SNAPSHOT_BYTES,
   SNAPSHOT_HOOK_FLAG,
   captureFile,
+  hasBlob,
   lineCounts,
+  readBlob,
   runSnapshotHook,
   settleEdit,
   snapshotHookSettings,
+  storageBytes,
   takeCompactSummary,
 } from "../snapshots/snapshots";
 
@@ -44,8 +47,19 @@ describe("edit snapshots", () => {
       before: { hash: before, reason: "snapshot" },
       after: { hash: after, reason: "snapshot" },
     });
-    expect(await readFile(join(dir, "blobs", before), "utf8")).toBe("one\n");
-    expect(await readFile(join(dir, "blobs", after), "utf8")).toBe("two\n");
+    // Sharded like the released store: a directory per two-hex prefix.
+    expect(
+      await readFile(
+        join(dir, "blobs", before.slice(0, 2), before.slice(2)),
+        "utf8",
+      ),
+    ).toBe("one\n");
+    expect(
+      await readFile(
+        join(dir, "blobs", after.slice(0, 2), after.slice(2)),
+        "utf8",
+      ),
+    ).toBe("two\n");
     // Consumed: a second settle finds nothing, so a later call with the same
     // id cannot inherit this one's sides.
     expect(await settleEdit(dir, "toolu_1")).toEqual({
@@ -56,6 +70,17 @@ describe("edit snapshots", () => {
       additions: 1,
       deletions: 1,
     });
+  });
+
+  it("still reads a blob this host wrote flat, before it sharded", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "traycer-snap-"));
+    const dir = join(tempDir, "snapshots");
+    const hash = sha256("old\n");
+    await mkdir(join(dir, "blobs"), { recursive: true });
+    await writeFile(join(dir, "blobs", hash), "old\n");
+    expect(hasBlob(dir, hash)).toBe(true);
+    expect(await readBlob(dir, hash)).toBe("old\n");
+    expect(await storageBytes(dir)).toBe(4);
   });
 
   it("reads absence as a side that does not exist, not as a failure", async () => {
