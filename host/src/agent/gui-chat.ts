@@ -708,9 +708,14 @@ async function runAndPersistAssistant(
   const print = runtime.guiRuns.printState(input.chatId);
   const handleEvent = (event: ProviderStreamEvent): void => {
     const now = Date.now();
-    if (event.kind === "background_tasks") {
+    if (
+      event.kind === "background_tasks" ||
+      event.kind === "background_started"
+    ) {
       // The registry already holds the new set; the panel reads it off the
-      // turn state.
+      // turn state. The task's own record comes one record AFTER the set
+      // (recorded live), so it is re-sent then too - with the row now
+      // pointing at its tool call rather than at the task.
       broadcastTurnStateChanged(runtime, input.epicId, input.chatId);
       return;
     }
