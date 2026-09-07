@@ -465,6 +465,15 @@ async function runAndPersistAssistant(
     }
     pendingEdits.delete(toolId);
     const captured = await settleEdit(snapshotDir(runtime.dataDir), toolId);
+    // A call that failed with nothing captured on either side never reached
+    // the file: Claude refuses an edit before its hooks run (recorded live -
+    // "File has not been read yet"), so there is no before, no after, and no
+    // change to describe. No card, and the accumulated set is left alone; the
+    // errored tool row carries the error and stays visible in the card's
+    // absence. Filing it as `capture_failed` did the opposite on both counts.
+    if (failed && captured.before === null && captured.after === null) {
+      return;
+    }
     // A failed edit tool leaves the file as it found it, and the post hook
     // does not run for it - so the before IS the after, and a diff of the two
     // says "counted, unchanged" rather than guessing at a capture that never

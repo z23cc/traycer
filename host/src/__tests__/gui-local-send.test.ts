@@ -1000,8 +1000,12 @@ describe("local GUI send without cloud login", () => {
    */
   it("serves the before and after the hooks captured around an edit", async () => {
     const target = join(tmpdir(), `traycer-snap-${String(Date.now())}.ts`);
+    // The first Edit is refused before its hooks run, as Claude does live for
+    // a file it has not read - so no sidecar exists for it on either side.
     const stdout = [
       '{"type":"system","subtype":"init","session_id":"sess-snap"}',
+      `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_s0","name":"Edit","input":{"file_path":"${target}","old_string":"one","new_string":"two"}}]}}`,
+      '{"type":"user","message":{"content":[{"type":"tool_result","content":"File has not been read yet.","is_error":true,"tool_use_id":"toolu_s0"}]}}',
       `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_s1","name":"Edit","input":{"file_path":"${target}","old_string":"one","new_string":"two"}}]}}`,
       '{"type":"user","message":{"content":[{"type":"tool_result","content":"ok","tool_use_id":"toolu_s1"}]}}',
       '{"type":"assistant","message":{"content":[{"type":"text","text":"snap-ok"}]}}',
@@ -1035,11 +1039,18 @@ describe("local GUI send without cloud login", () => {
       80,
       50,
     );
+    const blocks = assistantBlocks(frames, "epic-12", "chat-12");
+    // One card, for the edit that happened. The refused call never reached
+    // the file, so it gets no card - and its errored row stays visible, which
+    // a card with its id would have hidden.
+    const cards = blocks.filter(
+      (block) => Reflect.get(block, "type") === "file_change",
+    );
+    expect(cards).toHaveLength(1);
     expect(
-      assistantBlocks(frames, "epic-12", "chat-12").find(
-        (block) => Reflect.get(block, "type") === "file_change",
-      ),
-    ).toMatchObject({
+      blocks.find((block) => Reflect.get(block, "blockId") === "toolu_s0"),
+    ).toMatchObject({ type: "tool_call", status: "errored" });
+    expect(cards[0]).toMatchObject({
       status: "completed",
       // Existence on both sides is what the captures know that the call's
       // input did not.
