@@ -17,7 +17,7 @@ import {
   type DiscoveredSession,
   type ProviderRoots,
 } from "../session-import/discover";
-import { importSession } from "../session-import/import";
+import { findImported, importSession } from "../session-import/import";
 import { serveSessionImportScan } from "../stream/session-import-scan";
 import { startHost, type StartedHost } from "../start-host";
 
@@ -254,6 +254,7 @@ describe("session import discovery", () => {
       socket as never,
       host.runtime,
       { providers: ["claude", "opencode"], updatedAfter: null },
+      0,
       new Map([["claude", root]]),
     );
 
@@ -288,13 +289,14 @@ describe("session import discovery", () => {
         socket as never,
         host.runtime,
         { providers: [], updatedAfter: null },
+        0,
         new Map(),
       ),
     ).toBe(false);
     expect(socket.frames).toHaveLength(0);
   });
 
-  it("stops offering a session that already has a chat here", async () => {
+  it("hides a session that already has a chat here at @1.0 and marks it at @1.1", async () => {
     const host = await boot();
     const root = temp();
     const repo = temp();
@@ -302,7 +304,7 @@ describe("session import discovery", () => {
     const roots: ProviderRoots = new Map([["claude", root]]);
     const request = { providers: null, updatedAfter: null };
     const before = new FakeSocket();
-    serveSessionImportScan(before as never, host.runtime, request, roots);
+    serveSessionImportScan(before as never, host.runtime, request, 0, roots);
     expect(before.frames[before.frames.length - 1].totals).toMatchObject({
       sessions: 1,
     });
@@ -315,15 +317,40 @@ describe("session import discovery", () => {
       found[0],
     );
 
-    // Hidden, not marked: `already_in_traycer` exists only so a client can
-    // parse what an OLDER host emits.
+    // At @1.0 hidden, not marked: the wizard's second visit shows what is new.
     const after = new FakeSocket();
-    serveSessionImportScan(after as never, host.runtime, request, roots);
+    serveSessionImportScan(after as never, host.runtime, request, 0, roots);
     expect(after.frames.map((frame) => frame.kind)).toStrictEqual([
       "started",
       "complete",
     ]);
     expect(after.frames[1].totals).toMatchObject({ groups: 0, sessions: 0 });
+
+    // At @1.1 offered back marked with the chat it became, so the wizard can
+    // open that instead of importing it twice.
+    const marked = new FakeSocket();
+    serveSessionImportScan(marked as never, host.runtime, request, 1, roots);
+    expect(marked.frames.map((frame) => frame.kind)).toStrictEqual([
+      "started",
+      "group",
+      "complete",
+    ]);
+    const chat = findImported(host.runtime, {
+      harness: "claude",
+      nativeSessionId: "jjj",
+    });
+    expect(chat).not.toBeNull();
+    expect(marked.frames[1]).toMatchObject({
+      kind: "group",
+      group: {
+        sessions: [{ state: { kind: "already_in_traycer", ...chat } }],
+      },
+    });
+    expect(marked.frames[2].totals).toMatchObject({
+      sessions: 1,
+      importable: 0,
+      alreadyInTraycer: 1,
+    });
   });
 
   it("orders groups and sessions newest first", () => {

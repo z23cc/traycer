@@ -17,7 +17,8 @@ import {
 
 /**
  * `sessionImport.scan` - the one moment this host reads the vendors' session
- * directories.
+ * directories. `minor` is the negotiated one: @1.1 is where imported
+ * sessions are listed rather than hidden.
  *
  * Frame order follows the contract exactly: `started` before a directory is
  * opened, `providerFailed` the moment a provider gives up, then every `group`,
@@ -33,6 +34,7 @@ export function serveSessionImportScan(
   socket: WebSocket,
   runtime: HostRuntime,
   params: unknown,
+  minor: number,
   roots: ProviderRoots,
 ): boolean {
   const open = sessionImportScanOpenRequestSchema.safeParse(params);
@@ -59,18 +61,29 @@ export function serveSessionImportScan(
       fail(socket, harness, "source_unreadable", String(error));
     }
   }
-  // A session that already has a chat here is hidden, not marked: the
-  // wizard's second visit shows what is new, and the chats carrying
-  // `providerSession` are the index that decides it.
+  // A session that already has a chat here is hidden at @1.0 - the wizard's
+  // second visit shows what is new - and from @1.1 offered back marked
+  // `already_in_traycer`, naming the chat. The chats carrying
+  // `providerSession` are the index either way.
   const imported = sessionsAlreadyInTraycer(runtime);
-  const groups = groupSessions(
-    found.filter(
-      (session) =>
-        !imported.has(
-          `${session.candidate.harness}:${session.candidate.nativeSessionId}`,
-        ),
-    ),
-  );
+  const offered: DiscoveredSession[] = [];
+  for (const session of found) {
+    const chat = imported.get(
+      `${session.candidate.harness}:${session.candidate.nativeSessionId}`,
+    );
+    if (chat === undefined) {
+      offered.push(session);
+    } else if (minor >= 1) {
+      offered.push({
+        ...session,
+        candidate: {
+          ...session.candidate,
+          state: { kind: "already_in_traycer", ...chat },
+        },
+      });
+    }
+  }
+  const groups = groupSessions(offered);
   for (const group of groups) {
     send(socket, { kind: "group", hasBinaryPayload: false, group });
   }

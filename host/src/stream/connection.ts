@@ -554,6 +554,7 @@ export function attachStreamConnection(
           socket,
           runtime,
           subscribe.data.params,
+          subscribe.data.schemaVersion.minor,
           defaultProviderRoots(),
         )
       ) {
