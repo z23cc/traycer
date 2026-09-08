@@ -3284,6 +3284,118 @@ describe("local GUI send without cloud login", () => {
       ),
     ).not.toContain("approval.requested");
   });
+
+  /**
+   * A chat with more than one workspace: the agent runs in the first and is
+   * given the others as `--add-dir`, an edit anywhere is accepted under
+   * `auto_accept_edits` (the released host's coordinator does not look at
+   * the path), and the turn's checkpoint names every workspace as a root.
+   */
+  it("opens the chat's other workspaces to Claude and to its checkpoint", async () => {
+    const script = [
+      "#!/bin/sh",
+      "read -r prompt",
+      'case "$*" in *"--add-dir $TRAYCER_TEST_EDIT_TARGET"*) t=add-dir-ok;; *) t=add-dir-missing;; esac',
+      printfLine(
+        '{"type":"system","subtype":"init","session_id":"sess-second"}',
+      ),
+      printfLine(
+        '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_second","name":"Edit","input":{"file_path":"__TARGET__/note.txt","old_string":"a","new_string":"b"}}]}}',
+      ),
+      printfLine(
+        '{"type":"control_request","request_id":"req-second","request":{"subtype":"can_use_tool","tool_name":"Edit","input":{"file_path":"__TARGET__/note.txt","old_string":"a","new_string":"b"},"description":"Edit","tool_use_id":"toolu_second"}}',
+      ),
+      "read -r answer",
+      `printf '%s\\n' '{"type":"user","message":{"content":[{"type":"tool_result","content":"ok","tool_use_id":"toolu_second"}]}}'`,
+      `printf '%s\\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"'"$t"'"}]}}'`,
+      `printf '%s\\n' '{"type":"result","subtype":"success","usage":{"input_tokens":5,"output_tokens":2}}'`,
+      "",
+    ].join("\n");
+    const setup = await bootWithCli(script, "claude");
+    tempDir = setup.tempDir;
+    started = setup.started;
+    const secondary = join(setup.workspace, "..", "second");
+    await mkdir(secondary, { recursive: true });
+    await call(
+      started.rpcUrl,
+      "epic.create",
+      { major: 1, minor: 0 },
+      {
+        epic: {
+          id: "epic-38",
+          title: "Two workspaces",
+          initialUserPrompt: "",
+          ticketCount: 0,
+          specCount: 0,
+          storyCount: 0,
+          reviewCount: 0,
+          status: "active",
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          createdBy: "local",
+          version: "2.0.0",
+        },
+        repoIdentifiers: [],
+        workspaces: [
+          { workspacePath: setup.workspace },
+          { workspacePath: secondary },
+        ],
+        chat: {
+          chatId: "chat-38",
+          parentId: null,
+          hostId: started.runtime.hostId,
+          title: "Root",
+          worktreeIntent: null,
+          initialMessage: null,
+        },
+      },
+    );
+    process.env.TRAYCER_TEST_EDIT_TARGET = secondary;
+    const target = join(secondary, "note.txt");
+    await playHook(tempDir, "toolu_second", "pre", "a\n");
+    await playHook(tempDir, "toolu_second", "post", "b\n");
+    const streamUrl = started.rpcUrl.replace(/\/rpc$/u, "/stream");
+    await sendOnChat(streamUrl, {
+      epicId: "epic-38",
+      chatId: "chat-38",
+      clientActionId: "action-38",
+      messageId: "msg-user-38",
+      text: "edit the note",
+      permissionMode: "auto_accept_edits",
+      harnessId: null,
+    });
+    await waitForChatText(
+      streamUrl,
+      "epic-38",
+      "chat-38",
+      "add-dir-ok",
+      80,
+      50,
+    );
+    const snapshot = await waitForSnapshot(
+      streamUrl,
+      "epic-38",
+      "chat-38",
+      (s) => Reflect.get(s, "runStatus") === "idle",
+      40,
+      50,
+    );
+    const captured = readArray(
+      Reflect.get(snapshot, "tail") ?? {},
+      "events",
+    ).find((e) => Reflect.get(e ?? {}, "type") === "checkpoint.captured");
+    expect(captured).toMatchObject({
+      metadata: {
+        workingDirectory: setup.workspace,
+        allowedRoots: [
+          setup.workspace,
+          secondary,
+          join(tempDir, "epics", "epic-38", "artifacts"),
+        ],
+        entries: [{ filePath: target, undoable: true }],
+      },
+    });
+  });
 });
 
 /**

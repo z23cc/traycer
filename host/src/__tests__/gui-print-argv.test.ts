@@ -17,6 +17,7 @@ describe("guiPrintArgv", () => {
           mode,
           null,
           null,
+          [],
         ),
       ).toEqual(["app-server", "--listen", "stdio://"]);
     }
@@ -28,19 +29,20 @@ describe("guiPrintArgv", () => {
         "full_access",
         "thread-1",
         null,
+        [],
       ),
     ).toEqual(["app-server", "--listen", "stdio://"]);
   });
 
   it("runs a /plan turn in the CLI's plan mode", () => {
-    expect(guiPrintArgv("claude", "x", null, "plan", null, null)).toContain(
+    expect(guiPrintArgv("claude", "x", null, "plan", null, null, [])).toContain(
       "plan",
     );
     expect(
-      guiPrintArgv("claude", "x", null, "plan", null, null).join(" "),
+      guiPrintArgv("claude", "x", null, "plan", null, null, []).join(" "),
     ).toContain("--permission-mode plan");
     expect(
-      guiPrintArgv("claude", "x", null, "supervised", null, null).join(" "),
+      guiPrintArgv("claude", "x", null, "supervised", null, null, []).join(" "),
     ).toContain("--permission-mode default");
   });
 
@@ -50,7 +52,7 @@ describe("guiPrintArgv", () => {
     // permission answers come back on - and the CLI always runs in `default`,
     // because this host is the one deciding.
     expect(
-      guiPrintArgv("claude", "hi", null, null, null, '{"hooks":{}}'),
+      guiPrintArgv("claude", "hi", null, null, null, '{"hooks":{}}', []),
     ).toEqual([
       "-p",
       "--output-format",
@@ -67,7 +69,7 @@ describe("guiPrintArgv", () => {
       "stream-json",
     ]);
     expect(
-      guiPrintArgv("claude", "hi", "sonnet", "full_access", null, null),
+      guiPrintArgv("claude", "hi", "sonnet", "full_access", null, null, []),
     ).toEqual([
       "-p",
       "--output-format",
@@ -110,7 +112,15 @@ describe("guiPrintArgv", () => {
 
   it("resumes a Claude session by id", () => {
     expect(
-      guiPrintArgv("claude", "next", "sonnet", "full_access", "sess-9", null),
+      guiPrintArgv(
+        "claude",
+        "next",
+        "sonnet",
+        "full_access",
+        "sess-9",
+        null,
+        [],
+      ),
     ).toEqual([
       "-p",
       "--output-format",

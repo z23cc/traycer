@@ -84,8 +84,16 @@ export function isInside(root: string, filePath: string): boolean {
   if (root.trim().length === 0 || filePath.trim().length === 0) {
     return false;
   }
-  const rel = relative(resolve(root), resolve(root, filePath));
+  const rel = relative(
+    casefold(resolve(root)),
+    casefold(resolve(root, filePath)),
+  );
   return rel.length === 0 || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+/** Windows paths compare case-insensitively, as the released host reads them. */
+function casefold(path: string): string {
+  return process.platform === "win32" ? path.toLowerCase() : path;
 }
 
 function commandOf(value: unknown): Command | null {
@@ -152,7 +160,7 @@ function classify(
   }
   const paths: string[] = [];
   for (const operand of operands) {
-    if (UNSAFE_OPERAND.test(operand)) {
+    if (operand.length === 0 || UNSAFE_OPERAND.test(operand)) {
       return null;
     }
     const path = resolve(cwd, operand);

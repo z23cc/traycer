@@ -41,6 +41,8 @@ import type { QueuedPrompt } from "../gui/queue";
 import { epicArtifactKindRecordV100 } from "@traycer/protocol/common/registry";
 import { epicArtifactsRoot, resolveArtifactByPath } from "../epic/artifacts";
 import { artifactCommand, isInside } from "./artifact-command";
+import { resolveChatWorktreeBinding } from "../worktree/service";
+import { codexFileChange } from "../gui/provider-stream";
 import { LOCAL_USER_ID } from "../local-user";
 import type { HostRuntime } from "../runtime";
 import type {
@@ -551,7 +553,8 @@ async function runAndPersistAssistant(
     readonly autonomous: boolean;
   },
 ): Promise<void> {
-  const cwd = guiWorkingDirectory(runtime, input.epicId);
+  const workspace = providerWorkspace(runtime, input.epicId, input.chatId);
+  const cwd = workspace.primary;
   const chat = runtime.store
     .snapshot()
     .chats.find((row) => row.chatId === input.chatId);
@@ -1176,6 +1179,7 @@ async function runAndPersistAssistant(
       harnessId: input.harnessId,
       prompt,
       cwd,
+      additionalDirectories: workspace.secondaries,
       model: input.model ?? readModelSlug(chat?.runSettings),
       // The CLI's mode, not the chat's: `plan` for a `/plan` turn, `default`
       // otherwise - the chat's own mode is decided here, per question.
@@ -1203,7 +1207,7 @@ async function runAndPersistAssistant(
       });
     }
     await Promise.all(settling);
-    captureTurnCheckpoint(runtime, input, cwd, turnEntries);
+    captureTurnCheckpoint(runtime, input, workspace, turnEntries);
     await persistAssistantTurn(runtime, {
       epicId: input.epicId,
       chatId: input.chatId,
@@ -1240,7 +1244,7 @@ async function runAndPersistAssistant(
     });
   } catch (error) {
     await Promise.all(settling);
-    captureTurnCheckpoint(runtime, input, cwd, turnEntries);
+    captureTurnCheckpoint(runtime, input, workspace, turnEntries);
     await recordUsageFact(runtime, {
       epicId: input.epicId,
       chatId: input.chatId,
@@ -1480,9 +1484,16 @@ async function decidePermission(
     });
     return;
   }
+  // A Codex file change names its paths on the `item/started` that preceded
+  // the approval; when none did, the request itself is scanned for them, as
+  // the released host does.
+  const unannounced =
+    request.toolName === "file_change" && turn.announcedPaths.length === 0
+      ? codexFileChange(request.input)
+      : null;
   const paths = EDIT_TOOLS.has(request.toolName)
     ? request.toolName === "file_change"
-      ? turn.announcedPaths
+      ? (unannounced?.paths ?? turn.announcedPaths)
       : editPaths(request.input)
     : [];
   const isFileEdit = paths.length > 0;
@@ -1521,11 +1532,9 @@ async function decidePermission(
     });
     return;
   }
-  if (
-    isFileEdit &&
-    permissionMode === "auto_accept_edits" &&
-    paths.every((path) => isInside(cwd, path))
-  ) {
+  // Every edit, wherever it lands: the released host's coordinator approves
+  // an edit in any mode but `supervised` without looking at its paths.
+  if (isFileEdit && permissionMode === "auto_accept_edits") {
     answer({
       behavior: "allow",
       updatedInput: request.input,
@@ -1552,7 +1561,7 @@ async function decidePermission(
             request.toolName === "NotebookEdit" &&
               Reflect.get(request.input ?? {}, "edit_mode") === "delete"
               ? "delete"
-              : null,
+              : (unannounced?.operation ?? null),
             paths[0] ?? "",
           ),
       }
@@ -2444,7 +2453,7 @@ function captureTurnCheckpoint(
     readonly chatId: string;
     readonly turnId: string;
   },
-  cwd: string,
+  workspace: ProviderWorkspace,
   entries: readonly TurnCheckpointManifestEntry[],
 ): void {
   if (entries.length === 0) {
@@ -2470,8 +2479,12 @@ function captureTurnCheckpoint(
       capturingUserId: chatOwnerUserId(chat),
       capturingHostId: runtime.hostId,
       // The workspace and the artifacts: what a revert may write back to.
-      allowedRoots: [cwd, epicArtifactsRoot(runtime, input.epicId)],
-      workingDirectory: cwd,
+      allowedRoots: [
+        workspace.primary,
+        ...workspace.secondaries,
+        epicArtifactsRoot(runtime, input.epicId),
+      ],
+      workingDirectory: workspace.primary,
       capturedAt: Date.now(),
       entries: [...entries],
     },
@@ -2908,13 +2921,35 @@ function stampAgentHarness(
   agents[index] = { ...current, harnessId };
 }
 
-function guiWorkingDirectory(runtime: HostRuntime, epicId: string): string {
-  const epic = runtime.store.snapshot().epics.find((row) => row.id === epicId);
-  const first = epic?.workspaces[0];
-  if (first !== undefined && first.length > 0) {
-    return first;
-  }
-  return runtime.dataDir;
+interface ProviderWorkspace {
+  /** Where the agent runs: the chat's primary workspace, or its worktree. */
+  readonly primary: string;
+  /** The chat's other workspaces, which the agent may also reach. */
+  readonly secondaries: readonly string[];
+}
+
+/**
+ * The workspace a chat's agent runs in, from the chat's worktree binding as
+ * the released host reads it: the primary entry first (its worktree when it
+ * has one), every other entry a secondary; the epic's workspaces when the
+ * chat has no binding of its own, and this host's data directory when the
+ * epic has none.
+ */
+function providerWorkspace(
+  runtime: HostRuntime,
+  epicId: string,
+  chatId: string,
+): ProviderWorkspace {
+  const binding = resolveChatWorktreeBinding(runtime, epicId, chatId);
+  const entries = binding === null ? [] : binding.entries;
+  const roots = [
+    ...entries.filter((entry) => entry.isPrimary),
+    ...entries.filter((entry) => !entry.isPrimary),
+  ]
+    .map((entry) => entry.worktreePath ?? entry.workspacePath)
+    .filter((path) => path.length > 0);
+  const [primary, ...secondaries] = [...new Set(roots)];
+  return { primary: primary ?? runtime.dataDir, secondaries };
 }
 
 export function seedGuiChat(

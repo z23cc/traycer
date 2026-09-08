@@ -838,12 +838,19 @@ function codexServerRequest(
   params: object,
 ): ProviderStreamEvent[] {
   const itemId = readString(params, "itemId");
+  // What names the approval when the item is not named: the released host
+  // falls back through the request's own ids to the JSON-RPC id.
+  const correlation =
+    readString(params, "approvalId") ??
+    itemId ??
+    readString(params, "callId") ??
+    requestId;
   if (method === "item/commandExecution/requestApproval") {
     return [
       {
         kind: "permission_request",
         requestId,
-        toolUseId: itemId,
+        toolUseId: correlation,
         toolName: "command",
         description:
           readString(params, "command") ??
@@ -860,7 +867,7 @@ function codexServerRequest(
       {
         kind: "permission_request",
         requestId,
-        toolUseId: itemId,
+        toolUseId: itemId ?? correlation,
         toolName: "file_change",
         description:
           readString(params, "reason") ??
@@ -875,7 +882,7 @@ function codexServerRequest(
       {
         kind: "permission_request",
         requestId,
-        toolUseId: itemId,
+        toolUseId: correlation,
         toolName: "permissions",
         description: readString(params, "reason") ?? "Permissions",
         input: params,
@@ -947,6 +954,24 @@ function codexNotification(
             : (readString(error, "message") ?? JSON.stringify(error)),
       },
     ];
+  }
+  if (
+    method === "item/fileChange/started" ||
+    method === "item/fileChange/completed"
+  ) {
+    // The file change announced on its own method, the item inline or the
+    // params standing in for it, as the released host also reads it.
+    const direct = readObject(params, "item") ?? params;
+    const directId =
+      readString(direct, "id") ??
+      readString(params, "itemId") ??
+      readString(params, "fileChangeId");
+    if (directId === null) {
+      return [];
+    }
+    return method === "item/fileChange/completed"
+      ? [{ kind: "tool_end", toolId: directId }]
+      : fileChangeEvents(direct, directId);
   }
   if (method !== "item/started" && method !== "item/completed") {
     return [];
@@ -1085,7 +1110,15 @@ function parseUsage(value: unknown, record: object): ProviderTokenUsage | null {
 function fileChangeEvents(item: object, itemId: string): ProviderStreamEvent[] {
   const changes = Reflect.get(item, "changes");
   if (!Array.isArray(changes)) {
-    return [];
+    // No `changes` list: the item is scanned for paths the way the released
+    // host reads any file-change payload (`files`, `path` fields...).
+    const scanned = codexFileChange(item);
+    return scanned.paths.map((path) => ({
+      kind: "file_change",
+      path,
+      operation: scanned.operation,
+      toolId: itemId,
+    }));
   }
   const rows: ProviderStreamEvent[] = [];
   for (const change of changes) {
@@ -1109,6 +1142,118 @@ function fileChangeEvents(item: object, itemId: string): ProviderStreamEvent[] {
     rows.push({ kind: "file_change", path, operation, toolId: itemId });
   }
   return rows;
+}
+
+const CODEX_PATH_KEYS = new Set([
+  "filePath",
+  "path",
+  "file_path",
+  "targetPath",
+]);
+const CODEX_PATH_LIST_KEYS = new Set(["paths", "files"]);
+const CODEX_OPERATION_KEYS = ["kind", "operation", "op", "type"];
+
+/**
+ * The paths and operation in any Codex file-change payload, read the way the
+ * released host reads one it has no announcement for: every path-named
+ * string field, every `paths`/`files` list, every object key that looks like
+ * a path, at any depth; the operation only when all the words agree.
+ */
+export function codexFileChange(value: unknown): {
+  readonly paths: readonly string[];
+  readonly operation: string | null;
+} {
+  const paths = new Set<string>();
+  const words: string[] = [];
+  scanCodexFileChange(value, paths, words);
+  const operations = new Set(
+    words.flatMap((word) => {
+      const operation = codexOperation(word);
+      return operation === null ? [] : [operation];
+    }),
+  );
+  const [only] = operations;
+  return {
+    paths: [...paths],
+    operation: operations.size === 1 && only !== undefined ? only : null,
+  };
+}
+
+function scanCodexFileChange(
+  value: unknown,
+  paths: Set<string>,
+  words: string[],
+): void {
+  if (Array.isArray(value)) {
+    for (const row of value) {
+      scanCodexFileChange(row, paths, words);
+    }
+    return;
+  }
+  if (value === null || typeof value !== "object") {
+    return;
+  }
+  for (const key of CODEX_OPERATION_KEYS) {
+    const word = readString(value, key);
+    if (word !== null) {
+      words.push(word);
+      break;
+    }
+  }
+  for (const [key, field] of Object.entries(value)) {
+    if (typeof field === "string") {
+      if (field.length > 0 && CODEX_PATH_KEYS.has(key)) {
+        paths.add(field);
+      }
+      continue;
+    }
+    if (Array.isArray(field) && CODEX_PATH_LIST_KEYS.has(key)) {
+      for (const row of field) {
+        if (typeof row === "string" && row.length > 0) {
+          paths.add(row);
+        }
+      }
+    } else if (
+      field !== null &&
+      typeof field === "object" &&
+      !Array.isArray(field) &&
+      (key.includes("/") || key.includes("\\"))
+    ) {
+      paths.add(key);
+    }
+    scanCodexFileChange(field, paths, words);
+  }
+}
+
+function codexOperation(word: string): "create" | "edit" | "delete" | null {
+  switch (word.trim().toLowerCase()) {
+    case "add":
+    case "create":
+    case "created":
+    case "new":
+      return "create";
+    case "delete":
+    case "deleted":
+    case "remove":
+    case "removed":
+      return "delete";
+    case "edit":
+    case "modify":
+    case "modified":
+    case "patch":
+    case "update":
+    case "updated":
+      return "edit";
+    default:
+      return null;
+  }
+}
+
+function readObject(record: object, key: string): object | null {
+  const value = Reflect.get(record, key);
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : null;
 }
 
 function readString(record: object, key: string): string | null {

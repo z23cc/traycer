@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { parseProviderStdoutLine } from "../gui/provider-stream";
+import {
+  parseProviderStdoutLine,
+  codexFileChange,
+} from "../gui/provider-stream";
 
 describe("parseProviderStdoutLine", () => {
   it("maps Claude stream-json partials and session ids", () => {
@@ -551,6 +554,68 @@ describe("parseProviderStdoutLine", () => {
    * does not serve is surfaced so the driver can refuse it rather than leave
    * the turn hanging.
    */
+  /**
+   * A file change announced on its own method, or with a `files` list
+   * instead of `changes`, is read the way the released host reads any
+   * file-change payload; an approval without an item id is still named.
+   */
+  it("reads direct Codex file-change notifications and unannounced approvals", () => {
+    expect(
+      parseProviderStdoutLine(
+        '{"jsonrpc":"2.0","method":"item/fileChange/started","params":{"itemId":"fc-1","files":["/tmp/a.txt","/tmp/b.txt"],"operation":"update"}}',
+      ),
+    ).toEqual([
+      {
+        kind: "file_change",
+        path: "/tmp/a.txt",
+        operation: "edit",
+        toolId: "fc-1",
+      },
+      {
+        kind: "file_change",
+        path: "/tmp/b.txt",
+        operation: "edit",
+        toolId: "fc-1",
+      },
+    ]);
+    expect(
+      parseProviderStdoutLine(
+        '{"jsonrpc":"2.0","method":"item/fileChange/completed","params":{"item":{"id":"fc-1","type":"fileChange"}}}',
+      ),
+    ).toEqual([{ kind: "tool_end", toolId: "fc-1" }]);
+    expect(
+      parseProviderStdoutLine(
+        '{"jsonrpc":"2.0","id":4,"method":"item/fileChange/requestApproval","params":{"threadId":"t","callId":"call-2","reason":"write it"}}',
+      ),
+    ).toMatchObject([{ toolUseId: "call-2", description: "write it" }]);
+    expect(
+      parseProviderStdoutLine(
+        '{"jsonrpc":"2.0","id":5,"method":"item/commandExecution/requestApproval","params":{"command":"ls"}}',
+      ),
+    ).toMatchObject([{ toolUseId: "5", toolName: "command" }]);
+    expect(
+      codexFileChange({
+        changes: [
+          { path: "/tmp/x.md", kind: { type: "add" } },
+          { path: "/tmp/y.md", kind: { type: "add" } },
+        ],
+        "/tmp/z.md": { kind: "add" },
+        type: "fileChange",
+      }),
+    ).toEqual({
+      paths: ["/tmp/x.md", "/tmp/y.md", "/tmp/z.md"],
+      operation: "create",
+    });
+    expect(
+      codexFileChange({
+        changes: [
+          { path: "/tmp/x.md", kind: { type: "add" } },
+          { path: "/tmp/y.md", kind: { type: "delete" } },
+        ],
+      }),
+    ).toEqual({ paths: ["/tmp/x.md", "/tmp/y.md"], operation: null });
+  });
+
   it("reads the Codex app-server's approval requests, and flags the rest", () => {
     expect(
       parseProviderStdoutLine(

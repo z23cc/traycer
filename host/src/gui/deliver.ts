@@ -678,6 +678,8 @@ export async function runGuiPrintTurn(
     readonly harnessId: string;
     readonly prompt: string;
     readonly cwd: string;
+    /** The chat's other workspaces, opened to the agent beside `cwd`. */
+    readonly additionalDirectories: readonly string[];
     readonly model: string | null;
     readonly permissionMode: string | null;
     readonly sessionId: string | null;
@@ -707,6 +709,7 @@ export async function runGuiPrintTurn(
     // harness with a hook surface; the others report their edits themselves
     // or not at all.
     input.harnessId === "claude" ? snapshotHookSettings(runtime.dataDir) : null,
+    input.additionalDirectories,
   );
   const channel: "claude" | "codex" | null =
     input.harnessId === "claude"
@@ -1308,6 +1311,8 @@ export function guiPrintArgv(
   sessionId: string | null,
   /** Claude only: extra settings JSON, which is how the edit hooks ride in. */
   settingsJson: string | null,
+  /** Claude only: the secondary workspaces, as `--add-dir` each. */
+  additionalDirectories: readonly string[],
 ): string[] {
   const modelFlag = printModelFlag(model);
   if (harnessId === "claude") {
@@ -1320,6 +1325,9 @@ export function guiPrintArgv(
     ];
     if (settingsJson !== null) {
       args.push("--settings", settingsJson);
+    }
+    for (const dir of additionalDirectories) {
+      args.push("--add-dir", dir);
     }
     if (modelFlag !== null) {
       args.push("--model", modelFlag);

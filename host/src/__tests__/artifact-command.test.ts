@@ -78,6 +78,14 @@ describe("artifact commands", () => {
     ).toBeNull();
     expect(of("Bash", { command: `git rm ${spec}` }, "")).toBeNull();
     expect(of("Bash", { command: "cat" }, "")).toBeNull();
+    // An empty operand names the working directory; the released host
+    // refuses it even when that directory is itself under the root.
+    expect(
+      artifactCommand("Bash", { args: ["mkdir", ""] }, "", root, root),
+    ).toBeNull();
+    expect(
+      artifactCommand("Bash", { args: ["rm", "-r", ""] }, "", root, root),
+    ).toBeNull();
     expect(
       of("Bash", { command: `mkdir -Z ${join(root, "x")}` }, ""),
     ).toBeNull();

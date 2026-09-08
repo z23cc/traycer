@@ -187,6 +187,7 @@ export async function sendLocalAgentMessage(
     harnessId: receiver.harnessId ?? "claude",
     prompt: input.prompt,
     cwd,
+    additionalDirectories: [],
     model: null,
     permissionMode: "full_access",
     sessionId: null,

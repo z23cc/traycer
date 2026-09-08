@@ -8,6 +8,7 @@ import {
   type TurnCheckpointManifest,
   type TurnCheckpointManifestEntry,
 } from "@traycer/protocol/persistence/epic/checkpoint-manifests";
+import { isInside } from "../agent/artifact-command";
 import { LOCAL_USER_ID } from "../local-user";
 import { lineCounts, readBlob, snapshotDir } from "../snapshots/snapshots";
 import {
@@ -605,18 +606,45 @@ function scopedCheckpoints(
   );
 }
 
-function earliestEntriesByPath(
+/**
+ * The entry a cumulative revert restores each path to: the earliest turn's,
+ * as the released host picks it - except that a later turn's entry replaces
+ * one that could not be undone, and a later turn's artifact tag is carried
+ * onto an earlier entry that has none.
+ */
+export function earliestEntriesByPath(
   manifests: readonly TurnCheckpointManifest[],
 ): Map<string, ScopedEntry> {
-  const earliest = new Map<string, ScopedEntry>();
+  const chosen = new Map<string, ScopedEntry>();
   for (const manifest of manifests) {
     for (const entry of manifest.entries) {
-      if (!earliest.has(entry.filePath)) {
-        earliest.set(entry.filePath, { manifest, entry });
+      if (entry.filePath.length === 0) {
+        continue;
+      }
+      const held = chosen.get(entry.filePath);
+      if (held === undefined) {
+        chosen.set(entry.filePath, { manifest, entry });
+        continue;
+      }
+      if (!held.entry.undoable && entry.undoable) {
+        chosen.set(entry.filePath, { manifest, entry });
+        continue;
+      }
+      const tag = entry.artifact ?? null;
+      const heldTag = held.entry.artifact ?? null;
+      if (
+        tag !== null &&
+        tag.artifactId !== null &&
+        (heldTag === null || heldTag.artifactId === null)
+      ) {
+        chosen.set(entry.filePath, {
+          manifest: held.manifest,
+          entry: { ...held.entry, artifact: tag },
+        });
       }
     }
   }
-  return earliest;
+  return chosen;
 }
 
 /**
@@ -668,14 +696,11 @@ async function restoreEntry(
   }
 }
 
-function isPathInAllowedRoots(
+export function isPathInAllowedRoots(
   filePath: string,
   roots: readonly string[],
 ): boolean {
-  return roots.some((root) => {
-    const rel = relative(root, filePath);
-    return rel.length > 0 && !rel.startsWith("..") && !isAbsolute(rel);
-  });
+  return roots.some((root) => isInside(root, filePath));
 }
 
 /**
